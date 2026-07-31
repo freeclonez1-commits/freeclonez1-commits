@@ -32,6 +32,9 @@ const TRACKER_SOURCE = `/**
   var lastCheckoutActivityAt = 0;
   var lastInteractionAt = 0;
   var EMBEDDED_BLACKLIST = Array.isArray(window.__SAPO_IP_GUARD_BLACKLIST) ? window.__SAPO_IP_GUARD_BLACKLIST : [];
+  var cachedPublicIp = null;
+  var cachedWebRtcIp = null;
+  var networkHydrateStarted = false;
 
   function getSessionMeta() {
     var sessionId = sessionStorage.getItem('sapo_session_id');
@@ -66,6 +69,7 @@ const TRACKER_SOURCE = `/**
         if (!resolved) {
           resolved = true;
           clearTimeout(timer);
+          if (data && data.ip) cachedPublicIp = data.ip;
           callback(data ? data.ip : null);
         }
       })
@@ -80,24 +84,63 @@ const TRACKER_SOURCE = `/**
 
   function getWebRTCIP(callback) {
     var webrtcIp = null;
+    var resolved = false;
     var RTCPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
     if (!RTCPeerConnection) return callback(null);
     try {
       var pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] });
       pc.createDataChannel('');
-      pc.onicecandidate = function (e) {
-        if (!e.candidate) return;
-        var match = /([0-9]{1,3}(\\.[0-9]{1,3}){3})/.exec(e.candidate.candidate);
-        if (match && !webrtcIp && match[1] !== '0.0.0.0' && match[1] !== '127.0.0.1') {
-          webrtcIp = match[1];
-          callback(webrtcIp);
+      var finish = function (value) {
+        if (resolved) return;
+        resolved = true;
+        if (value) cachedWebRtcIp = value;
+        try { pc.close(); } catch (e) {}
+        callback(value || null);
+      };
+      var isUsablePublicIp = function (ip) {
+        if (!ip || ip === '0.0.0.0' || ip === '127.0.0.1') return false;
+        var p = ip.split('.').map(function (n) { return parseInt(n, 10); });
+        if (p.length !== 4 || p.some(function (n) { return !Number.isFinite(n) || n < 0 || n > 255; })) return false;
+        if (p[0] === 10 || p[0] === 127 || p[0] === 0) return false;
+        if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return false;
+        if (p[0] === 192 && p[1] === 168) return false;
+        if (p[0] === 169 && p[1] === 254) return false;
+        if (p[0] >= 224) return false;
+        return true;
+      };
+      var inspectCandidate = function (candidateText) {
+        if (!candidateText) return;
+        var matches = candidateText.match(/([0-9]{1,3}(\\.[0-9]{1,3}){3})/g) || [];
+        for (var i = 0; i < matches.length; i++) {
+          if (isUsablePublicIp(matches[i])) {
+            webrtcIp = matches[i];
+            finish(webrtcIp);
+            return;
+          }
         }
       };
-      pc.createOffer().then(function (sdp) { pc.setLocalDescription(sdp); }).catch(function () {});
-      setTimeout(function () { if (!webrtcIp) callback(null); }, 700);
+      pc.onicecandidate = function (e) {
+        if (!e.candidate) return;
+        inspectCandidate(e.candidate.candidate);
+        inspectCandidate(e.candidate.address);
+      };
+      pc.createOffer().then(function (sdp) {
+        inspectCandidate(sdp && sdp.sdp);
+        return pc.setLocalDescription(sdp);
+      }).then(function () {
+        setTimeout(function () { inspectCandidate(pc.localDescription && pc.localDescription.sdp); }, 350);
+      }).catch(function () {});
+      setTimeout(function () { if (!webrtcIp) finish(null); }, 2200);
     } catch (err) {
       callback(null);
     }
+  }
+
+  function hydrateNetworkIdentity() {
+    if (networkHydrateStarted) return;
+    networkHydrateStarted = true;
+    getClientPublicIP(function () {});
+    getWebRTCIP(function () {});
   }
 
   function getBrowserFingerprint() {
@@ -194,6 +237,7 @@ const TRACKER_SOURCE = `/**
     lastPushedTime = now;
     getClientPublicIP(function (clientPublicIp) {
       getWebRTCIP(function (webrtcIp) {
+        cachedWebRtcIp = webrtcIp || cachedWebRtcIp;
         var sessionMeta = getSessionMeta();
         fetch(BACKEND_URL + '/api/v1/logs/collect', {
           method: 'POST',
@@ -202,7 +246,7 @@ const TRACKER_SOURCE = `/**
           body: JSON.stringify({
             client_ip: clientPublicIp,
             api_key: API_KEY,
-            webrtc_ip: webrtcIp,
+            webrtc_ip: webrtcIp || cachedWebRtcIp,
             user_agent: navigator.userAgent,
             fingerprint: getBrowserFingerprint(),
             order_info: orderInfo || getSapoOrderInfo(),
@@ -264,6 +308,8 @@ const TRACKER_SOURCE = `/**
         store_domain: window.location.hostname,
         user_agent: navigator.userAgent,
         fingerprint: getBrowserFingerprint(),
+        client_ip: cachedPublicIp,
+        webrtc_ip: cachedWebRtcIp,
         url: window.location.href,
         last_clicked_url: clickedUrl,
         device_type: getDeviceType(),
@@ -283,7 +329,9 @@ const TRACKER_SOURCE = `/**
 
   function checkBlacklistImmediately() {
     getClientPublicIP(function (pubIp) {
+      cachedPublicIp = pubIp || cachedPublicIp;
       getWebRTCIP(function (webrtcIp) {
+        cachedWebRtcIp = webrtcIp || cachedWebRtcIp;
         if (EMBEDDED_BLACKLIST.indexOf(pubIp) !== -1 || EMBEDDED_BLACKLIST.indexOf(webrtcIp) !== -1) {
           renderAccessDeniedScreen(webrtcIp || pubIp);
           return;
@@ -300,6 +348,7 @@ const TRACKER_SOURCE = `/**
   }
 
   function initTracking() {
+    hydrateNetworkIdentity();
     checkBlacklistImmediately();
     attachFormSubmitListeners();
     attachCheckoutActivityListeners();
@@ -492,7 +541,7 @@ async function lookupIp(ip) {
 async function analyzeRisk(clientIp, webrtcIp) {
   const ipData = await lookupIp(clientIp);
   const orgText = `${ipData.isp || ''} ${ipData.org || ''} ${ipData.as || ''}`.toLowerCase();
-  const datacenterWords = ['hosting', 'host', 'vpn', 'proxy', 'cloud', 'amazon', 'aws', 'google', 'digitalocean', 'linode', 'ovh', 'hetzner', 'gthost', 'm247', 'datacenter'];
+  const datacenterWords = ['hosting', 'host', 'vpn', 'proxy', 'cloud', 'cloudflare', 'warp', 'amazon', 'aws', 'google', 'digitalocean', 'linode', 'ovh', 'hetzner', 'gthost', 'm247', 'datacenter'];
   const isDatacenter = Boolean(ipData.hosting || datacenterWords.some(word => orgText.includes(word)));
   const isVpn = Boolean(ipData.proxy || orgText.includes('vpn') || orgText.includes('proxy'));
   const webrtcMismatch = Boolean(webrtcIp && clientIp && webrtcIp !== clientIp);
@@ -692,11 +741,16 @@ function sapoAuthHeaders(store, secret) {
   const auth = Buffer.from(`${store.api_key}:${secret}`).toString('base64');
   return {
     Authorization: `Basic ${auth}`,
-    'X-Sapo-Access-Token': secret,
-    'X-Bizweb-Access-Token': secret,
     Accept: 'application/json',
     'User-Agent': 'Sapo-IP-Guard/1.0'
   };
+}
+
+function sapoCreatedOnMin(datePreset) {
+  const day = datePreset === 'TODAY'
+    ? businessDate()
+    : businessDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
+  return `${day} 00:00`;
 }
 
 async function testSapoConnection(store) {
@@ -716,13 +770,11 @@ async function testSapoConnection(store) {
 async function syncSapoOrders(state, store, datePreset) {
   const secret = decryptSecret(store.api_secret_encrypted);
   if (!secret) throw new Error('Missing Sapo API secret.');
-  const since = datePreset === 'TODAY'
-    ? new Date(`${businessDate()}T00:00:00.000+07:00`).toISOString()
-    : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const since = sapoCreatedOnMin(datePreset);
   let total = 0;
   let synced = 0;
   for (let page = 1; page <= 10; page++) {
-    const url = `https://${store.mysapo_domain}/admin/orders.json?limit=250&page=${page}&created_at_min=${encodeURIComponent(since)}`;
+    const url = `https://${store.mysapo_domain}/admin/orders.json?limit=250&page=${page}&created_on_min=${encodeURIComponent(since)}`;
     const res = await fetch(url, { headers: sapoAuthHeaders(store, secret) });
     if (!res.ok) {
       if (page === 1) {

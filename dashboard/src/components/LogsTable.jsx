@@ -68,6 +68,40 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
     return <Monitor className="w-3.5 h-3.5" />;
   };
 
+  const hasConnectionRisk = (log) => {
+    const reasons = Array.isArray(log.risk_reasons) ? log.risk_reasons.join(' ').toLowerCase() : '';
+    return Boolean(log.is_vpn || log.is_datacenter || reasons.includes('vpn') || reasons.includes('proxy') || reasons.includes('datacenter') || reasons.includes('hosting') || reasons.includes('cloudflare'));
+  };
+
+  const renderOriginIpBadge = (log, isHighRisk) => {
+    if (log.webrtc_ip) {
+      return (
+        <span className="font-mono font-black text-white bg-[#34C759] px-2.5 py-0.5 rounded-md flex items-center gap-1 shadow-sm">
+          🟢 {log.webrtc_ip} (IP GỐC THẬT)
+        </span>
+      );
+    }
+    if (isHighRisk && hasConnectionRisk(log)) {
+      return (
+        <span className="text-[#B45309] bg-[#FFF4E5] px-2 py-0.5 rounded text-[11px] font-bold border border-[#FF9500]/25">
+          ⚠️ WebRTC bị ẩn, đang chặn theo IP kết nối
+        </span>
+      );
+    }
+    if (isHighRisk) {
+      return (
+        <span className="text-[#FF9500] bg-[#FFF4E5] px-2 py-0.5 rounded text-[11px] font-bold border border-[#FF9500]/20">
+          ⚠️ Chưa có dữ liệu IP gốc
+        </span>
+      );
+    }
+    return (
+      <span className="text-[#86868B] font-medium text-[11px]">
+        🟢 Giống IP kết nối (không có dấu hiệu VPN)
+      </span>
+    );
+  };
+
   return (
     <div className="space-y-6 animate-fadeIn font-sans w-full">
       {/* Search & Filter Header Card */}
@@ -297,19 +331,7 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                           {/* Real WebRTC Leak IP Line */}
                           <div className="flex items-center gap-2 text-xs">
                             <span className="text-[#86868B] font-bold text-[11px] w-24 shrink-0">IP Gốc Thực tế:</span>
-                            {log.webrtc_ip ? (
-                              <span className="font-mono font-black text-white bg-[#34C759] px-2.5 py-0.5 rounded-md flex items-center gap-1 shadow-sm animate-pulse">
-                                🟢 {log.webrtc_ip} (IP GỐC THẬT)
-                              </span>
-                            ) : isHighRisk ? (
-                              <span className="text-[#FF9500] bg-[#FFF4E5] px-2 py-0.5 rounded text-[11px] font-bold border border-[#FF9500]/20">
-                                ⚠️ Fake IP VPN (Chưa bắt được WebRTC leak)
-                              </span>
-                            ) : (
-                              <span className="text-[#86868B] font-medium text-[11px]">
-                                🟢 Giống IP kết nối (Không dùng VPN)
-                              </span>
-                            )}
+                            {renderOriginIpBadge(log, isHighRisk)}
                           </div>
                         </div>
                       </td>
@@ -442,11 +464,9 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                 <div className="p-3 rounded-xl bg-white border border-[#E5E5EA] flex items-center justify-between">
                   <div>
                     <span className="text-[#86868B] font-bold block text-[11px]">2. IP GỐC THỰC TẾ (WEBRTC LEAK):</span>
-                    {selectedLog.webrtc_ip ? (
-                      <span className="font-mono font-black text-sm text-[#34C759]">🟢 {selectedLog.webrtc_ip} (IP THẬT GỐC)</span>
-                    ) : (
-                      <span className="text-[#86868B] text-[11px]">Giống IP kết nối hoặc chưa rò rỉ WebRTC</span>
-                    )}
+                    <div className="mt-1">
+                      {renderOriginIpBadge(selectedLog, selectedLog.risk_level === 'HIGH_RISK')}
+                    </div>
                   </div>
                 </div>
               </div>
