@@ -614,6 +614,9 @@ async function handleStores(event, state, method, parts, body) {
     await saveState(state);
     return json(200, { success: true, message: 'Da xoa store.' });
   }
+  if (method === 'POST' && parts[1] === 'test') {
+    return json(200, await testSapoConnection(store));
+  }
   if (method === 'POST' && parts[1] === 'sync') {
     const result = await syncSapoOrders(state, store, body?.datePreset || 'TODAY');
     await saveState(state);
@@ -685,26 +688,42 @@ function applySyncedOrder(log, orderInfo, orderCreatedAt) {
   if (duration !== null) log.session_duration_sec = duration;
 }
 
+function sapoAuthHeaders(store, secret) {
+  const auth = Buffer.from(`${store.api_key}:${secret}`).toString('base64');
+  return {
+    Authorization: `Basic ${auth}`,
+    'X-Sapo-Access-Token': secret,
+    'X-Bizweb-Access-Token': secret,
+    Accept: 'application/json',
+    'User-Agent': 'Sapo-IP-Guard/1.0'
+  };
+}
+
+async function testSapoConnection(store) {
+  const secret = decryptSecret(store.api_secret_encrypted);
+  if (!secret) throw new Error('Missing Sapo API secret.');
+  const url = `https://${store.mysapo_domain}/admin/orders/count.json`;
+  const res = await fetch(url, { headers: sapoAuthHeaders(store, secret) });
+  if (!res.ok) {
+    if (res.status === 401) {
+      throw new Error('Sapo tu choi xac thuc (401). API Key/API Secret hien tai khong phai cap Private App hop le, hoac app chua co quyen doc don hang.');
+    }
+    throw new Error(`Sapo API error ${res.status}`);
+  }
+  return { success: true, message: 'Ket noi Sapo thanh cong.' };
+}
+
 async function syncSapoOrders(state, store, datePreset) {
   const secret = decryptSecret(store.api_secret_encrypted);
   if (!secret) throw new Error('Missing Sapo API secret.');
   const since = datePreset === 'TODAY'
     ? new Date(`${businessDate()}T00:00:00.000+07:00`).toISOString()
     : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const auth = Buffer.from(`${store.api_key}:${secret}`).toString('base64');
   let total = 0;
   let synced = 0;
   for (let page = 1; page <= 10; page++) {
     const url = `https://${store.mysapo_domain}/admin/orders.json?limit=250&page=${page}&created_at_min=${encodeURIComponent(since)}`;
-    const res = await fetch(url, {
-      headers: {
-        Authorization: `Basic ${auth}`,
-        'X-Sapo-Access-Token': secret,
-        'X-Bizweb-Access-Token': secret,
-        Accept: 'application/json',
-        'User-Agent': 'Sapo-IP-Guard/1.0'
-      }
-    });
+    const res = await fetch(url, { headers: sapoAuthHeaders(store, secret) });
     if (!res.ok) {
       if (page === 1) {
         const detail = res.status === 401

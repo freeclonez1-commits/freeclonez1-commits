@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
-import { Plus, Edit2, Trash2, Store, CheckCircle, AlertCircle, Eye, EyeOff, Copy, Check } from 'lucide-react';
+import { Plus, Edit2, Trash2, Store, CheckCircle, AlertCircle, Eye, EyeOff, Copy, Check, LoaderCircle } from 'lucide-react';
 
-export default function StoreManager({ stores, onAddStore, onUpdateStore, onDeleteStore }) {
+export default function StoreManager({ stores, onAddStore, onUpdateStore, onDeleteStore, onTestStore }) {
   const [isAdding, setIsAdding] = useState(false);
   const [editingStore, setEditingStore] = useState(null);
   const [form, setForm] = useState({ store_name: '', mysapo_domain: '', api_key: '', api_secret: '' });
   const [showSecret, setShowSecret] = useState({});
   const [copiedKey, setCopiedKey] = useState(null);
+  const [testingStoreId, setTestingStoreId] = useState(null);
 
   const resetForm = () => { setForm({ store_name: '', mysapo_domain: '', api_key: '', api_secret: '' }); };
 
@@ -32,6 +33,15 @@ export default function StoreManager({ stores, onAddStore, onUpdateStore, onDele
     navigator.clipboard.writeText(text);
     setCopiedKey(key);
     setTimeout(() => setCopiedKey(null), 2000);
+  };
+
+  const handleTestConnection = async (id) => {
+    setTestingStoreId(id);
+    try {
+      await onTestStore(id);
+    } finally {
+      setTestingStoreId(null);
+    }
   };
 
   return (
@@ -136,11 +146,19 @@ export default function StoreManager({ stores, onAddStore, onUpdateStore, onDele
             </div>
 
             {store.api_key ? (
-              <div className="p-3 rounded-xl bg-[#F2F2F7] text-xs font-mono flex items-center justify-between">
-                <span className="text-[#34C759] font-bold flex items-center gap-1">
-                  <CheckCircle className="w-3.5 h-3.5" /> API Ok
+              <div className="p-3 rounded-xl bg-[#F2F2F7] text-xs flex items-center justify-between gap-3">
+                <span className="text-[#86868B] font-bold flex items-center gap-1 whitespace-nowrap">
+                  <AlertCircle className="w-3.5 h-3.5" /> Đã lưu API key
                 </span>
-                <span className="text-[#86868B]">{store.api_key.substring(0, 8)}...</span>
+                <button
+                  type="button"
+                  onClick={() => handleTestConnection(store.id)}
+                  disabled={testingStoreId === store.id}
+                  className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-[#E5E5EA] text-[#0071E3] hover:border-[#0071E3] font-bold transition-colors disabled:opacity-60"
+                >
+                  {testingStoreId === store.id ? <LoaderCircle className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle className="w-3.5 h-3.5" />}
+                  {testingStoreId === store.id ? 'Đang kiểm tra' : 'Kiểm tra Sapo'}
+                </button>
               </div>
             ) : (
               <div className="p-3 rounded-xl bg-[#FFF4E5] text-xs text-[#FF9500] font-medium flex items-center gap-1.5">

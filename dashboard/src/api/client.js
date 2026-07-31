@@ -33,6 +33,11 @@ export const syncStoreOrders = async (id, datePreset = 'TODAY') => {
   return res.data;
 };
 
+export const testStoreConnection = async (id) => {
+  const res = await axios.post(`${API_BASE}/stores/${id}/test`, {}, adminConfig());
+  return res.data;
+};
+
 export const getOverviewStats = async (params = {}) => {
   const res = await axios.get(`${API_BASE}/stats/overview`, { ...adminConfig(), params });
   return res.data;

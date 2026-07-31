@@ -15,6 +15,7 @@ import {
   updateStore,
   deleteStore,
   syncStoreOrders,
+  testStoreConnection,
   getOverviewStats,
   getChartStats,
   getLogs,
@@ -174,6 +175,21 @@ export default function App() {
       setNotice({ type: 'error', message: err.response?.data?.message || 'Đồng bộ đơn thất bại. Kiểm tra API Key và API Secret của cửa hàng.' });
     } finally {
       setIsSyncing(false);
+    }
+  };
+
+  const handleTestStoreConnection = async (id) => {
+    try {
+      const res = await testStoreConnection(id);
+      if (res.success) {
+        setNotice({ type: 'success', message: 'Kết nối Sapo thành công. Có thể đồng bộ đơn.' });
+        return true;
+      }
+      setNotice({ type: 'error', message: res.message || 'Không thể xác thực với Sapo.' });
+      return false;
+    } catch (err) {
+      setNotice({ type: 'error', message: err.response?.data?.message || 'Không thể xác thực với Sapo.' });
+      return false;
     }
   };
 
@@ -357,6 +373,7 @@ export default function App() {
               onAddStore={handleAddStore}
               onUpdateStore={handleUpdateStore}
               onDeleteStore={handleDeleteStore}
+              onTestStore={handleTestStoreConnection}
             />
           )}
 
