@@ -593,8 +593,13 @@ function allowCollection(ip) {
   return current.count <= COLLECT_MAX_PER_WINDOW;
 }
 
+function isKnownIp(ip) {
+  const value = String(ip || '').trim().toLowerCase();
+  return Boolean(value && value !== 'unknown' && value !== '0.0.0.0' && value !== '::');
+}
+
 async function lookupIp(ip) {
-  if (!ip || ip === 'unknown') return {};
+  if (!isKnownIp(ip)) return {};
   try {
     const res = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,city,isp,org,as,proxy,hosting`);
     const data = await res.json();
@@ -605,6 +610,16 @@ async function lookupIp(ip) {
 }
 
 async function analyzeRisk(clientIp, webrtcIp) {
+  if (!isKnownIp(clientIp)) {
+    return {
+      ipData: {},
+      isVpn: false,
+      isDatacenter: false,
+      webrtcMismatch: false,
+      riskLevel: 'UNKNOWN',
+      riskReasons: ['No usable IP captured']
+    };
+  }
   const ipData = await lookupIp(clientIp);
   const orgText = `${ipData.isp || ''} ${ipData.org || ''} ${ipData.as || ''}`.toLowerCase();
   const datacenterWords = ['hosting', 'host', 'vpn', 'proxy', 'cloud', 'cloudflare', 'warp', 'amazon', 'aws', 'google', 'digitalocean', 'linode', 'ovh', 'hetzner', 'gthost', 'm247', 'datacenter'];
@@ -658,7 +673,8 @@ function filterLogs(logs, query) {
 
 function formatDuration(seconds) {
   if (seconds === null || seconds === undefined) return 'Chua bat duoc phien';
-  const safeSeconds = Math.max(1, Math.round(seconds));
+  const safeSeconds = Math.max(1, Math.round(Number(seconds)));
+  if (!Number.isFinite(safeSeconds) || safeSeconds > 24 * 60 * 60) return 'Chua bat duoc phien';
   if (safeSeconds < 15) return `${safeSeconds} giay (Dat cuc nhanh)`;
   if (safeSeconds < 60) return `${safeSeconds} giay`;
   const mins = Math.floor(safeSeconds / 60);
@@ -755,6 +771,12 @@ function parseSapoOrder(order) {
   };
 }
 
+function sapoOrderClientIp(order) {
+  const value = order?.client_details?.browser_ip || order?.browser_ip || order?.client_ip || '';
+  const normalized = String(value || '').trim();
+  return isKnownIp(normalized) ? normalized : 'unknown';
+}
+
 function normalizeContact(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -794,17 +816,35 @@ function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt) {
 }
 
 function sessionDurationToOrder(sessionStartAt, orderCreatedAt) {
+  if (!sessionStartAt || !orderCreatedAt) return null;
   const start = new Date(sessionStartAt).getTime();
   const end = new Date(orderCreatedAt).getTime();
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
-  return Math.max(1, Math.round((end - start) / 1000));
+  const seconds = Math.max(1, Math.round((end - start) / 1000));
+  return seconds <= 24 * 60 * 60 ? seconds : null;
 }
 
 function applySyncedOrder(log, orderInfo, orderCreatedAt) {
   log.order_info = JSON.stringify(orderInfo);
   log.created_at = new Date(orderCreatedAt).toISOString();
   const duration = sessionDurationToOrder(log.session_start_at, orderCreatedAt);
-  if (duration !== null) log.session_duration_sec = duration;
+  log.session_duration_sec = duration;
+}
+
+async function applyIpAnalysis(log, clientIp, webrtcIp, extraReasons = []) {
+  const analysis = await analyzeRisk(clientIp, webrtcIp);
+  log.client_ip = isKnownIp(clientIp) ? clientIp : 'unknown';
+  log.webrtc_ip = isKnownIp(webrtcIp) ? webrtcIp : null;
+  log.country = analysis.ipData.country || 'Unknown';
+  log.country_code = analysis.ipData.countryCode || 'XX';
+  log.city = analysis.ipData.city || 'Unknown';
+  log.isp = analysis.ipData.isp || 'Unknown';
+  log.org = analysis.ipData.org || 'Unknown';
+  log.is_vpn = analysis.isVpn;
+  log.is_datacenter = analysis.isDatacenter;
+  log.webrtc_mismatch = analysis.webrtcMismatch;
+  log.risk_level = analysis.riskLevel;
+  log.risk_reasons = JSON.stringify([...analysis.riskReasons, ...extraReasons]);
 }
 
 function sapoAuthHeaders(store, secret) {
@@ -885,30 +925,35 @@ async function syncSapoOrders(state, store, datePreset) {
       const orderInfo = parseSapoOrder(order);
       if (!orderInfo.order_id) continue;
       const createdAt = order.created_on || order.created_at || new Date().toISOString();
+      const orderClientIp = sapoOrderClientIp(order);
       const existing = state.logs.find(log => log.store_id === store.id && isSameOrder(log, orderInfo));
       const trackedVisit = existing || findTrackedVisitForOrder(state, store.id, orderInfo, createdAt);
       if (trackedVisit) {
         applySyncedOrder(trackedVisit, orderInfo, createdAt);
+        if (!isKnownIp(trackedVisit.client_ip) && isKnownIp(orderClientIp)) {
+          await applyIpAnalysis(trackedVisit, orderClientIp, trackedVisit.webrtc_ip, ['Synced browser IP from Sapo Admin API']);
+        }
       } else {
+        const analysis = await analyzeRisk(orderClientIp, null);
         state.logs.unshift({
           id: state.autoLogId++,
           store_id: store.id,
           store_domain: store.mysapo_domain,
-          client_ip: 'unknown',
+          client_ip: isKnownIp(orderClientIp) ? orderClientIp : 'unknown',
           webrtc_ip: null,
           user_agent: 'Sapo API Sync',
           fingerprint: 'FP-SAPO-SYNCED',
           order_info: JSON.stringify(orderInfo),
-          country: 'Unknown',
-          country_code: 'XX',
-          city: 'Unknown',
-          isp: 'Unknown',
-          org: 'Unknown',
-          is_vpn: false,
-          is_datacenter: false,
-          webrtc_mismatch: false,
-          risk_level: 'CLEAN',
-          risk_reasons: JSON.stringify(['Synced from Sapo Admin API']),
+          country: analysis.ipData.country || 'Unknown',
+          country_code: analysis.ipData.countryCode || 'XX',
+          city: analysis.ipData.city || 'Unknown',
+          isp: analysis.ipData.isp || 'Unknown',
+          org: analysis.ipData.org || 'Unknown',
+          is_vpn: analysis.isVpn,
+          is_datacenter: analysis.isDatacenter,
+          webrtc_mismatch: analysis.webrtcMismatch,
+          risk_level: analysis.riskLevel,
+          risk_reasons: JSON.stringify([...analysis.riskReasons, 'Synced from Sapo Admin API']),
           trigger_event: 'sapo_sync',
           session_id: null,
           session_start_at: null,

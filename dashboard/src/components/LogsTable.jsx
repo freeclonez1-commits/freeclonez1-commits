@@ -5,6 +5,16 @@ import { businessDate, businessDateDaysAgo } from '../utils/dates';
 export default function LogsTable({ logs, pagination, filters, setFilters, onAddToBlacklist, onRemoveFromBlacklist, onDeleteLog }) {
   const [selectedLog, setSelectedLog] = useState(null);
   const ordersOnlyFilter = filters.orders_only !== false;
+  const isKnownIp = (ip) => {
+    const value = String(ip || '').trim().toLowerCase();
+    return Boolean(value && value !== 'unknown' && value !== '0.0.0.0' && value !== '::');
+  };
+  const isUnknownLog = (log) => log?.risk_level === 'UNKNOWN' || !isKnownIp(log?.client_ip);
+  const compactIp = (ip) => {
+    const value = String(ip || 'unknown').trim();
+    if (value.includes(':') && value.length > 24) return `${value.slice(0, 22)}...`;
+    return value;
+  };
 
   const todayStr = businessDate();
   const isTodayDefault = filters.startDate === todayStr && filters.endDate === todayStr;
@@ -34,6 +44,10 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
   };
 
   const handleBlockIp = async (log) => {
+    if (!isKnownIp(log.client_ip)) {
+      window.alert('Chưa có IP hợp lệ để chặn. Hãy đồng bộ lại đơn hoặc chờ tracker ghi nhận phiên truy cập.');
+      return false;
+    }
     if (!window.confirm(`Block ${log.client_ip}${log.webrtc_ip && log.webrtc_ip !== log.client_ip ? ` and ${log.webrtc_ip}` : ''}?`)) return false;
     const reason = `Chặn IP truy cập website từ Đơn ${log.order_info?.order_id || log.id} (${log.isp})`;
     const blockedClientIp = await onAddToBlacklist(log.client_ip, reason);
@@ -45,6 +59,7 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
   };
 
   const handleUnblockIp = async (log) => {
+    if (!isKnownIp(log.client_ip)) return false;
     if (!window.confirm(`Unblock ${log.client_ip}?`)) return false;
     const unblockedClientIp = await onRemoveFromBlacklist(log.client_ip);
     if (!unblockedClientIp) return false;
@@ -68,12 +83,12 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
     return <Monitor className="w-3.5 h-3.5" />;
   };
 
-  const renderOriginIpBadge = (log) => {
+  const renderOriginIpBadge = (log, { full = false } = {}) => {
     if (log.webrtc_ip && log.webrtc_status !== 'stale') {
       const isDifferent = log.webrtc_ip !== log.client_ip;
       return (
-        <span className={`font-mono font-black px-2.5 py-0.5 rounded-md flex items-center gap-1 border ${isDifferent ? 'text-white bg-[#34C759] border-[#34C759]' : 'text-[#147A3D] bg-[#E9F8EF] border-[#34C759]/30'}`}>
-          {log.webrtc_ip}
+        <span title={log.webrtc_ip} className={`font-mono font-black px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all ${isDifferent ? 'text-white bg-[#34C759] border-[#34C759]' : 'text-[#147A3D] bg-[#E9F8EF] border-[#34C759]/30'}`}>
+          {full ? log.webrtc_ip : compactIp(log.webrtc_ip)}
           <span className="font-sans text-[10px] font-semibold">
             {isDifferent ? '(khác IP kết nối)' : '(trùng IP kết nối)'}
           </span>
@@ -225,6 +240,7 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
               {displayedLogs && displayedLogs.length > 0 ? (
                 displayedLogs.map((log) => {
                   const isHighRisk = log.risk_level === 'HIGH_RISK';
+                  const isUnknown = isUnknownLog(log);
                   const order = log.order_info;
                   const isBlocked = log.is_blacklisted;
 
@@ -291,14 +307,19 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                           {/* Connection / Fake IP Line */}
                           <div className="flex items-center gap-2 text-xs">
                             <span className="text-[#86868B] font-bold text-[11px] w-24 shrink-0">IP Kết nối:</span>
-                            {isHighRisk ? (
-                              <span className="font-mono font-extrabold text-[#FF3B30] bg-[#FF3B30]/10 px-2.5 py-0.5 rounded-md border border-[#FF3B30]/30 flex items-center gap-1">
-                                🔴 {log.client_ip}
+                            {isUnknown ? (
+                              <span className="font-mono font-extrabold text-[#86868B] bg-[#F2F2F7] px-2.5 py-0.5 rounded-md border border-[#D1D1D6] flex items-center gap-1">
+                                — Chưa có IP
+                                <span className="text-[10px] text-[#86868B] font-sans font-normal ml-1">(Sapo chưa trả browser_ip)</span>
+                              </span>
+                            ) : isHighRisk ? (
+                              <span title={log.client_ip} className="font-mono font-extrabold text-[#FF3B30] bg-[#FF3B30]/10 px-2.5 py-0.5 rounded-md border border-[#FF3B30]/30 flex items-center gap-1">
+                                🔴 {compactIp(log.client_ip)}
                                 <span className="text-[10px] text-[#FF3B30] font-sans font-normal ml-1">({log.country || 'US'} · {log.isp})</span>
                               </span>
                             ) : (
-                              <span className="font-mono font-extrabold text-[#34C759] bg-[#34C759]/10 px-2.5 py-0.5 rounded-md border border-[#34C759]/30 flex items-center gap-1">
-                                🟢 {log.client_ip}
+                              <span title={log.client_ip} className="font-mono font-extrabold text-[#34C759] bg-[#34C759]/10 px-2.5 py-0.5 rounded-md border border-[#34C759]/30 flex items-center gap-1">
+                                🟢 {compactIp(log.client_ip)}
                                 <span className="text-[10px] text-[#34C759] font-sans font-normal ml-1">({log.country || 'VN'} · {log.isp})</span>
                               </span>
                             )}
@@ -327,6 +348,11 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                           <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-black bg-[#FF3B30] text-white shadow-sm">
                             <Ban className="w-4 h-4" />
                             <span>🚫 ĐÃ CHẶN TRUY CẬP</span>
+                          </span>
+                        ) : isUnknown ? (
+                          <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold bg-[#F2F2F7] text-[#86868B] border border-[#D1D1D6]">
+                            <AlertTriangle className="w-4 h-4" />
+                            <span>CHƯA CÓ IP</span>
                           </span>
                         ) : isHighRisk ? (
                           <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-black bg-[#FF3B30]/10 text-[#FF3B30] border border-[#FF3B30]/30 shadow-sm">
@@ -364,8 +390,13 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                           ) : (
                             <button
                               onClick={() => handleBlockIp(log)}
-                              className="flex items-center gap-1 px-3.5 py-1.5 text-xs font-bold bg-[#FF3B30]/10 hover:bg-[#FF3B30] text-[#FF3B30] hover:text-white rounded-full transition-all cursor-pointer"
-                              title="Chặn IP này không cho truy cập website Sapo nữa"
+                              disabled={isUnknown}
+                              className={`flex items-center gap-1 px-3.5 py-1.5 text-xs font-bold rounded-full transition-all ${
+                                isUnknown
+                                  ? 'bg-[#F2F2F7] text-[#AEAEB2] cursor-not-allowed'
+                                  : 'bg-[#FF3B30]/10 hover:bg-[#FF3B30] text-[#FF3B30] hover:text-white cursor-pointer'
+                              }`}
+                              title={isUnknown ? 'Chưa có IP hợp lệ để chặn' : 'Chặn IP này không cho truy cập website Sapo nữa'}
                             >
                               <Ban className="w-3.5 h-3.5" />
                               <span>Chặn IP</span>
@@ -402,9 +433,9 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
             {/* Modal Header */}
             <div className="flex items-center gap-3">
               <div className={`w-11 h-11 rounded-2xl flex items-center justify-center text-white ${
-                selectedLog.is_blacklisted ? 'bg-[#FF3B30]' : (selectedLog.risk_level === 'HIGH_RISK' ? 'bg-[#FF3B30]' : 'bg-[#34C759]')
+                selectedLog.is_blacklisted ? 'bg-[#FF3B30]' : (selectedLog.risk_level === 'HIGH_RISK' ? 'bg-[#FF3B30]' : (isUnknownLog(selectedLog) ? 'bg-[#86868B]' : 'bg-[#34C759]'))
               }`}>
-                {selectedLog.risk_level === 'HIGH_RISK' ? <ShieldAlert className="w-6 h-6" /> : <ShieldCheck className="w-6 h-6" />}
+                {selectedLog.risk_level === 'HIGH_RISK' ? <ShieldAlert className="w-6 h-6" /> : (isUnknownLog(selectedLog) ? <AlertTriangle className="w-6 h-6" /> : <ShieldCheck className="w-6 h-6" />)}
               </div>
               <div>
                 <h3 className="text-lg font-extrabold text-[#1D1D1F]">
@@ -439,7 +470,9 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                 <div className="p-3 rounded-xl bg-white border border-[#E5E5EA] flex items-center justify-between">
                   <div>
                     <span className="text-[#86868B] font-bold block text-[11px]">1. IP KẾT NỐI (IP FAKE / VPN):</span>
-                    <span className="font-mono font-extrabold text-sm text-[#FF3B30]">{selectedLog.client_ip}</span>
+                    <span className={`font-mono font-extrabold text-sm break-all ${isUnknownLog(selectedLog) ? 'text-[#86868B]' : (selectedLog.risk_level === 'HIGH_RISK' ? 'text-[#FF3B30]' : 'text-[#34C759]')}`}>
+                      {isUnknownLog(selectedLog) ? 'Chưa có IP hợp lệ' : selectedLog.client_ip}
+                    </span>
                   </div>
                   <span className="text-right text-[11px] text-[#86868B]">
                     <strong>{selectedLog.isp}</strong><br />{selectedLog.country} ({selectedLog.city})
@@ -450,7 +483,7 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                   <div>
                     <span className="text-[#86868B] font-bold block text-[11px]">2. IP PUBLIC QUA WEBRTC:</span>
                     <div className="mt-1">
-                      {renderOriginIpBadge(selectedLog)}
+                      {renderOriginIpBadge(selectedLog, { full: true })}
                     </div>
                   </div>
                 </div>
@@ -490,10 +523,15 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
               ) : (
                 <button
                   onClick={() => handleBlockIp(selectedLog).then(success => success && setSelectedLog(null))}
-                  className="w-full py-2.5 bg-[#FF3B30] hover:bg-[#E03126] text-white text-xs font-bold rounded-full transition-all shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
+                  disabled={isUnknownLog(selectedLog)}
+                  className={`w-full py-2.5 text-xs font-bold rounded-full transition-all shadow-sm flex items-center justify-center gap-1.5 ${
+                    isUnknownLog(selectedLog)
+                      ? 'bg-[#F2F2F7] text-[#AEAEB2] cursor-not-allowed'
+                      : 'bg-[#FF3B30] hover:bg-[#E03126] text-white cursor-pointer'
+                  }`}
                 >
                   <Ban className="w-4 h-4" />
-                  <span>Chặn IP này không cho truy cập Sapo ({selectedLog.client_ip})</span>
+                  <span>{isUnknownLog(selectedLog) ? 'Chưa có IP hợp lệ để chặn' : `Chặn IP này không cho truy cập Sapo (${selectedLog.client_ip})`}</span>
                 </button>
               )}
             </div>
