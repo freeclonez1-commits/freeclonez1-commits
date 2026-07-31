@@ -989,8 +989,21 @@ async function handleLogs(event, state, method, parts, query, body) {
     const page = Math.max(1, Number(query.page || 1));
     const limit = Math.min(20, Math.max(1, Number(query.limit || 20)));
     const filtered = filterLogs(state.logs, query);
+    const orderTotal = filterLogs(state.logs, { ...query, orders_only: 'true' }).length;
+    const allTotal = filterLogs(state.logs, { ...query, orders_only: 'false' }).length;
     const rows = filtered.slice((page - 1) * limit, page * limit).map(row => decorateLog(row, state));
-    return json(200, { success: true, data: rows, pagination: { page, limit, total: filtered.length, totalPages: Math.ceil(filtered.length / limit) } });
+    return json(200, {
+      success: true,
+      data: rows,
+      pagination: {
+        page,
+        limit,
+        total: filtered.length,
+        totalPages: Math.ceil(filtered.length / limit),
+        orderTotal,
+        allTotal
+      }
+    });
   }
   if (method === 'DELETE' && parts[0]) {
     const id = Number(parts[0]);

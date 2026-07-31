@@ -115,7 +115,7 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
               }`}
             >
               <ShoppingCart className="w-3.5 h-3.5" />
-              <span>🛒 Chỉ Đơn Hàng ({logs ? logs.filter(l => l.order_info !== null).length : 0})</span>
+              <span>🛒 Chỉ Đơn Hàng ({pagination?.orderTotal ?? (logs ? logs.filter(l => l.order_info !== null).length : 0)})</span>
             </button>
             <button
               onClick={() => handleViewMode(false)}
