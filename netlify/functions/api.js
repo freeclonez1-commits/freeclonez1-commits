@@ -672,14 +672,14 @@ function filterLogs(logs, query) {
 }
 
 function formatDuration(seconds) {
-  if (seconds === null || seconds === undefined) return 'Chua bat duoc phien';
+  if (seconds === null || seconds === undefined) return 'Chưa bắt được phiên';
   const safeSeconds = Math.max(1, Math.round(Number(seconds)));
-  if (!Number.isFinite(safeSeconds) || safeSeconds > 24 * 60 * 60) return 'Chua bat duoc phien';
-  if (safeSeconds < 15) return `${safeSeconds} giay (Dat cuc nhanh)`;
-  if (safeSeconds < 60) return `${safeSeconds} giay`;
+  if (!Number.isFinite(safeSeconds) || safeSeconds > 24 * 60 * 60) return 'Chưa bắt được phiên';
+  if (safeSeconds < 15) return `${safeSeconds} giây (Đặt cực nhanh)`;
+  if (safeSeconds < 60) return `${safeSeconds} giây`;
   const mins = Math.floor(safeSeconds / 60);
   const secs = safeSeconds % 60;
-  return `${mins} phut${secs > 0 ? ` ${secs}s` : ''}`;
+  return `${mins} phút${secs > 0 ? ` ${secs}s` : ''}`;
 }
 
 function decorateLog(row, state) {
@@ -690,7 +690,7 @@ function decorateLog(row, state) {
   return {
     ...row,
     is_blacklisted: blacklisted.has(row.client_ip) || blacklisted.has(row.webrtc_ip),
-    time_to_order: timeToOrder || (hasOrder ? 'Chua bat duoc phien' : null),
+    time_to_order: timeToOrder || (hasOrder ? 'Chưa bắt được phiên' : null),
     order_info: hasOrder ? safeJsonParse(row.order_info, null) : null,
     risk_reasons: row.risk_reasons ? safeJsonParse(row.risk_reasons, []) : []
   };
