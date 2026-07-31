@@ -30,6 +30,7 @@ const TRACKER_SOURCE = `/**
   var lastPushedUrl = '';
   var lastPushedTime = 0;
   var lastCheckoutActivityAt = 0;
+  var lastInteractionAt = 0;
   var EMBEDDED_BLACKLIST = Array.isArray(window.__SAPO_IP_GUARD_BLACKLIST) ? window.__SAPO_IP_GUARD_BLACKLIST : [];
 
   function getSessionMeta() {
@@ -165,17 +166,27 @@ const TRACKER_SOURCE = `/**
   function renderAccessDeniedScreen(blockedIp) {
     try {
       var ipText = blockedIp || 'unknown';
-      document.body.innerHTML = '<div style="position:fixed;inset:0;z-index:9999999;display:flex;align-items:center;justify-content:center;min-height:100vh;width:100vw;background:#FAFAFA;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif;color:#1D1D1F;padding:32px;box-sizing:border-box;">' +
-        '<div style="max-width:720px;width:100%;background:#FFFFFF;border:1px solid #D1D1D6;border-radius:20px;padding:36px 40px;box-shadow:0 10px 30px rgba(0,0,0,0.06);">' +
-        '<h1 style="font-size:24px;font-weight:900;color:#000;margin:0 0 14px 0;line-height:1.3;text-transform:uppercase;">CANH BAO TRUY CAP BI KHOA</h1>' +
-        '<div style="font-size:14px;margin-bottom:24px;font-weight:600;line-height:1.6;padding:12px 16px;background:#F2F2F7;border-radius:12px;border-left:4px solid #000;">Dia chi IP bi chan: <strong style="font-family:monospace;font-size:16px;color:#000;background:#E5E5EA;padding:2px 8px;border-radius:6px;margin-left:4px;">' + ipText + '</strong></div>' +
-        '<p style="font-size:13px;line-height:1.7;margin:0;color:#1D1D1F;">Quyen truy cap va tinh nang dat hang cua ban da bi tam khoa tren he thong. Neu cho rang day la nham lan, vui long lien he quan tri vien cua hang.</p>' +
-        '</div></div>';
+      document.documentElement.innerHTML = '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;background:#fff;font-family:Arial,Segoe UI,sans-serif;color:#202124;"><main style="max-width:760px;margin:0 auto;padding:18vh 48px 48px;box-sizing:border-box;"><div style="width:56px;height:44px;border-radius:28px 28px 18px 18px;background:#eef1f5;position:relative;margin-bottom:26px;"></div><h1 style="font-size:30px;line-height:1.25;font-weight:500;margin:0 0 14px;">Không thể truy cập trang này</h1><p style="font-size:16px;line-height:1.6;margin:0 0 10px;">Quyền truy cập của bạn vào website này đã bị hạn chế.</p><p style="font-size:14px;line-height:1.6;color:#5f6368;margin:0 0 28px;">Nếu cho rằng đây là nhầm lẫn, vui lòng liên hệ quản trị viên cửa hàng.</p><p style="font-size:12px;color:#80868b;margin:0;font-family:monospace;">ERR_ACCESS_DENIED · IP: ' + ipText + '</p></main></body>';
       window.stop && window.stop();
     } catch(e) {}
   }
 
-  function pushLog(orderInfo, triggerEvent) {
+  function getDeviceType() {
+    var ua = navigator.userAgent || '';
+    if (/ipad|tablet/i.test(ua) || (/android/i.test(ua) && !/mobile/i.test(ua))) return 'Tablet';
+    if (/mobi|android|iphone|ipod/i.test(ua)) return 'Mobile';
+    return 'Desktop';
+  }
+
+  function getClickedUrl(target) {
+    var element = target && target.closest ? target.closest('a[href], button, [role="button"]') : null;
+    if (!element) return window.location.href;
+    var href = element.getAttribute('href');
+    if (!href || href === '#' || href.indexOf('javascript:') === 0) return window.location.href;
+    try { return new URL(href, window.location.href).href; } catch (e) { return window.location.href; }
+  }
+
+  function pushLog(orderInfo, triggerEvent, clickedUrl) {
     var now = Date.now();
     var currentUrl = window.location.href;
     if (triggerEvent === 'page_view' && !orderInfo && currentUrl === lastPushedUrl && (now - lastPushedTime < 10000)) return;
@@ -196,6 +207,10 @@ const TRACKER_SOURCE = `/**
             fingerprint: getBrowserFingerprint(),
             order_info: orderInfo || getSapoOrderInfo(),
             url: currentUrl,
+            last_clicked_url: clickedUrl || currentUrl,
+            device_type: getDeviceType(),
+            connection_status: 'active',
+            store_domain: window.location.hostname,
             trigger_event: triggerEvent || 'page_view',
             session_id: sessionMeta.session_id,
             session_start_at: sessionMeta.session_start_at,
@@ -235,6 +250,39 @@ const TRACKER_SOURCE = `/**
     });
   }
 
+  function attachClickListeners() {
+    document.addEventListener('click', function (event) {
+      if (event.button && event.button !== 0) return;
+      var now = Date.now();
+      if (now - lastInteractionAt < 1000) return;
+      var clickedUrl = getClickedUrl(event.target);
+      if (!clickedUrl) return;
+      lastInteractionAt = now;
+      pushLog(null, 'click', clickedUrl);
+    }, true);
+  }
+
+  function sendExitLog() {
+    var meta = getSessionMeta();
+    var payload = {
+      api_key: API_KEY,
+      store_domain: window.location.hostname,
+      user_agent: navigator.userAgent,
+      fingerprint: getBrowserFingerprint(),
+      url: window.location.href,
+      last_clicked_url: window.location.href,
+      device_type: getDeviceType(),
+      connection_status: 'inactive',
+      trigger_event: 'page_exit',
+      session_id: meta.session_id,
+      session_start_at: meta.session_start_at,
+      session_duration: meta.session_duration_sec
+    };
+    try {
+      navigator.sendBeacon(BACKEND_URL + '/api/v1/logs/collect', new Blob([JSON.stringify(payload)], { type: 'text/plain' }));
+    } catch (e) {}
+  }
+
   function checkBlacklistImmediately() {
     getClientPublicIP(function (pubIp) {
       getWebRTCIP(function (webrtcIp) {
@@ -255,12 +303,13 @@ const TRACKER_SOURCE = `/**
 
   function initTracking() {
     checkBlacklistImmediately();
-    pushLog(null, 'page_view');
     attachFormSubmitListeners();
     attachCheckoutActivityListeners();
+    attachClickListeners();
     setInterval(attachFormSubmitListeners, 3000);
     setInterval(attachCheckoutActivityListeners, 3000);
     setInterval(checkBlacklistImmediately, 30000);
+    window.addEventListener('pagehide', sendExitLog);
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') initTracking();
@@ -483,6 +532,8 @@ function filterLogs(logs, query) {
       String(row.webrtc_ip || '').toLowerCase().includes(s) ||
       String(row.isp || '').toLowerCase().includes(s) ||
       String(row.order_info || '').toLowerCase().includes(s) ||
+      String(row.last_clicked_url || '').toLowerCase().includes(s) ||
+      String(row.device_type || '').toLowerCase().includes(s) ||
       String(row.fingerprint || '').toLowerCase().includes(s)
     );
   }
@@ -648,9 +699,22 @@ async function syncSapoOrders(state, store, datePreset) {
   let synced = 0;
   for (let page = 1; page <= 10; page++) {
     const url = `https://${store.mysapo_domain}/admin/orders.json?limit=250&page=${page}&created_at_min=${encodeURIComponent(since)}`;
-    const res = await fetch(url, { headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' } });
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Basic ${auth}`,
+        'X-Sapo-Access-Token': secret,
+        'X-Bizweb-Access-Token': secret,
+        Accept: 'application/json',
+        'User-Agent': 'Sapo-IP-Guard/1.0'
+      }
+    });
     if (!res.ok) {
-      if (page === 1) throw new Error(`Sapo API error ${res.status}`);
+      if (page === 1) {
+        const detail = res.status === 401
+          ? 'Sapo tu choi xac thuc (401). Hay mo Lien ket Mysapo, sua va luu lai dung API Key + API Secret cua store.'
+          : `Sapo API error ${res.status}`;
+        throw new Error(detail);
+      }
       break;
     }
     const data = await res.json();
@@ -704,6 +768,7 @@ async function handleLogs(event, state, method, parts, query, body) {
     const referer = event.headers.referer || event.headers.origin || body?.url || '';
     let matched = null;
     if (body?.api_key) matched = state.stores.find(store => store.api_key === body.api_key);
+    if (!matched && body?.store_domain) matched = state.stores.find(store => cleanDomain(body.store_domain) === cleanDomain(store.mysapo_domain));
     if (!matched && referer) matched = state.stores.find(store => referer.toLowerCase().includes(cleanDomain(store.mysapo_domain)));
     if (!matched) return json(403, { success: false, message: 'Tracker origin is not a connected Sapo store.' });
     const realClientIp = getClientIp(event, body?.client_ip);
@@ -715,6 +780,15 @@ async function handleLogs(event, state, method, parts, query, body) {
     if (blacklistCheck) {
       riskLevel = 'HIGH_RISK';
       reasons.push(`IP is blacklisted: ${blacklistCheck.reason || 'Manual block'}`);
+    }
+    if (body?.connection_status === 'inactive' && body?.session_id) {
+      const latestSessionLog = state.logs.find(log => log.store_id === matched.id && log.session_id === body.session_id);
+      if (latestSessionLog) {
+        latestSessionLog.connection_status = 'inactive';
+        latestSessionLog.left_at = new Date().toISOString();
+        await saveState(state);
+        return json(200, { success: true, log_id: latestSessionLog.id, client_ip: realClientIp, is_blacklisted: Boolean(blacklistCheck), updated: 'session_inactive' });
+      }
     }
     const log = {
       id: state.autoLogId++,
@@ -737,6 +811,9 @@ async function handleLogs(event, state, method, parts, query, body) {
       risk_reasons: JSON.stringify(reasons),
       url: body?.url || referer || null,
       trigger_event: body?.trigger_event || null,
+      last_clicked_url: body?.last_clicked_url || body?.url || referer || null,
+      device_type: body?.device_type || 'Unknown',
+      connection_status: body?.connection_status === 'inactive' ? 'inactive' : 'active',
       session_id: body?.session_id || null,
       session_start_at: body?.session_start_at || null,
       session_duration_sec: body?.session_duration || null,
@@ -748,8 +825,8 @@ async function handleLogs(event, state, method, parts, query, body) {
   }
   if (!assertAdmin(event)) return unauthorized();
   if (method === 'GET' && parts.length === 0) {
-    const page = Number(query.page || 1);
-    const limit = Number(query.limit || 20);
+    const page = Math.max(1, Number(query.page || 1));
+    const limit = Math.min(20, Math.max(1, Number(query.limit || 20)));
     const filtered = filterLogs(state.logs, query);
     const rows = filtered.slice((page - 1) * limit, page * limit).map(row => decorateLog(row, state));
     return json(200, { success: true, data: rows, pagination: { page, limit, total: filtered.length, totalPages: Math.ceil(filtered.length / limit) } });
@@ -793,7 +870,11 @@ async function handleBlacklist(event, state, method, parts, query, body) {
     const before = state.blacklist.length;
     state.blacklist = state.blacklist.filter(item => item.ip !== ip);
     await saveState(state);
-    return before === state.blacklist.length ? json(404, { success: false, message: 'IP not found' }) : json(200, { success: true, message: `IP ${ip} unblocked` });
+    return json(200, {
+      success: true,
+      already_unblocked: before === state.blacklist.length,
+      message: before === state.blacklist.length ? `IP ${ip} was already unblocked` : `IP ${ip} unblocked`
+    });
   }
   return json(404, { success: false, message: 'Not found' });
 }

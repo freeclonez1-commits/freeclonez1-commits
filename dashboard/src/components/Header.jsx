@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldCheck, RefreshCw, Store, DownloadCloud, LockKeyhole } from 'lucide-react';
+import { ShieldCheck, Store, DownloadCloud, LockKeyhole } from 'lucide-react';
 
-export default function Header({ stores, selectedStoreId, onSelectStore, onRefresh, onSyncOrders, isRefreshing, isSyncing, onLock }) {
+export default function Header({ stores, selectedStoreId, onSelectStore, onSyncOrders, isSyncing, onLock }) {
   const [time, setTime] = useState(new Date().toLocaleTimeString('vi-VN'));
 
   useEffect(() => {
@@ -55,14 +55,6 @@ export default function Header({ stores, selectedStoreId, onSelectStore, onRefre
           <span>{isSyncing ? 'Đang đồng bộ...' : 'Đồng bộ đơn Sapo'}</span>
         </button>
 
-        {/* Refresh Button */}
-        <button
-          onClick={onRefresh}
-          className="shrink-0 flex items-center gap-2 px-3 md:px-4 py-1.5 text-xs font-bold bg-[#0071E3] hover:bg-[#0077ED] active:scale-95 text-white rounded-full shadow-sm transition-all cursor-pointer"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-          <span>Làm mới</span>
-        </button>
         <button onClick={onLock} title="Khóa dashboard" className="shrink-0 p-2 text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-[#E5E5EA] rounded-full"><LockKeyhole className="w-4 h-4" /></button>
       </div>
     </header>

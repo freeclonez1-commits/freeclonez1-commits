@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, AlertTriangle, ShieldCheck, ShieldAlert, Ban, Eye, X, Globe, Calendar, ShoppingCart, Wifi, Clock, CheckCircle2, Unlock } from 'lucide-react';
+import { Search, AlertTriangle, ShieldCheck, ShieldAlert, Ban, Eye, X, Globe, Calendar, ShoppingCart, Wifi, Clock, CheckCircle2, Unlock, Monitor, Smartphone, Tablet, MousePointer2, CircleOff } from 'lucide-react';
 import { businessDate, businessDateDaysAgo } from '../utils/dates';
 
 export default function LogsTable({ logs, pagination, filters, setFilters, onAddToBlacklist, onRemoveFromBlacklist, onDeleteLog }) {
@@ -60,7 +60,13 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
       return log.order_info !== null;
     }
     return true;
-  }) : [];
+  }).slice(0, 20) : [];
+
+  const renderDeviceIcon = (device) => {
+    if (device === 'Mobile') return <Smartphone className="w-3.5 h-3.5" />;
+    if (device === 'Tablet') return <Tablet className="w-3.5 h-3.5" />;
+    return <Monitor className="w-3.5 h-3.5" />;
+  };
 
   return (
     <div className="space-y-6 animate-fadeIn font-sans w-full">
@@ -188,9 +194,9 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
           <table className="w-full text-left border-collapse min-w-full">
             <thead>
               <tr className="border-b border-[#E5E5EA] text-[11px] font-bold text-[#86868B] uppercase tracking-wider bg-[#FAFAFC]">
-                <th className="py-4 px-6 w-48">Thời gian tạo đơn</th>
-                <th className="py-4 px-6 w-64">Mã đơn & Khách hàng</th>
-                <th className="py-4 px-6 w-60">Thời gian thao tác của User</th>
+                <th className="py-4 px-6 w-48">{ordersOnlyFilter ? 'Thời gian tạo đơn' : 'Thời gian hoạt động'}</th>
+                <th className="py-4 px-6 w-64">{ordersOnlyFilter ? 'Mã đơn & Khách hàng' : 'Hoạt động của khách'}</th>
+                <th className="py-4 px-6 w-60">{ordersOnlyFilter ? 'Thời gian thao tác của User' : 'URL tương tác cuối'}</th>
                 <th className="py-4 px-6">Phân tích Chi tiết IP (Fake IP vs IP Thật)</th>
                 <th className="py-4 px-6 w-44">Trạng thái Cảnh báo</th>
                 <th className="py-4 px-6 text-right w-48">Hành động Chặn IP</th>
@@ -233,7 +239,10 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                             )}
                           </div>
                         ) : (
-                          <span className="text-[#86868B] italic">Xem trang web</span>
+                          <span className="inline-flex items-center gap-1.5 text-[#1D1D1F] font-bold">
+                            {log.connection_status === 'inactive' ? <CircleOff className="w-3.5 h-3.5 text-[#86868B]" /> : <MousePointer2 className="w-3.5 h-3.5 text-[#0071E3]" />}
+                            {log.connection_status === 'inactive' ? 'Đã rời trang' : 'Đã tương tác'}
+                          </span>
                         )}
                       </td>
 
@@ -245,7 +254,15 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                             <span title="Ước tính từ phiên truy cập gần nhất; chỉ xác thực khi đơn có phiên checkout tương ứng.">⏱️ {log.time_to_order || 'Chưa bắt được phiên'}</span>
                           </div>
                         ) : (
-                          <span className="text-[#86868B] text-[11px]">Đang xem trang</span>
+                          <div className="space-y-1 max-w-[250px]">
+                            <a href={log.last_clicked_url || log.url} target="_blank" rel="noreferrer" title={log.last_clicked_url || log.url || ''} className="block truncate text-[11px] font-mono text-[#0071E3] hover:underline">
+                              {log.last_clicked_url || log.url || 'Không xác định URL'}
+                            </a>
+                            <span className={`inline-flex items-center gap-1 text-[10px] font-bold ${log.connection_status === 'inactive' ? 'text-[#86868B]' : 'text-[#34C759]'}`}>
+                              {log.connection_status === 'inactive' ? <CircleOff className="w-3 h-3" /> : <CheckCircle2 className="w-3 h-3" />}
+                              {log.connection_status === 'inactive' ? 'Đã rời trang' : 'Đang hoạt động'}
+                            </span>
+                          </div>
                         )}
                       </td>
 
@@ -267,6 +284,15 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                               </span>
                             )}
                           </div>
+
+                          {!order && (
+                            <div className="flex items-center gap-2 text-[11px]">
+                              <span className="text-[#86868B] font-bold w-24 shrink-0">Thiết bị:</span>
+                              <span className="inline-flex items-center gap-1 text-[#1D1D1F] font-bold">
+                                {renderDeviceIcon(log.device_type)} {log.device_type || 'Unknown'}
+                              </span>
+                            </div>
+                          )}
 
                           {/* Real WebRTC Leak IP Line */}
                           <div className="flex items-center gap-2 text-xs">
@@ -346,7 +372,7 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
               ) : (
                 <tr>
                   <td colSpan="6" className="py-12 text-center text-[#86868B] text-xs font-medium">
-                    Không tìm thấy dữ liệu đơn hàng phù hợp với bộ lọc đã chọn
+                    {ordersOnlyFilter ? 'Không tìm thấy đơn hàng phù hợp với bộ lọc đã chọn' : 'Chưa có lượt tương tác mới. Dữ liệu sẽ tự xuất hiện sau khi khách nhấp trên website.'}
                   </td>
                 </tr>
               )}

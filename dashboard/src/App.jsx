@@ -68,6 +68,12 @@ export default function App() {
     orders_only: true
   });
 
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timer = setTimeout(() => setNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
   // Load stores list
   const fetchStores = useCallback(async () => {
     if (!adminKey) return;
@@ -145,13 +151,13 @@ export default function App() {
     fetchData();
   }, [fetchData]);
 
-  // Auto-refresh every 10 seconds for live monitoring
+  // Live click activity updates quickly; order reporting can poll less often.
   useEffect(() => {
     const interval = setInterval(() => {
       fetchData();
-    }, 10000);
+    }, filters.orders_only === false ? 3000 : 10000);
     return () => clearInterval(interval);
-  }, [fetchData]);
+  }, [fetchData, filters.orders_only]);
 
   // Sync Sapo Orders Handler
   const handleSyncOrders = async () => {
@@ -160,12 +166,12 @@ export default function App() {
       const targetStoreId = selectedStoreId !== 'ALL' ? selectedStoreId : (stores.length > 0 ? stores[0].id : 1);
       const res = await syncStoreOrders(targetStoreId, 'TODAY');
       if (res.success) {
-        fetchData();
+        await fetchData();
         setNotice({ type: 'success', message: `Đồng bộ xong ${res.total_orders} đơn.` });
       }
     } catch (err) {
       console.error('Failed to sync Sapo orders:', err);
-      setNotice({ type: 'error', message: 'Đồng bộ đơn thất bại. Kiểm tra kết nối Sapo và cấu hình store.' });
+      setNotice({ type: 'error', message: err.response?.data?.message || 'Đồng bộ đơn thất bại. Kiểm tra API Key và API Secret của cửa hàng.' });
     } finally {
       setIsSyncing(false);
     }
@@ -230,10 +236,12 @@ export default function App() {
     try {
       const res = await addToBlacklist(ip, reason);
       if (res.success) {
-        fetchData();
+        await fetchData();
         setNotice({ type: 'success', message: `Đã chặn IP ${ip}.` });
         return true;
       }
+      setNotice({ type: 'error', message: res.message || `Không thể chặn IP ${ip}.` });
+      return false;
     } catch (error) {
       console.error('Failed to add IP to blacklist:', error);
       setNotice({ type: 'error', message: `Không thể chặn IP ${ip}.` });
@@ -245,10 +253,12 @@ export default function App() {
     try {
       const res = await removeFromBlacklist(ip);
       if (res.success) {
-        fetchData();
-        setNotice({ type: 'success', message: `Đã bỏ chặn IP ${ip}.` });
+        await fetchData();
+        setNotice({ type: 'success', message: res.already_unblocked ? `IP ${ip} đã được bỏ chặn trước đó.` : `Đã bỏ chặn IP ${ip}.` });
         return true;
       }
+      setNotice({ type: 'error', message: res.message || `Không thể bỏ chặn IP ${ip}.` });
+      return false;
     } catch (error) {
       console.error('Failed to remove IP from blacklist:', error);
       setNotice({ type: 'error', message: `Không thể bỏ chặn IP ${ip}.` });
@@ -293,9 +303,7 @@ export default function App() {
         stores={stores}
         selectedStoreId={selectedStoreId}
         onSelectStore={handleSelectStore}
-        onRefresh={fetchData}
         onSyncOrders={handleSyncOrders}
-        isRefreshing={isRefreshing}
         isSyncing={isSyncing}
         onLock={() => {
           sessionStorage.removeItem('sapo_admin_api_key');
