@@ -1,0 +1,789 @@
+const crypto = require('crypto');
+
+const DEFAULT_STATE_KEY = 'default';
+const BUSINESS_TIME_ZONE = process.env.BUSINESS_TIME_ZONE || 'Asia/Ho_Chi_Minh';
+const COLLECT_WINDOW_MS = 60 * 1000;
+const COLLECT_MAX_PER_WINDOW = 30;
+const collectCounters = new Map();
+
+const TRACKER_SOURCE = `/**
+ * Sapo Fake IP & WebRTC Leak Tracker Script
+ */
+(function () {
+  'use strict';
+
+  var BACKEND_URL = (function () {
+    if (window.SAPO_TRACKER_CONFIG && window.SAPO_TRACKER_CONFIG.backendUrl) {
+      return window.SAPO_TRACKER_CONFIG.backendUrl.replace(/\\/$/, '');
+    }
+    var scripts = document.getElementsByTagName('script');
+    for (var i = 0; i < scripts.length; i++) {
+      if (scripts[i].src && scripts[i].src.indexOf('client-tracker.js') !== -1) {
+        var url = new URL(scripts[i].src);
+        return url.origin;
+      }
+    }
+    return window.location.origin;
+  })();
+
+  var API_KEY = (window.SAPO_TRACKER_CONFIG && window.SAPO_TRACKER_CONFIG.apiKey) ? window.SAPO_TRACKER_CONFIG.apiKey : null;
+  var lastPushedUrl = '';
+  var lastPushedTime = 0;
+  var EMBEDDED_BLACKLIST = Array.isArray(window.__SAPO_IP_GUARD_BLACKLIST) ? window.__SAPO_IP_GUARD_BLACKLIST : [];
+
+  function getSessionMeta() {
+    var sessionId = sessionStorage.getItem('sapo_session_id');
+    var sessionStart = sessionStorage.getItem('sapo_session_start');
+    if (!sessionId) {
+      sessionId = 'S-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+      sessionStorage.setItem('sapo_session_id', sessionId);
+    }
+    if (!sessionStart) {
+      sessionStart = Date.now().toString();
+      sessionStorage.setItem('sapo_session_start', sessionStart);
+    }
+    var sessionStartMs = parseInt(sessionStart, 10);
+    return {
+      session_id: sessionId,
+      session_start_at: new Date(sessionStartMs).toISOString(),
+      session_duration_sec: Math.max(1, Math.round((Date.now() - sessionStartMs) / 1000))
+    };
+  }
+
+  function getClientPublicIP(callback) {
+    var resolved = false;
+    var timer = setTimeout(function () {
+      if (!resolved) {
+        resolved = true;
+        callback(null);
+      }
+    }, 700);
+    fetch('https://api.ipify.org?format=json')
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          callback(data ? data.ip : null);
+        }
+      })
+      .catch(function () {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          callback(null);
+        }
+      });
+  }
+
+  function getWebRTCIP(callback) {
+    var webrtcIp = null;
+    var RTCPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
+    if (!RTCPeerConnection) return callback(null);
+    try {
+      var pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] });
+      pc.createDataChannel('');
+      pc.onicecandidate = function (e) {
+        if (!e.candidate) return;
+        var match = /([0-9]{1,3}(\\.[0-9]{1,3}){3})/.exec(e.candidate.candidate);
+        if (match && !webrtcIp && match[1] !== '0.0.0.0' && match[1] !== '127.0.0.1') {
+          webrtcIp = match[1];
+          callback(webrtcIp);
+        }
+      };
+      pc.createOffer().then(function (sdp) { pc.setLocalDescription(sdp); }).catch(function () {});
+      setTimeout(function () { if (!webrtcIp) callback(null); }, 700);
+    } catch (err) {
+      callback(null);
+    }
+  }
+
+  function getBrowserFingerprint() {
+    try {
+      var canvas = document.createElement('canvas');
+      var ctx = canvas.getContext('2d');
+      var txt = 'Sapo_Prod_Fingerprint_2026';
+      ctx.textBaseline = 'top';
+      ctx.font = "14px 'Arial'";
+      ctx.fillStyle = '#f60';
+      ctx.fillRect(125, 1, 62, 20);
+      ctx.fillStyle = '#069';
+      ctx.fillText(txt, 2, 15);
+      ctx.fillStyle = 'rgba(102, 204, 0, 0.7)';
+      ctx.fillText(txt, 4, 17);
+      var dataUrl = canvas.toDataURL();
+      var hash = 0;
+      for (var i = 0; i < dataUrl.length; i++) {
+        hash = ((hash << 5) - hash) + dataUrl.charCodeAt(i);
+        hash |= 0;
+      }
+      return 'FP-' + Math.abs(hash).toString(16) + '-' + screen.width + 'x' + screen.height;
+    } catch (e) {
+      return 'FP-fallback-' + Date.now();
+    }
+  }
+
+  function getSapoOrderInfo(formEl) {
+    var info = {};
+    var bz = window.Bizweb || window.Sapo || window.BizwebCheckout;
+    if (bz) {
+      var c = bz.checkout || bz.order;
+      if (c) {
+        info.order_id = c.name || (c.order_number ? '#' + c.order_number : null) || c.order_id || (c.id ? '#' + c.id : null);
+        var addr = c.shipping_address || c.billing_address;
+        if (addr) {
+          info.customer_name = addr.name || addr.full_name || ((addr.first_name || '') + ' ' + (addr.last_name || '')).trim();
+          info.phone = addr.phone;
+          info.address = addr.address1;
+        }
+        info.total_price = c.total_price || c.total;
+        info.email = c.email;
+      }
+    }
+    if (!info.order_id) {
+      var orderCodeEl = document.querySelector('.order-number, .thankyou-order-id, #order_code, .order-code, [data-order-name], .os-order-number');
+      if (orderCodeEl) {
+        var text = orderCodeEl.innerText.trim();
+        if (text) info.order_id = text.startsWith('#') ? text : '#' + text;
+      } else {
+        var bodyText = document.body ? document.body.innerText : '';
+        var match = bodyText.match(/(?:#|don hang|order)\\s*([0-9]{4,8})/i);
+        if (match) info.order_id = '#' + match[1];
+      }
+    }
+    var root = formEl || document;
+    var nameEl = root.querySelector('input[name*="full_name"], input[name*="name"], #billing_address_full_name, #billing_address_name, .customer-name');
+    var phoneEl = root.querySelector('input[name*="phone"], #billing_address_phone, .customer-phone');
+    var emailEl = root.querySelector('input[type="email"], input[name*="email"], #checkout_user_email');
+    if (!info.customer_name && nameEl && nameEl.value) info.customer_name = nameEl.value.trim();
+    if (!info.phone && phoneEl && phoneEl.value) info.phone = phoneEl.value.trim();
+    if (!info.email && emailEl && emailEl.value) info.email = emailEl.value.trim();
+    return (info.order_id || info.customer_name || info.phone) ? info : null;
+  }
+
+  function renderAccessDeniedScreen(blockedIp) {
+    try {
+      var ipText = blockedIp || 'unknown';
+      document.body.innerHTML = '<div style="position:fixed;inset:0;z-index:9999999;display:flex;align-items:center;justify-content:center;min-height:100vh;width:100vw;background:#FAFAFA;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif;color:#1D1D1F;padding:32px;box-sizing:border-box;">' +
+        '<div style="max-width:720px;width:100%;background:#FFFFFF;border:1px solid #D1D1D6;border-radius:20px;padding:36px 40px;box-shadow:0 10px 30px rgba(0,0,0,0.06);">' +
+        '<h1 style="font-size:24px;font-weight:900;color:#000;margin:0 0 14px 0;line-height:1.3;text-transform:uppercase;">CANH BAO TRUY CAP BI KHOA</h1>' +
+        '<div style="font-size:14px;margin-bottom:24px;font-weight:600;line-height:1.6;padding:12px 16px;background:#F2F2F7;border-radius:12px;border-left:4px solid #000;">Dia chi IP bi chan: <strong style="font-family:monospace;font-size:16px;color:#000;background:#E5E5EA;padding:2px 8px;border-radius:6px;margin-left:4px;">' + ipText + '</strong></div>' +
+        '<p style="font-size:13px;line-height:1.7;margin:0;color:#1D1D1F;">Quyen truy cap va tinh nang dat hang cua ban da bi tam khoa tren he thong. Neu cho rang day la nham lan, vui long lien he quan tri vien cua hang.</p>' +
+        '</div></div>';
+      window.stop && window.stop();
+    } catch(e) {}
+  }
+
+  function pushLog(orderInfo, triggerEvent) {
+    var now = Date.now();
+    var currentUrl = window.location.href;
+    if (triggerEvent === 'page_view' && !orderInfo && currentUrl === lastPushedUrl && (now - lastPushedTime < 10000)) return;
+    lastPushedUrl = currentUrl;
+    lastPushedTime = now;
+    getClientPublicIP(function (clientPublicIp) {
+      getWebRTCIP(function (webrtcIp) {
+        var sessionMeta = getSessionMeta();
+        fetch(BACKEND_URL + '/api/v1/logs/collect', {
+          method: 'POST',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            client_ip: clientPublicIp,
+            api_key: API_KEY,
+            webrtc_ip: webrtcIp,
+            user_agent: navigator.userAgent,
+            fingerprint: getBrowserFingerprint(),
+            order_info: orderInfo || getSapoOrderInfo(),
+            url: currentUrl,
+            trigger_event: triggerEvent || 'page_view',
+            session_id: sessionMeta.session_id,
+            session_start_at: sessionMeta.session_start_at,
+            session_duration: sessionMeta.session_duration_sec
+          })
+        }).then(function (res) { return res.json(); }).then(function (data) {
+          if (data && data.is_blacklisted) renderAccessDeniedScreen(data.client_ip || clientPublicIp);
+        }).catch(function () {});
+      });
+    });
+  }
+
+  function attachFormSubmitListeners() {
+    var checkoutForms = document.querySelectorAll('form[action*="checkout"], form[action*="cart"], #checkout-form, .form-checkout');
+    checkoutForms.forEach(function (form) {
+      if (form.getAttribute('data-sapo-tracked')) return;
+      form.setAttribute('data-sapo-tracked', 'true');
+      form.addEventListener('submit', function () { pushLog(getSapoOrderInfo(form), 'checkout_submit'); });
+    });
+  }
+
+  function checkBlacklistImmediately() {
+    getClientPublicIP(function (pubIp) {
+      getWebRTCIP(function (webrtcIp) {
+        if (EMBEDDED_BLACKLIST.indexOf(pubIp) !== -1 || EMBEDDED_BLACKLIST.indexOf(webrtcIp) !== -1) {
+          renderAccessDeniedScreen(webrtcIp || pubIp);
+          return;
+        }
+        var query = [];
+        if (pubIp) query.push('ip=' + encodeURIComponent(pubIp));
+        if (webrtcIp) query.push('webrtc_ip=' + encodeURIComponent(webrtcIp));
+        fetch(BACKEND_URL + '/api/v1/blacklist/check' + (query.length ? '?' + query.join('&') : ''))
+          .then(function (r) { return r.json(); })
+          .then(function (res) { if (res && res.is_blacklisted) renderAccessDeniedScreen(webrtcIp || pubIp || res.ip); })
+          .catch(function () {});
+      });
+    });
+  }
+
+  function initTracking() {
+    checkBlacklistImmediately();
+    pushLog(null, 'page_view');
+    attachFormSubmitListeners();
+    setInterval(attachFormSubmitListeners, 3000);
+    setInterval(checkBlacklistImmediately, 30000);
+  }
+
+  if (document.readyState === 'complete' || document.readyState === 'interactive') initTracking();
+  else document.addEventListener('DOMContentLoaded', initTracking);
+})();`;
+
+function response(statusCode, body, headers = {}) {
+  return {
+    statusCode,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type, X-Sapo-Admin-Key, Authorization',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      ...headers
+    },
+    body: typeof body === 'string' ? body : JSON.stringify(body)
+  };
+}
+
+function json(statusCode, body) {
+  return response(statusCode, body, { 'Content-Type': 'application/json; charset=utf-8' });
+}
+
+function unauthorized(message = 'Admin key is invalid.') {
+  return json(401, { success: false, message });
+}
+
+function assertAdmin(event) {
+  const configuredKey = process.env.ADMIN_API_KEY || '';
+  if (!configuredKey) return false;
+  const headerKey = event.headers['x-sapo-admin-key'] || event.headers['X-Sapo-Admin-Key'] || '';
+  const auth = event.headers.authorization || event.headers.Authorization || '';
+  const bearer = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7) : '';
+  const provided = headerKey || bearer;
+  if (!provided || provided.length !== configuredKey.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(configuredKey));
+}
+
+function stateTemplate() {
+  return {
+    stores: [],
+    logs: [],
+    blacklist: [],
+    autoStoreId: 1,
+    autoLogId: 1,
+    autoBlacklistId: 1
+  };
+}
+
+function supabaseConfig() {
+  const url = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '';
+  if (!url || !key) throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required.');
+  return { url, key };
+}
+
+async function supabaseFetch(path, options = {}) {
+  const { url, key } = supabaseConfig();
+  const res = await fetch(`${url}/rest/v1${path}`, {
+    ...options,
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    }
+  });
+  const text = await res.text();
+  let data = null;
+  if (text) {
+    try { data = JSON.parse(text); } catch (_) { data = text; }
+  }
+  if (!res.ok) {
+    throw new Error(typeof data === 'string' ? data : (data?.message || `Supabase request failed: ${res.status}`));
+  }
+  return data;
+}
+
+async function loadState() {
+  const rows = await supabaseFetch(`/app_state?key=eq.${encodeURIComponent(DEFAULT_STATE_KEY)}&select=value&limit=1`);
+  if (Array.isArray(rows) && rows[0]?.value) return { ...stateTemplate(), ...rows[0].value };
+  const initial = stateTemplate();
+  await saveState(initial);
+  return initial;
+}
+
+async function saveState(state) {
+  const payload = { key: DEFAULT_STATE_KEY, value: state, updated_at: new Date().toISOString() };
+  await supabaseFetch('/app_state?on_conflict=key', {
+    method: 'POST',
+    headers: { Prefer: 'resolution=merge-duplicates' },
+    body: JSON.stringify(payload)
+  });
+}
+
+function cleanDomain(domain) {
+  return String(domain || '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
+}
+
+function publicStore(store) {
+  const { api_secret, api_secret_encrypted, ...safe } = store;
+  return { ...safe, has_api_secret: Boolean(api_secret || api_secret_encrypted) };
+}
+
+function encryptionKey() {
+  return crypto.createHash('sha256').update(process.env.DATA_ENCRYPTION_KEY || 'dev-only-change-me').digest();
+}
+
+function encryptSecret(value) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString('base64')}:${tag.toString('base64')}:${encrypted.toString('base64')}`;
+}
+
+function decryptSecret(value) {
+  const [ivB64, tagB64, encryptedB64] = String(value || '').split(':');
+  if (!ivB64 || !tagB64 || !encryptedB64) return '';
+  const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(ivB64, 'base64'));
+  decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+  return Buffer.concat([decipher.update(Buffer.from(encryptedB64, 'base64')), decipher.final()]).toString('utf8');
+}
+
+function businessDate(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: BUSINESS_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+  const get = type => parts.find(part => part.type === type)?.value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+function businessDayBounds(day) {
+  if (!day) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : businessDate(day);
+  const start = new Date(`${normalized}T00:00:00.000+07:00`).toISOString();
+  const end = new Date(`${normalized}T23:59:59.999+07:00`).toISOString();
+  return { start, end };
+}
+
+function hasOrderInfo(value) {
+  return !!(value && value !== 'null' && value !== '');
+}
+
+function safeJsonParse(value, fallback) {
+  try { return JSON.parse(value); } catch (_) { return fallback; }
+}
+
+function getClientIp(event, fallback) {
+  const forwarded = event.headers['x-forwarded-for'] || event.headers['X-Forwarded-For'];
+  return fallback || (forwarded ? forwarded.split(',')[0].trim() : event.headers['client-ip']) || 'unknown';
+}
+
+function allowCollection(ip) {
+  const key = ip || 'unknown';
+  const now = Date.now();
+  const current = collectCounters.get(key);
+  if (!current || now - current.startedAt >= COLLECT_WINDOW_MS) {
+    collectCounters.set(key, { startedAt: now, count: 1 });
+    return true;
+  }
+  current.count += 1;
+  return current.count <= COLLECT_MAX_PER_WINDOW;
+}
+
+async function lookupIp(ip) {
+  if (!ip || ip === 'unknown') return {};
+  try {
+    const res = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,city,isp,org,as,proxy,hosting`);
+    const data = await res.json();
+    return data.status === 'success' ? data : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+async function analyzeRisk(clientIp, webrtcIp) {
+  const ipData = await lookupIp(clientIp);
+  const orgText = `${ipData.isp || ''} ${ipData.org || ''} ${ipData.as || ''}`.toLowerCase();
+  const datacenterWords = ['hosting', 'host', 'vpn', 'proxy', 'cloud', 'amazon', 'aws', 'google', 'digitalocean', 'linode', 'ovh', 'hetzner', 'gthost', 'm247', 'datacenter'];
+  const isDatacenter = Boolean(ipData.hosting || datacenterWords.some(word => orgText.includes(word)));
+  const isVpn = Boolean(ipData.proxy || orgText.includes('vpn') || orgText.includes('proxy'));
+  const webrtcMismatch = Boolean(webrtcIp && clientIp && webrtcIp !== clientIp);
+  const riskReasons = [];
+  if (isVpn) riskReasons.push('VPN/Proxy detected');
+  if (isDatacenter) riskReasons.push('Datacenter/hosting IP detected');
+  if (webrtcMismatch) riskReasons.push('WebRTC IP mismatch detected');
+  return {
+    ipData,
+    isVpn,
+    isDatacenter,
+    webrtcMismatch,
+    riskLevel: riskReasons.length ? 'HIGH_RISK' : 'CLEAN',
+    riskReasons
+  };
+}
+
+function filterLogs(logs, query) {
+  let rows = [...logs];
+  if (query.store_id && query.store_id !== 'ALL') {
+    const storeId = Number(query.store_id);
+    rows = rows.filter(row => row.store_id === storeId || row.store_id === null);
+  }
+  if (query.risk_level && query.risk_level !== 'ALL') {
+    rows = rows.filter(row => row.risk_level === query.risk_level);
+  }
+  if (query.orders_only === 'true') {
+    rows = rows.filter(row => hasOrderInfo(row.order_info));
+  }
+  if (query.search) {
+    const s = query.search.toLowerCase();
+    rows = rows.filter(row =>
+      String(row.client_ip || '').toLowerCase().includes(s) ||
+      String(row.webrtc_ip || '').toLowerCase().includes(s) ||
+      String(row.isp || '').toLowerCase().includes(s) ||
+      String(row.order_info || '').toLowerCase().includes(s) ||
+      String(row.fingerprint || '').toLowerCase().includes(s)
+    );
+  }
+  const startBounds = businessDayBounds(query.startDate);
+  const endBounds = businessDayBounds(query.endDate);
+  if (startBounds) rows = rows.filter(row => row.created_at && row.created_at >= startBounds.start);
+  if (endBounds) rows = rows.filter(row => row.created_at && row.created_at <= endBounds.end);
+  return rows.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+}
+
+function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined) return 'Chua bat duoc phien';
+  const safeSeconds = Math.max(1, Math.round(seconds));
+  if (safeSeconds < 15) return `${safeSeconds} giay (Dat cuc nhanh)`;
+  if (safeSeconds < 60) return `${safeSeconds} giay`;
+  const mins = Math.floor(safeSeconds / 60);
+  const secs = safeSeconds % 60;
+  return `${mins} phut${secs > 0 ? ` ${secs}s` : ''}`;
+}
+
+function decorateLog(row, state) {
+  const blacklisted = new Set(state.blacklist.map(item => item.ip));
+  const hasOrder = hasOrderInfo(row.order_info);
+  let timeToOrder = null;
+  if (hasOrder && row.session_duration_sec) timeToOrder = formatDuration(Number(row.session_duration_sec));
+  return {
+    ...row,
+    is_blacklisted: blacklisted.has(row.client_ip) || blacklisted.has(row.webrtc_ip),
+    time_to_order: timeToOrder || (hasOrder ? 'Chua bat duoc phien' : null),
+    order_info: hasOrder ? safeJsonParse(row.order_info, null) : null,
+    risk_reasons: row.risk_reasons ? safeJsonParse(row.risk_reasons, []) : []
+  };
+}
+
+async function handleStores(event, state, method, parts, body) {
+  if (!assertAdmin(event)) return unauthorized();
+  if (method === 'GET' && parts.length === 0) {
+    return json(200, { success: true, data: state.stores.map(publicStore) });
+  }
+  if (method === 'POST' && parts.length === 0) {
+    const { store_name, mysapo_domain, api_key, api_secret } = body || {};
+    if (!store_name || !mysapo_domain || !api_key || !api_secret) {
+      return json(400, { success: false, message: 'Vui long dien day du thong tin store.' });
+    }
+    const domain = cleanDomain(mysapo_domain);
+    if (state.stores.some(store => cleanDomain(store.mysapo_domain) === domain)) {
+      return json(409, { success: false, message: 'Cua hang voi Mysapo Domain nay da duoc lien ket.' });
+    }
+    const newStore = {
+      id: state.autoStoreId++,
+      store_name: String(store_name).trim(),
+      mysapo_domain: domain,
+      api_key: String(api_key).trim(),
+      api_secret_encrypted: encryptSecret(String(api_secret).trim()),
+      is_active: 1,
+      created_at: new Date().toISOString()
+    };
+    state.stores.unshift(newStore);
+    await saveState(state);
+    return json(201, { success: true, data: publicStore(newStore), message: 'Da lien ket cua hang.' });
+  }
+  const id = Number(parts[0]);
+  const store = state.stores.find(item => item.id === id);
+  if (!store) return json(404, { success: false, message: 'Store not found' });
+  if (method === 'PUT') {
+    const { store_name, mysapo_domain, api_key, api_secret } = body || {};
+    const domain = cleanDomain(mysapo_domain);
+    if (!store_name || !domain || !api_key) return json(400, { success: false, message: 'Vui long dien day du thong tin.' });
+    if (state.stores.some(item => item.id !== id && cleanDomain(item.mysapo_domain) === domain)) {
+      return json(409, { success: false, message: 'Mysapo Domain nay da thuoc cua hang khac.' });
+    }
+    store.store_name = String(store_name).trim();
+    store.mysapo_domain = domain;
+    store.api_key = String(api_key).trim();
+    if (api_secret) store.api_secret_encrypted = encryptSecret(String(api_secret).trim());
+    await saveState(state);
+    return json(200, { success: true, message: 'Da cap nhat store.' });
+  }
+  if (method === 'DELETE') {
+    state.stores = state.stores.filter(item => item.id !== id);
+    await saveState(state);
+    return json(200, { success: true, message: 'Da xoa store.' });
+  }
+  if (method === 'POST' && parts[1] === 'sync') {
+    const result = await syncSapoOrders(state, store, body?.datePreset || 'TODAY');
+    await saveState(state);
+    return json(200, result);
+  }
+  return json(404, { success: false, message: 'Not found' });
+}
+
+function parseSapoOrder(order) {
+  const addr = order.shipping_address || order.billing_address || {};
+  return {
+    order_id: order.name || (order.order_number ? `#${order.order_number}` : String(order.id || '')),
+    customer_name: addr.name || `${addr.first_name || ''} ${addr.last_name || ''}`.trim() || order.customer?.name || '',
+    phone: addr.phone || order.phone || '',
+    email: order.email || '',
+    total_price: order.total_price || order.total || null
+  };
+}
+
+async function syncSapoOrders(state, store, datePreset) {
+  const secret = decryptSecret(store.api_secret_encrypted);
+  if (!secret) throw new Error('Missing Sapo API secret.');
+  const since = datePreset === 'TODAY'
+    ? new Date(`${businessDate()}T00:00:00.000+07:00`).toISOString()
+    : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const auth = Buffer.from(`${store.api_key}:${secret}`).toString('base64');
+  let total = 0;
+  let synced = 0;
+  for (let page = 1; page <= 10; page++) {
+    const url = `https://${store.mysapo_domain}/admin/orders.json?limit=250&page=${page}&created_at_min=${encodeURIComponent(since)}`;
+    const res = await fetch(url, { headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' } });
+    if (!res.ok) {
+      if (page === 1) throw new Error(`Sapo API error ${res.status}`);
+      break;
+    }
+    const data = await res.json();
+    const orders = data.orders || [];
+    if (!orders.length) break;
+    total += orders.length;
+    for (const order of orders) {
+      const orderInfo = parseSapoOrder(order);
+      if (!orderInfo.order_id) continue;
+      const existing = state.logs.find(log => log.store_id === store.id && String(log.order_info || '').includes(orderInfo.order_id));
+      const createdAt = order.created_on || order.created_at || new Date().toISOString();
+      if (existing) {
+        existing.created_at = new Date(createdAt).toISOString();
+        existing.order_info = JSON.stringify(orderInfo);
+      } else {
+        state.logs.unshift({
+          id: state.autoLogId++,
+          store_id: store.id,
+          store_domain: store.mysapo_domain,
+          client_ip: 'unknown',
+          webrtc_ip: null,
+          user_agent: 'Sapo API Sync',
+          fingerprint: 'FP-SAPO-SYNCED',
+          order_info: JSON.stringify(orderInfo),
+          country: 'Unknown',
+          country_code: 'XX',
+          city: 'Unknown',
+          isp: 'Unknown',
+          org: 'Unknown',
+          is_vpn: false,
+          is_datacenter: false,
+          webrtc_mismatch: false,
+          risk_level: 'CLEAN',
+          risk_reasons: JSON.stringify(['Synced from Sapo Admin API']),
+          trigger_event: 'sapo_sync',
+          created_at: new Date(createdAt).toISOString()
+        });
+        synced++;
+      }
+    }
+    if (orders.length < 250) break;
+  }
+  return { success: true, total_orders: total, synced_new: synced };
+}
+
+async function handleLogs(event, state, method, parts, query, body) {
+  if (method === 'POST' && parts[0] === 'collect') {
+    const referer = event.headers.referer || event.headers.origin || body?.url || '';
+    let matched = null;
+    if (body?.api_key) matched = state.stores.find(store => store.api_key === body.api_key);
+    if (!matched && referer) matched = state.stores.find(store => referer.toLowerCase().includes(cleanDomain(store.mysapo_domain)));
+    if (!matched) return json(403, { success: false, message: 'Tracker origin is not a connected Sapo store.' });
+    const realClientIp = getClientIp(event, body?.client_ip);
+    if (!allowCollection(realClientIp)) return json(429, { success: false, message: 'Too many tracking events.' });
+    const analysis = await analyzeRisk(realClientIp, body?.webrtc_ip);
+    const blacklistCheck = state.blacklist.find(item => item.ip === realClientIp || (body?.webrtc_ip && item.ip === body.webrtc_ip));
+    const reasons = [...analysis.riskReasons];
+    let riskLevel = analysis.riskLevel;
+    if (blacklistCheck) {
+      riskLevel = 'HIGH_RISK';
+      reasons.push(`IP is blacklisted: ${blacklistCheck.reason || 'Manual block'}`);
+    }
+    const log = {
+      id: state.autoLogId++,
+      store_id: matched.id,
+      store_domain: matched.mysapo_domain,
+      client_ip: realClientIp,
+      webrtc_ip: body?.webrtc_ip || null,
+      user_agent: body?.user_agent || null,
+      fingerprint: body?.fingerprint || null,
+      order_info: body?.order_info ? (typeof body.order_info === 'object' ? JSON.stringify(body.order_info) : String(body.order_info)) : null,
+      country: analysis.ipData.country || 'Unknown',
+      country_code: analysis.ipData.countryCode || 'XX',
+      city: analysis.ipData.city || 'Unknown',
+      isp: analysis.ipData.isp || 'Unknown',
+      org: analysis.ipData.org || 'Unknown',
+      is_vpn: analysis.isVpn,
+      is_datacenter: analysis.isDatacenter,
+      webrtc_mismatch: analysis.webrtcMismatch,
+      risk_level: riskLevel,
+      risk_reasons: JSON.stringify(reasons),
+      url: body?.url || referer || null,
+      trigger_event: body?.trigger_event || null,
+      session_id: body?.session_id || null,
+      session_start_at: body?.session_start_at || null,
+      session_duration_sec: body?.session_duration || null,
+      created_at: new Date().toISOString()
+    };
+    state.logs.unshift(log);
+    await saveState(state);
+    return json(201, { success: true, log_id: log.id, client_ip: realClientIp, risk_level: riskLevel, is_blacklisted: Boolean(blacklistCheck), reasons });
+  }
+  if (!assertAdmin(event)) return unauthorized();
+  if (method === 'GET' && parts.length === 0) {
+    const page = Number(query.page || 1);
+    const limit = Number(query.limit || 20);
+    const filtered = filterLogs(state.logs, query);
+    const rows = filtered.slice((page - 1) * limit, page * limit).map(row => decorateLog(row, state));
+    return json(200, { success: true, data: rows, pagination: { page, limit, total: filtered.length, totalPages: Math.ceil(filtered.length / limit) } });
+  }
+  if (method === 'DELETE' && parts[0]) {
+    const id = Number(parts[0]);
+    const before = state.logs.length;
+    state.logs = state.logs.filter(row => row.id !== id);
+    await saveState(state);
+    return before === state.logs.length ? json(404, { success: false, message: 'Log not found' }) : json(200, { success: true, message: 'Log deleted' });
+  }
+  return json(404, { success: false, message: 'Not found' });
+}
+
+async function handleBlacklist(event, state, method, parts, query, body) {
+  if (method === 'GET' && parts[0] === 'check') {
+    const ip = query.ip || getClientIp(event);
+    const webrtcIp = query.webrtc_ip || null;
+    const row = state.blacklist.find(item => item.ip === ip || (webrtcIp && item.ip === webrtcIp));
+    return json(200, { success: true, ip, webrtc_ip: webrtcIp, is_blacklisted: Boolean(row), reason: row?.reason || null, created_at: row?.created_at || null });
+  }
+  if (!assertAdmin(event)) return unauthorized();
+  if (method === 'GET' && parts.length === 0) return json(200, { success: true, data: state.blacklist });
+  if (method === 'POST' && parts.length === 0) {
+    const ip = String(body?.ip || '').trim();
+    if (!ip) return json(400, { success: false, message: 'IP address is required' });
+    const existing = state.blacklist.find(item => item.ip === ip);
+    if (existing) {
+      existing.reason = body?.reason || 'Manual block';
+      existing.source = body?.source || 'MANUAL';
+      existing.created_at = new Date().toISOString();
+    } else {
+      state.blacklist.unshift({ id: state.autoBlacklistId++, ip, reason: body?.reason || 'Manual block', source: body?.source || 'MANUAL', created_at: new Date().toISOString() });
+    }
+    state.logs.forEach(log => { if (log.client_ip === ip || log.webrtc_ip === ip) log.risk_level = 'HIGH_RISK'; });
+    await saveState(state);
+    return json(201, { success: true, message: `IP ${ip} blocked` });
+  }
+  if (method === 'DELETE' && parts[0]) {
+    const ip = decodeURIComponent(parts[0]);
+    const before = state.blacklist.length;
+    state.blacklist = state.blacklist.filter(item => item.ip !== ip);
+    await saveState(state);
+    return before === state.blacklist.length ? json(404, { success: false, message: 'IP not found' }) : json(200, { success: true, message: `IP ${ip} unblocked` });
+  }
+  return json(404, { success: false, message: 'Not found' });
+}
+
+function handleStats(event, state, method, parts, query) {
+  if (!assertAdmin(event)) return unauthorized();
+  const storeId = query.store_id && query.store_id !== 'ALL' ? Number(query.store_id) : null;
+  let logs = storeId ? state.logs.filter(log => log.store_id === storeId) : [...state.logs];
+  if (method === 'GET' && parts[0] === 'overview') {
+    const totalLogs = logs.length;
+    const highRiskCount = logs.filter(log => log.risk_level === 'HIGH_RISK').length;
+    const cleanCount = totalLogs - highRiskCount;
+    const today = businessDate();
+    const suspiciousOrdersToday = logs.filter(log => log.risk_level === 'HIGH_RISK' && hasOrderInfo(log.order_info) && log.created_at && businessDate(log.created_at) === today).length;
+    const ispMap = {};
+    logs.filter(log => log.risk_level === 'HIGH_RISK' && log.isp && log.isp !== 'Unknown').forEach(log => { ispMap[log.isp] = (ispMap[log.isp] || 0) + 1; });
+    const topIsps = Object.keys(ispMap).map(isp => ({ isp, count: ispMap[isp] })).sort((a, b) => b.count - a.count).slice(0, 5);
+    return json(200, { success: true, data: { totalLogs, highRiskCount, cleanCount, vpnRate: totalLogs ? Number(((highRiskCount / totalLogs) * 100).toFixed(1)) : 0, totalBlacklisted: state.blacklist.length, suspiciousOrdersToday, topIsps } });
+  }
+  if (method === 'GET' && parts[0] === 'chart') {
+    const formatter = new Intl.DateTimeFormat('en-GB', { timeZone: BUSINESS_TIME_ZONE, hour: '2-digit', hourCycle: 'h23' });
+    const now = Date.now();
+    const buckets = Array.from({ length: 24 }, (_, hour) => ({ time_label: `${String(hour).padStart(2, '0')}:00`, clean: 0, high_risk: 0 }));
+    logs.forEach(log => {
+      const ts = new Date(log.created_at).getTime();
+      if (!Number.isFinite(ts) || now - ts > 24 * 60 * 60 * 1000 || ts > now) return;
+      const hour = Number(formatter.format(new Date(ts)));
+      if (log.risk_level === 'HIGH_RISK') buckets[hour].high_risk += 1;
+      else buckets[hour].clean += 1;
+    });
+    return json(200, { success: true, data: buckets });
+  }
+  return json(404, { success: false, message: 'Not found' });
+}
+
+exports.handler = async (event) => {
+  try {
+    if (event.httpMethod === 'OPTIONS') return response(204, '');
+
+    const rawPath = event.path.replace(/^\/\.netlify\/functions\/api/, '');
+    if (rawPath === '/health') {
+      return json(200, { status: 'OK', system: 'Sapo IP Guard Netlify API', timestamp: new Date().toISOString() });
+    }
+
+    const state = await loadState();
+
+    if (rawPath === '/client-tracker.js') {
+      const blacklist = state.blacklist.map(item => item.ip).filter(Boolean);
+      return response(200, `window.__SAPO_IP_GUARD_BLACKLIST = ${JSON.stringify(blacklist)};\n${TRACKER_SOURCE}`, {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'
+      });
+    }
+
+    const apiPath = rawPath.replace(/^\/api\/v1\/?/, '');
+    const parts = apiPath.split('/').filter(Boolean).map(decodeURIComponent);
+    const resource = parts.shift();
+    const body = event.body ? JSON.parse(event.body) : {};
+    const query = event.queryStringParameters || {};
+    const method = event.httpMethod;
+
+    if (resource === 'stores') return await handleStores(event, state, method, parts, body);
+    if (resource === 'logs') return await handleLogs(event, state, method, parts, query, body);
+    if (resource === 'blacklist') return await handleBlacklist(event, state, method, parts, query, body);
+    if (resource === 'stats') return handleStats(event, state, method, parts, query);
+
+    return json(404, { success: false, message: 'Not found' });
+  } catch (error) {
+    return json(500, { success: false, message: error.message });
+  }
+};

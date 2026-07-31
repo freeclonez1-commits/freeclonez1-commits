@@ -1,0 +1,10 @@
+node_modules/
+.env
+server/.env
+server/database.json
+*.log
+dashboard/dist/
+deploy-netlify/
+deploy-netlify-fixed/
+*.zip
+.netlify/
