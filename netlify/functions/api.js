@@ -258,29 +258,27 @@ const TRACKER_SOURCE = `/**
       var clickedUrl = getClickedUrl(event.target);
       if (!clickedUrl) return;
       lastInteractionAt = now;
-      pushLog(null, 'click', clickedUrl);
+      var meta = getSessionMeta();
+      var payload = {
+        api_key: API_KEY,
+        store_domain: window.location.hostname,
+        user_agent: navigator.userAgent,
+        fingerprint: getBrowserFingerprint(),
+        url: window.location.href,
+        last_clicked_url: clickedUrl,
+        device_type: getDeviceType(),
+        connection_status: clickedUrl === window.location.href ? 'active' : 'inactive',
+        trigger_event: 'click',
+        session_id: meta.session_id,
+        session_start_at: meta.session_start_at,
+        session_duration: meta.session_duration_sec
+      };
+      try {
+        navigator.sendBeacon(BACKEND_URL + '/api/v1/logs/collect', new Blob([JSON.stringify(payload)], { type: 'text/plain' }));
+      } catch (e) {
+        fetch(BACKEND_URL + '/api/v1/logs/collect', { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(function () {});
+      }
     }, true);
-  }
-
-  function sendExitLog() {
-    var meta = getSessionMeta();
-    var payload = {
-      api_key: API_KEY,
-      store_domain: window.location.hostname,
-      user_agent: navigator.userAgent,
-      fingerprint: getBrowserFingerprint(),
-      url: window.location.href,
-      last_clicked_url: window.location.href,
-      device_type: getDeviceType(),
-      connection_status: 'inactive',
-      trigger_event: 'page_exit',
-      session_id: meta.session_id,
-      session_start_at: meta.session_start_at,
-      session_duration: meta.session_duration_sec
-    };
-    try {
-      navigator.sendBeacon(BACKEND_URL + '/api/v1/logs/collect', new Blob([JSON.stringify(payload)], { type: 'text/plain' }));
-    } catch (e) {}
   }
 
   function checkBlacklistImmediately() {
@@ -309,7 +307,6 @@ const TRACKER_SOURCE = `/**
     setInterval(attachFormSubmitListeners, 3000);
     setInterval(attachCheckoutActivityListeners, 3000);
     setInterval(checkBlacklistImmediately, 30000);
-    window.addEventListener('pagehide', sendExitLog);
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') initTracking();
@@ -781,7 +778,7 @@ async function handleLogs(event, state, method, parts, query, body) {
       riskLevel = 'HIGH_RISK';
       reasons.push(`IP is blacklisted: ${blacklistCheck.reason || 'Manual block'}`);
     }
-    if (body?.connection_status === 'inactive' && body?.session_id) {
+    if (body?.trigger_event === 'page_exit' && body?.connection_status === 'inactive' && body?.session_id) {
       const latestSessionLog = state.logs.find(log => log.store_id === matched.id && log.session_id === body.session_id);
       if (latestSessionLog) {
         latestSessionLog.connection_status = 'inactive';
