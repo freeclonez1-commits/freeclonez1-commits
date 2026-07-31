@@ -40,19 +40,20 @@ const TRACKER_SOURCE = `/**
   function getSessionMeta() {
     var sessionId = sessionStorage.getItem('sapo_session_id');
     var sessionStart = sessionStorage.getItem('sapo_session_start');
-    if (!sessionId) {
-      sessionId = 'S-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    var now = Date.now();
+    var sessionStartMs = sessionStart ? parseInt(sessionStart, 10) : NaN;
+
+    // Reset session if missing, unparseable, idle for >30 mins, or >3 hours old
+    if (!sessionId || !sessionStart || !Number.isFinite(sessionStartMs) || (lastInteractionAt > 0 && now - lastInteractionAt > 30 * 60 * 1000) || (now - sessionStartMs > 3 * 60 * 60 * 1000)) {
+      sessionId = 'S-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+      sessionStartMs = now;
       sessionStorage.setItem('sapo_session_id', sessionId);
+      sessionStorage.setItem('sapo_session_start', sessionStartMs.toString());
     }
-    if (!sessionStart) {
-      sessionStart = Date.now().toString();
-      sessionStorage.setItem('sapo_session_start', sessionStart);
-    }
-    var sessionStartMs = parseInt(sessionStart, 10);
     return {
       session_id: sessionId,
       session_start_at: new Date(sessionStartMs).toISOString(),
-      session_duration_sec: Math.max(1, Math.round((Date.now() - sessionStartMs) / 1000))
+      session_duration_sec: Math.max(1, Math.round((now - sessionStartMs) / 1000))
     };
   }
 
@@ -679,6 +680,11 @@ function formatDuration(seconds) {
   if (safeSeconds < 60) return `${safeSeconds} giây`;
   const mins = Math.floor(safeSeconds / 60);
   const secs = safeSeconds % 60;
+  if (mins >= 60) {
+    const hours = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return `> ${hours} giờ${remMins > 0 ? ` ${remMins}p` : ''} (Treo tab)`;
+  }
   return `${mins} phút${secs > 0 ? ` ${secs}s` : ''}`;
 }
 

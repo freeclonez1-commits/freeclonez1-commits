@@ -18,6 +18,9 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
 
   const todayStr = businessDate();
   const isTodayDefault = filters.startDate === todayStr && filters.endDate === todayStr;
+  const is7Days = filters.startDate === businessDateDaysAgo(6) && filters.endDate === todayStr;
+  const is30Days = filters.startDate === businessDateDaysAgo(29) && filters.endDate === todayStr;
+  const isAll = !filters.startDate && !filters.endDate;
 
   const handleSearchChange = (e) => {
     setFilters(prev => ({ ...prev, search: e.target.value, page: 1 }));
@@ -105,10 +108,10 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
   return (
     <div className="space-y-6 animate-fadeIn font-sans w-full">
       {/* Search & Filter Header Card */}
-      <div className="p-6 rounded-3xl apple-card bg-white border border-[#E5E5EA] shadow-sm space-y-4">
-        <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+      <div className="p-4 sm:p-6 rounded-3xl apple-card bg-white border border-[#E5E5EA] shadow-sm space-y-4">
+        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4">
           {/* Search Box */}
-          <div className="relative w-full md:w-80">
+          <div className="relative w-full lg:w-80">
             <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-[#86868B]" />
             <input
               type="text"
@@ -120,36 +123,36 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
           </div>
 
           {/* View Mode Toggle: Orders Only vs All */}
-          <div className="flex items-center gap-1.5 bg-[#E8F2FF] p-1 rounded-full text-xs font-bold border border-[#0071E3]/20">
+          <div className="flex items-center gap-1 bg-[#E8F2FF] p-1 rounded-full text-xs font-bold border border-[#0071E3]/20 overflow-x-auto">
             <button
               onClick={() => handleViewMode(true)}
-              className={`px-4 py-1.5 rounded-full transition-all flex items-center gap-1.5 cursor-pointer ${
+              className={`px-3 sm:px-4 py-1.5 rounded-full transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                 ordersOnlyFilter
                   ? 'bg-[#0071E3] text-white shadow-sm'
                   : 'text-[#0071E3] hover:bg-[#0071E3]/10'
               }`}
             >
-              <ShoppingCart className="w-3.5 h-3.5" />
+              <ShoppingCart className="w-3.5 h-3.5 shrink-0" />
               <span>🛒 Chỉ Đơn Hàng ({pagination?.orderTotal ?? (logs ? logs.filter(l => l.order_info !== null).length : 0)})</span>
             </button>
             <button
               onClick={() => handleViewMode(false)}
-              className={`px-4 py-1.5 rounded-full transition-all flex items-center gap-1.5 cursor-pointer ${
+              className={`px-3 sm:px-4 py-1.5 rounded-full transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                 !ordersOnlyFilter
                   ? 'bg-[#1D1D1F] text-[#E5E5EA] shadow-sm'
                   : 'text-[#86868B] hover:text-[#1D1D1F]'
               }`}
             >
-              <Globe className="w-3.5 h-3.5" />
+              <Globe className="w-3.5 h-3.5 shrink-0" />
               <span>🌐 Tất Cả (Gồm lượt xem trang)</span>
             </button>
           </div>
 
           {/* Status Tabs */}
-          <div className="flex items-center gap-1 bg-[#F2F2F7] p-1 rounded-full text-xs font-bold">
+          <div className="flex items-center gap-1 bg-[#F2F2F7] p-1 rounded-full text-xs font-bold overflow-x-auto">
             <button
               onClick={() => handleRiskFilter('ALL')}
-              className={`px-3 py-1.5 rounded-full transition-all cursor-pointer ${
+              className={`px-3 py-1.5 rounded-full transition-all cursor-pointer whitespace-nowrap ${
                 filters.risk_level === 'ALL'
                   ? 'bg-white text-[#1D1D1F] shadow-sm'
                   : 'text-[#86868B] hover:text-[#1D1D1F]'
@@ -159,61 +162,65 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
             </button>
             <button
               onClick={() => handleRiskFilter('HIGH_RISK')}
-              className={`px-3 py-1.5 rounded-full transition-all flex items-center gap-1 cursor-pointer ${
+              className={`px-3 py-1.5 rounded-full transition-all flex items-center gap-1 cursor-pointer whitespace-nowrap ${
                 filters.risk_level === 'HIGH_RISK'
                   ? 'bg-[#FF3B30] text-white shadow-sm'
                   : 'text-[#86868B] hover:text-[#FF3B30]'
               }`}
             >
-              <AlertTriangle className="w-3.5 h-3.5" />
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
               <span>Fake IP / VPN</span>
             </button>
             <button
               onClick={() => handleRiskFilter('CLEAN')}
-              className={`px-3 py-1.5 rounded-full transition-all flex items-center gap-1 cursor-pointer ${
+              className={`px-3 py-1.5 rounded-full transition-all flex items-center gap-1 cursor-pointer whitespace-nowrap ${
                 filters.risk_level === 'CLEAN'
                   ? 'bg-[#34C759] text-white shadow-sm'
                   : 'text-[#86868B] hover:text-[#34C759]'
               }`}
             >
-              <ShieldCheck className="w-3.5 h-3.5" />
+              <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
               <span>IP Thật An toàn</span>
             </button>
           </div>
         </div>
 
         {/* Date Presets */}
-        <div className="pt-3 border-t border-[#E5E5EA] flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="pt-3 border-t border-[#E5E5EA] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2 text-[#86868B] font-bold">
             <Calendar className="w-4 h-4 text-[#0071E3]" />
             <span>Quét thời gian:</span>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 font-bold">
+          <div className="flex flex-wrap items-center gap-2 font-bold w-full sm:w-auto">
             <button
               onClick={() => handleDatePreset('TODAY')}
               className={`px-3.5 py-1.5 rounded-full transition-all cursor-pointer shadow-sm ${
-                isTodayDefault ? 'bg-[#0071E3] text-white' : 'bg-[#F2F2F7] text-[#1D1D1F] hover:bg-[#E5E5EA]'
+                isTodayDefault ? 'bg-[#0071E3] text-white font-extrabold' : 'bg-[#F2F2F7] text-[#1D1D1F] hover:bg-[#E5E5EA]'
               }`}
             >
               ✨ Hôm nay (Mặc định)
             </button>
             <button
               onClick={() => handleDatePreset('7_DAYS')}
-              className="px-3.5 py-1.5 rounded-full bg-[#F2F2F7] text-[#1D1D1F] hover:bg-[#E5E5EA] transition-all cursor-pointer"
+              className={`px-3.5 py-1.5 rounded-full transition-all cursor-pointer shadow-sm ${
+                is7Days ? 'bg-[#0071E3] text-white font-extrabold' : 'bg-[#F2F2F7] text-[#1D1D1F] hover:bg-[#E5E5EA]'
+              }`}
             >
               7 ngày qua
             </button>
             <button
               onClick={() => handleDatePreset('30_DAYS')}
-              className="px-3.5 py-1.5 rounded-full bg-[#F2F2F7] text-[#1D1D1F] hover:bg-[#E5E5EA] transition-all cursor-pointer"
+              className={`px-3.5 py-1.5 rounded-full transition-all cursor-pointer shadow-sm ${
+                is30Days ? 'bg-[#0071E3] text-white font-extrabold' : 'bg-[#F2F2F7] text-[#1D1D1F] hover:bg-[#E5E5EA]'
+              }`}
             >
               30 ngày qua
             </button>
             <button
               onClick={() => handleDatePreset('ALL')}
-              className={`px-3.5 py-1.5 rounded-full transition-all cursor-pointer ${
-                !filters.startDate && !filters.endDate ? 'bg-[#0071E3] text-white' : 'bg-[#F2F2F7] text-[#1D1D1F] hover:bg-[#E5E5EA]'
+              className={`px-3.5 py-1.5 rounded-full transition-all cursor-pointer shadow-sm ${
+                isAll ? 'bg-[#0071E3] text-white font-extrabold' : 'bg-[#F2F2F7] text-[#1D1D1F] hover:bg-[#E5E5EA]'
               }`}
             >
               Tất cả thời gian

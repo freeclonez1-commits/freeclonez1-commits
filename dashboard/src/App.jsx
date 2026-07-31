@@ -7,7 +7,7 @@ import BlacklistManager from './components/BlacklistManager';
 import StoreManager from './components/StoreManager';
 import ScriptGenerator from './components/ScriptGenerator';
 import AdminAccess from './components/AdminAccess';
-import { businessDate } from './utils/dates';
+import { businessDate, businessDateDaysAgo } from './utils/dates';
 
 import {
   getStores,
@@ -164,11 +164,19 @@ export default function App() {
   const handleSyncOrders = async () => {
     setIsSyncing(true);
     try {
+      let syncPreset = 'TODAY';
+      if (!filters.startDate && !filters.endDate) {
+        syncPreset = 'ALL';
+      } else if (filters.startDate === businessDateDaysAgo(6)) {
+        syncPreset = '7_DAYS';
+      } else if (filters.startDate === businessDateDaysAgo(29)) {
+        syncPreset = '30_DAYS';
+      }
       const targetStoreId = selectedStoreId !== 'ALL' ? selectedStoreId : (stores.length > 0 ? stores[0].id : 1);
-      const res = await syncStoreOrders(targetStoreId, 'TODAY');
+      const res = await syncStoreOrders(targetStoreId, syncPreset);
       if (res.success) {
         await fetchData();
-        setNotice({ type: 'success', message: `Đồng bộ xong ${res.total_orders} đơn.` });
+        setNotice({ type: 'success', message: `Đồng bộ xong ${res.total_orders} đơn (${syncPreset}).` });
       }
     } catch (err) {
       console.error('Failed to sync Sapo orders:', err);
