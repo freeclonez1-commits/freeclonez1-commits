@@ -797,22 +797,47 @@ function isSameOrder(log, orderInfo) {
   return Boolean(logged.order_id && orderInfo.order_id && String(logged.order_id) === String(orderInfo.order_id));
 }
 
-function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt) {
+function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt, orderClientIp) {
   const orderTime = new Date(orderCreatedAt).getTime();
   if (!Number.isFinite(orderTime)) return null;
-  const orderPhone = normalizeContact(orderInfo.phone);
-  const orderEmail = normalizeContact(orderInfo.email);
-  return state.logs
-    .filter(log => {
-      if (log.store_id !== storeId || !log.session_id || log.trigger_event === 'sapo_sync') return false;
-      const logTime = new Date(log.created_at).getTime();
-      if (!Number.isFinite(logTime) || logTime > orderTime || orderTime - logTime > 24 * 60 * 60 * 1000) return false;
+  const orderPhone = normalizeContact(orderInfo?.phone);
+  const orderEmail = normalizeContact(orderInfo?.email);
+  const orderIp = isKnownIp(orderClientIp) ? orderClientIp : null;
+
+  // Filter candidate browsing logs from tracker (not sapo_sync) within 24h prior to order creation
+  const candidates = state.logs.filter(log => {
+    if (log.store_id !== storeId || log.trigger_event === 'sapo_sync') return false;
+    const logTime = new Date(log.created_at).getTime();
+    if (!Number.isFinite(logTime) || logTime > orderTime + 5 * 60 * 1000 || orderTime - logTime > 24 * 60 * 60 * 1000) return false;
+    return true;
+  });
+
+  // Priority 1: Match by Phone or Email if captured in log
+  if (orderPhone || orderEmail) {
+    const contactMatch = candidates.find(log => {
       const captured = orderInfoFromLog(log);
-      const capturedPhone = normalizeContact(captured.phone);
-      const capturedEmail = normalizeContact(captured.email);
-      return sameContact(capturedPhone, orderPhone) || Boolean(capturedEmail && orderEmail && capturedEmail === orderEmail);
-    })
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
+      const capturedPhone = normalizeContact(captured?.phone);
+      const capturedEmail = normalizeContact(captured?.email);
+      return (orderPhone && sameContact(capturedPhone, orderPhone)) ||
+             (orderEmail && Boolean(capturedEmail && capturedEmail === orderEmail));
+    });
+    if (contactMatch) return contactMatch;
+  }
+
+  // Priority 2: Match by IP address (client_ip or webrtc_ip matching orderIp)
+  if (orderIp) {
+    const ipMatch = candidates.find(log => log.client_ip === orderIp || log.webrtc_ip === orderIp);
+    if (ipMatch) return ipMatch;
+  }
+
+  // Priority 3: Match by recent session log in the store within 2 hours
+  const recentMatch = candidates.find(log => {
+    const logTime = new Date(log.created_at).getTime();
+    return orderTime - logTime <= 2 * 60 * 60 * 1000;
+  });
+  if (recentMatch) return recentMatch;
+
+  return null;
 }
 
 function sessionDurationToOrder(sessionStartAt, orderCreatedAt) {
@@ -827,8 +852,9 @@ function sessionDurationToOrder(sessionStartAt, orderCreatedAt) {
 function applySyncedOrder(log, orderInfo, orderCreatedAt) {
   log.order_info = JSON.stringify(orderInfo);
   log.created_at = new Date(orderCreatedAt).toISOString();
-  const duration = sessionDurationToOrder(log.session_start_at, orderCreatedAt);
-  log.session_duration_sec = duration;
+  if (log.session_start_at) {
+    log.session_duration_sec = sessionDurationToOrder(log.session_start_at, orderCreatedAt);
+  }
 }
 
 async function applyIpAnalysis(log, clientIp, webrtcIp, extraReasons = []) {
@@ -927,20 +953,22 @@ async function syncSapoOrders(state, store, datePreset) {
       const createdAt = order.created_on || order.created_at || new Date().toISOString();
       const orderClientIp = sapoOrderClientIp(order);
       const existing = state.logs.find(log => log.store_id === store.id && isSameOrder(log, orderInfo));
-      const trackedVisit = existing || findTrackedVisitForOrder(state, store.id, orderInfo, createdAt);
+      const trackedVisit = existing || findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
       if (trackedVisit) {
         applySyncedOrder(trackedVisit, orderInfo, createdAt);
-        if (!isKnownIp(trackedVisit.client_ip) && isKnownIp(orderClientIp)) {
-          await applyIpAnalysis(trackedVisit, orderClientIp, trackedVisit.webrtc_ip, ['Synced browser IP from Sapo Admin API']);
-        }
+        const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : trackedVisit.client_ip;
+        await applyIpAnalysis(trackedVisit, effectiveClientIp, trackedVisit.webrtc_ip, ['Synced browser IP from Sapo Admin API']);
       } else {
-        const analysis = await analyzeRisk(orderClientIp, null);
+        const inheritedWebRtcIp = state.logs.find(log =>
+          isKnownIp(orderClientIp) && (log.client_ip === orderClientIp || log.webrtc_ip === orderClientIp) && isKnownIp(log.webrtc_ip)
+        )?.webrtc_ip || null;
+        const analysis = await analyzeRisk(orderClientIp, inheritedWebRtcIp);
         state.logs.unshift({
           id: state.autoLogId++,
           store_id: store.id,
           store_domain: store.mysapo_domain,
           client_ip: isKnownIp(orderClientIp) ? orderClientIp : 'unknown',
-          webrtc_ip: null,
+          webrtc_ip: inheritedWebRtcIp,
           user_agent: 'Sapo API Sync',
           fingerprint: 'FP-SAPO-SYNCED',
           order_info: JSON.stringify(orderInfo),
@@ -965,6 +993,35 @@ async function syncSapoOrders(state, store, datePreset) {
     }
     if (orders.length < 250) break;
   }
+
+  // Backfill/repair pass for existing order logs in state.logs that lack WebRTC IP or time-to-order
+  for (const log of state.logs) {
+    if (log.store_id === store.id && hasOrderInfo(log.order_info)) {
+      const ordInfo = safeJsonParse(log.order_info, null);
+      if (!ordInfo) continue;
+      if (!isKnownIp(log.webrtc_ip)) {
+        const match = findTrackedVisitForOrder(state, store.id, ordInfo, log.created_at, log.client_ip);
+        if (match && isKnownIp(match.webrtc_ip)) {
+          log.webrtc_ip = match.webrtc_ip;
+          if (!log.session_start_at && match.session_start_at) {
+            log.session_start_at = match.session_start_at;
+            log.session_duration_sec = sessionDurationToOrder(match.session_start_at, log.created_at);
+          }
+          await applyIpAnalysis(log, log.client_ip, log.webrtc_ip, ['Inherited WebRTC IP from session match']);
+        } else {
+          const inherited = state.logs.find(l => l.id !== log.id && isKnownIp(log.client_ip) && (l.client_ip === log.client_ip || l.webrtc_ip === log.client_ip) && isKnownIp(l.webrtc_ip))?.webrtc_ip;
+          if (inherited) {
+            log.webrtc_ip = inherited;
+            await applyIpAnalysis(log, log.client_ip, log.webrtc_ip, ['Inherited WebRTC IP from IP history']);
+          }
+        }
+      }
+      if (log.session_duration_sec === null && log.session_start_at) {
+        log.session_duration_sec = sessionDurationToOrder(log.session_start_at, log.created_at);
+      }
+    }
+  }
+
   return { success: true, total_orders: total, synced_new: synced };
 }
 
