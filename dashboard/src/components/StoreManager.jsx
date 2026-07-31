@@ -1,12 +1,10 @@
 import React, { useState } from 'react';
-import { Plus, Edit2, Trash2, Store, CheckCircle, AlertCircle, Eye, EyeOff, Copy, Check, LoaderCircle } from 'lucide-react';
+import { Plus, Edit2, Trash2, CheckCircle, AlertCircle, LoaderCircle, LockKeyhole } from 'lucide-react';
 
 export default function StoreManager({ stores, onAddStore, onUpdateStore, onDeleteStore, onTestStore }) {
   const [isAdding, setIsAdding] = useState(false);
   const [editingStore, setEditingStore] = useState(null);
   const [form, setForm] = useState({ store_name: '', mysapo_domain: '', api_key: '', api_secret: '' });
-  const [showSecret, setShowSecret] = useState({});
-  const [copiedKey, setCopiedKey] = useState(null);
   const [testingStoreId, setTestingStoreId] = useState(null);
 
   const resetForm = () => { setForm({ store_name: '', mysapo_domain: '', api_key: '', api_secret: '' }); };
@@ -27,12 +25,6 @@ export default function StoreManager({ stores, onAddStore, onUpdateStore, onDele
     setIsAdding(false);
     setEditingStore(null);
     resetForm();
-  };
-
-  const handleCopy = (text, key) => {
-    navigator.clipboard.writeText(text);
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 2000);
   };
 
   const handleTestConnection = async (id) => {
@@ -107,12 +99,19 @@ export default function StoreManager({ stores, onAddStore, onUpdateStore, onDele
             <div>
               <label className="block text-[#86868B] font-bold mb-1">API Secret</label>
               <input
+                required={!editingStore || !editingStore.has_api_secret}
                 type="password"
                 value={form.api_secret}
                 onChange={e => setForm(p => ({ ...p, api_secret: e.target.value }))}
-                placeholder={editingStore ? 'Leave blank to keep the current API Secret' : 'Sapo API Secret'}
+                placeholder={editingStore && editingStore.has_api_secret ? 'Đã lưu an toàn - để trống nếu không đổi' : 'Sapo API Secret'}
                 className="w-full px-4 py-2.5 bg-[#F2F2F7] border border-[#E5E5EA] rounded-2xl text-[#1D1D1F] font-mono focus:outline-none focus:border-[#0071E3] focus:bg-white"
               />
+              {editingStore?.has_api_secret && (
+                <p className="mt-1.5 text-[11px] text-[#147A3D] font-semibold flex items-center gap-1">
+                  <LockKeyhole className="w-3.5 h-3.5" />
+                  API Secret vẫn đang được lưu mã hóa. Hệ thống không hiển thị lại giá trị bí mật.
+                </p>
+              )}
             </div>
             <div className="md:col-span-2 flex gap-3 pt-2">
               <button type="submit" className="px-6 py-2.5 bg-[#0071E3] text-white font-bold rounded-full text-xs cursor-pointer shadow-sm">
@@ -145,10 +144,10 @@ export default function StoreManager({ stores, onAddStore, onUpdateStore, onDele
               </div>
             </div>
 
-            {store.api_key ? (
+            {store.api_key && store.has_api_secret ? (
               <div className="p-3 rounded-xl bg-[#F2F2F7] text-xs flex items-center justify-between gap-3">
-                <span className="text-[#86868B] font-bold flex items-center gap-1 whitespace-nowrap">
-                  <AlertCircle className="w-3.5 h-3.5" /> Đã lưu API key
+                <span className="text-[#147A3D] font-bold flex items-center gap-1">
+                  <LockKeyhole className="w-3.5 h-3.5 shrink-0" /> Đã lưu API Key và API Secret
                 </span>
                 <button
                   type="button"
@@ -163,7 +162,7 @@ export default function StoreManager({ stores, onAddStore, onUpdateStore, onDele
             ) : (
               <div className="p-3 rounded-xl bg-[#FFF4E5] text-xs text-[#FF9500] font-medium flex items-center gap-1.5">
                 <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>Chưa cài API Key</span>
+                <span>Thiếu API Key hoặc API Secret</span>
               </div>
             )}
           </div>

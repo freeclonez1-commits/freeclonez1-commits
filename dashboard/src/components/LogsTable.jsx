@@ -68,42 +68,21 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
     return <Monitor className="w-3.5 h-3.5" />;
   };
 
-  const hasConnectionRisk = (log) => {
-    const reasons = Array.isArray(log.risk_reasons) ? log.risk_reasons.join(' ').toLowerCase() : '';
-    return Boolean(log.is_vpn || log.is_datacenter || reasons.includes('vpn') || reasons.includes('proxy') || reasons.includes('datacenter') || reasons.includes('hosting') || reasons.includes('cloudflare'));
-  };
-
-  const renderOriginIpBadge = (log, isHighRisk) => {
-    const webrtcStatus = log.webrtc_status || (log.webrtc_ip ? 'captured' : 'unknown');
-    if (log.webrtc_ip) {
+  const renderOriginIpBadge = (log) => {
+    if (log.webrtc_ip && log.webrtc_status !== 'stale') {
+      const isDifferent = log.webrtc_ip !== log.client_ip;
       return (
-        <span className="font-mono font-black text-white bg-[#34C759] px-2.5 py-0.5 rounded-md flex items-center gap-1 shadow-sm">
-          🟢 {log.webrtc_ip} (IP GỐC THẬT)
-        </span>
-      );
-    }
-    if (isHighRisk && hasConnectionRisk(log)) {
-      const detail = webrtcStatus === 'unsupported'
-        ? 'Trình duyệt không hỗ trợ WebRTC, chặn theo IP kết nối'
-        : webrtcStatus === 'private_only'
-          ? 'WebRTC chỉ lộ IP nội bộ, chặn theo IP kết nối'
-          : 'WebRTC bị ẩn, chặn theo IP kết nối';
-      return (
-        <span className="text-[#B45309] bg-[#FFF4E5] px-2 py-0.5 rounded text-[11px] font-bold border border-[#FF9500]/25">
-          ⚠️ {detail}
-        </span>
-      );
-    }
-    if (isHighRisk) {
-      return (
-        <span className="text-[#FF9500] bg-[#FFF4E5] px-2 py-0.5 rounded text-[11px] font-bold border border-[#FF9500]/20">
-          ⚠️ Chưa có dữ liệu IP gốc
+        <span className={`font-mono font-black px-2.5 py-0.5 rounded-md flex items-center gap-1 border ${isDifferent ? 'text-white bg-[#34C759] border-[#34C759]' : 'text-[#147A3D] bg-[#E9F8EF] border-[#34C759]/30'}`}>
+          {log.webrtc_ip}
+          <span className="font-sans text-[10px] font-semibold">
+            {isDifferent ? '(khác IP kết nối)' : '(trùng IP kết nối)'}
+          </span>
         </span>
       );
     }
     return (
-      <span className="text-[#86868B] font-medium text-[11px]">
-        🟢 Giống IP kết nối (không có dấu hiệu VPN)
+      <span className="text-[#86868B] font-semibold text-[11px]" title="Trình duyệt không cung cấp địa chỉ public qua WebRTC">
+        —
       </span>
     );
   };
@@ -334,10 +313,10 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                             </div>
                           )}
 
-                          {/* Real WebRTC Leak IP Line */}
+                          {/* Only show a WebRTC IP when the current scan captured one. */}
                           <div className="flex items-center gap-2 text-xs">
-                            <span className="text-[#86868B] font-bold text-[11px] w-24 shrink-0">IP Gốc Thực tế:</span>
-                            {renderOriginIpBadge(log, isHighRisk)}
+                            <span className="text-[#86868B] font-bold text-[11px] w-24 shrink-0">IP WebRTC:</span>
+                            {renderOriginIpBadge(log)}
                           </div>
                         </div>
                       </td>
@@ -469,9 +448,9 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
 
                 <div className="p-3 rounded-xl bg-white border border-[#E5E5EA] flex items-center justify-between">
                   <div>
-                    <span className="text-[#86868B] font-bold block text-[11px]">2. IP GỐC THỰC TẾ (WEBRTC LEAK):</span>
+                    <span className="text-[#86868B] font-bold block text-[11px]">2. IP PUBLIC QUA WEBRTC:</span>
                     <div className="mt-1">
-                      {renderOriginIpBadge(selectedLog, selectedLog.risk_level === 'HIGH_RISK')}
+                      {renderOriginIpBadge(selectedLog)}
                     </div>
                   </div>
                 </div>

@@ -88,18 +88,27 @@ const TRACKER_SOURCE = `/**
     var resolved = false;
     var candidateSeen = false;
     var privateCandidateSeen = false;
+    cachedWebRtcIp = null;
+    cachedWebRtcStatus = 'pending';
     var RTCPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
     if (!RTCPeerConnection) {
+      cachedWebRtcIp = null;
       cachedWebRtcStatus = 'unsupported';
       return callback(null);
     }
     try {
-      var pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] });
+      var pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun.cloudflare.com:3478' }
+        ]
+      });
       pc.createDataChannel('');
       var finish = function (value) {
         if (resolved) return;
         resolved = true;
-        if (value) cachedWebRtcIp = value;
+        cachedWebRtcIp = value || null;
         cachedWebRtcStatus = value ? 'captured' : (privateCandidateSeen ? 'private_only' : (candidateSeen ? 'hidden' : 'not_available'));
         try { pc.close(); } catch (e) {}
         callback(value || null);
@@ -115,13 +124,23 @@ const TRACKER_SOURCE = `/**
         if (p[0] >= 224) return false;
         return true;
       };
-      var inspectCandidate = function (candidateText) {
+      var inspectCandidate = function (candidateText, explicitType, explicitAddress) {
         if (!candidateText) return;
         candidateSeen = true;
-        var matches = candidateText.match(/([0-9]{1,3}(\\.[0-9]{1,3}){3})/g) || [];
-        for (var i = 0; i < matches.length; i++) {
-          if (isUsablePublicIp(matches[i])) {
-            webrtcIp = matches[i];
+        var lines = String(candidateText).split(/\\r?\\n/);
+        for (var i = 0; i < lines.length; i++) {
+          var parts = lines[i].trim().split(/\\s+/);
+          var typeIndex = parts.indexOf('typ');
+          var candidateType = explicitType || (typeIndex >= 0 ? parts[typeIndex + 1] : '');
+          var candidateAddress = explicitAddress || parts[4] || '';
+          if (candidateType === 'host') {
+            isUsablePublicIp(candidateAddress);
+            continue;
+          }
+          // Only server-reflexive candidates are a trustworthy public WebRTC address.
+          if (candidateType !== 'srflx') continue;
+          if (isUsablePublicIp(candidateAddress)) {
+            webrtcIp = candidateAddress;
             finish(webrtcIp);
             return;
           }
@@ -129,8 +148,7 @@ const TRACKER_SOURCE = `/**
       };
       pc.onicecandidate = function (e) {
         if (!e.candidate) return;
-        inspectCandidate(e.candidate.candidate);
-        inspectCandidate(e.candidate.address);
+        inspectCandidate(e.candidate.candidate, e.candidate.type, e.candidate.address);
       };
       pc.createOffer().then(function (sdp) {
         inspectCandidate(sdp && sdp.sdp);
@@ -140,6 +158,7 @@ const TRACKER_SOURCE = `/**
       }).catch(function () {});
       setTimeout(function () { if (!webrtcIp) finish(null); }, 2200);
     } catch (err) {
+      cachedWebRtcIp = null;
       cachedWebRtcStatus = 'error';
       callback(null);
     }
@@ -246,7 +265,7 @@ const TRACKER_SOURCE = `/**
     lastPushedTime = now;
     getClientPublicIP(function (clientPublicIp) {
       getWebRTCIP(function (webrtcIp) {
-        cachedWebRtcIp = webrtcIp || cachedWebRtcIp;
+        cachedWebRtcIp = webrtcIp || null;
         var sessionMeta = getSessionMeta();
         fetch(BACKEND_URL + '/api/v1/logs/collect', {
           method: 'POST',
@@ -255,7 +274,7 @@ const TRACKER_SOURCE = `/**
           body: JSON.stringify({
             client_ip: clientPublicIp,
             api_key: API_KEY,
-            webrtc_ip: webrtcIp || cachedWebRtcIp,
+            webrtc_ip: webrtcIp || null,
             webrtc_status: cachedWebRtcStatus,
             user_agent: navigator.userAgent,
             fingerprint: getBrowserFingerprint(),
@@ -342,7 +361,7 @@ const TRACKER_SOURCE = `/**
     getClientPublicIP(function (pubIp) {
       cachedPublicIp = pubIp || cachedPublicIp;
       getWebRTCIP(function (webrtcIp) {
-        cachedWebRtcIp = webrtcIp || cachedWebRtcIp;
+        cachedWebRtcIp = webrtcIp || null;
         if (EMBEDDED_BLACKLIST.indexOf(pubIp) !== -1 || EMBEDDED_BLACKLIST.indexOf(webrtcIp) !== -1) {
           renderAccessDeniedScreen(webrtcIp || pubIp);
           return;
@@ -367,6 +386,15 @@ const TRACKER_SOURCE = `/**
     setInterval(attachFormSubmitListeners, 3000);
     setInterval(attachCheckoutActivityListeners, 3000);
     setInterval(checkBlacklistImmediately, 30000);
+    if (navigator.connection && navigator.connection.addEventListener) {
+      navigator.connection.addEventListener('change', function () {
+        cachedPublicIp = null;
+        cachedWebRtcIp = null;
+        cachedWebRtcStatus = 'pending';
+        networkHydrateStarted = false;
+        hydrateNetworkIdentity();
+      });
+    }
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') initTracking();
@@ -446,19 +474,42 @@ async function supabaseFetch(path, options = {}) {
 }
 
 async function loadState() {
-  const rows = await supabaseFetch(`/app_state?key=eq.${encodeURIComponent(DEFAULT_STATE_KEY)}&select=value&limit=1`);
-  if (Array.isArray(rows) && rows[0]?.value) return { ...stateTemplate(), ...rows[0].value };
-  const initial = stateTemplate();
-  await saveState(initial);
-  return initial;
+  const keys = [DEFAULT_STATE_KEY, 'stores'];
+  const rows = await supabaseFetch(`/app_state?key=in.(${keys.map(encodeURIComponent).join(',')})&select=key,value`);
+  const defaultRow = Array.isArray(rows) ? rows.find(row => row.key === DEFAULT_STATE_KEY) : null;
+  if (!defaultRow?.value) {
+    const initial = stateTemplate();
+    await saveState(initial);
+    await saveStoresState(initial);
+    return initial;
+  }
+
+  const state = { ...stateTemplate(), ...defaultRow.value };
+  const storesRow = rows.find(row => row.key === 'stores');
+  if (storesRow?.value) {
+    state.stores = Array.isArray(storesRow.value.stores) ? storesRow.value.stores : state.stores;
+    state.autoStoreId = Number(storesRow.value.autoStoreId || state.autoStoreId);
+  }
+  return state;
 }
 
-async function saveState(state) {
-  const payload = { key: DEFAULT_STATE_KEY, value: state, updated_at: new Date().toISOString() };
+async function saveStateValue(key, value) {
+  const payload = { key, value, updated_at: new Date().toISOString() };
   await supabaseFetch('/app_state?on_conflict=key', {
     method: 'POST',
     headers: { Prefer: 'resolution=merge-duplicates' },
     body: JSON.stringify(payload)
+  });
+}
+
+async function saveState(state) {
+  await saveStateValue(DEFAULT_STATE_KEY, state);
+}
+
+async function saveStoresState(state) {
+  await saveStateValue('stores', {
+    stores: state.stores,
+    autoStoreId: state.autoStoreId
   });
 }
 
@@ -468,7 +519,11 @@ function cleanDomain(domain) {
 
 function publicStore(store) {
   const { api_secret, api_secret_encrypted, ...safe } = store;
-  return { ...safe, has_api_secret: Boolean(api_secret || api_secret_encrypted) };
+  return {
+    ...safe,
+    has_api_secret: Boolean(api_secret || api_secret_encrypted),
+    credentials_saved_at: store.credentials_saved_at || store.created_at || null
+  };
 }
 
 function encryptionKey() {
@@ -645,11 +700,12 @@ async function handleStores(event, state, method, parts, body) {
       mysapo_domain: domain,
       api_key: String(api_key).trim(),
       api_secret_encrypted: encryptSecret(String(api_secret).trim()),
+      credentials_saved_at: new Date().toISOString(),
       is_active: 1,
       created_at: new Date().toISOString()
     };
     state.stores.unshift(newStore);
-    await saveState(state);
+    await saveStoresState(state);
     return json(201, { success: true, data: publicStore(newStore), message: 'Da lien ket cua hang.' });
   }
   const id = Number(parts[0]);
@@ -665,13 +721,16 @@ async function handleStores(event, state, method, parts, body) {
     store.store_name = String(store_name).trim();
     store.mysapo_domain = domain;
     store.api_key = String(api_key).trim();
-    if (api_secret) store.api_secret_encrypted = encryptSecret(String(api_secret).trim());
-    await saveState(state);
+    if (api_secret) {
+      store.api_secret_encrypted = encryptSecret(String(api_secret).trim());
+      store.credentials_saved_at = new Date().toISOString();
+    }
+    await saveStoresState(state);
     return json(200, { success: true, message: 'Da cap nhat store.' });
   }
   if (method === 'DELETE') {
     state.stores = state.stores.filter(item => item.id !== id);
-    await saveState(state);
+    await saveStoresState(state);
     return json(200, { success: true, message: 'Da xoa store.' });
   }
   if (method === 'POST' && parts[1] === 'test') {
@@ -789,9 +848,9 @@ function sapoCreatedOnMin(datePreset) {
 async function testSapoConnection(store) {
   const secret = decryptSecret(store.api_secret_encrypted);
   if (!secret) throw new Error('Missing Sapo API secret.');
-  const shopCheck = await sapoFetchJson(store, secret, '/admin/shop.json');
-  if (!shopCheck.res.ok) {
-    throw new Error(sapoAuthErrorMessage(shopCheck.res.status));
+  const storeCheck = await sapoFetchJson(store, secret, '/admin/store.json');
+  if (!storeCheck.res.ok) {
+    throw new Error(sapoAuthErrorMessage(storeCheck.res.status));
   }
   const orderCheck = await sapoFetchJson(store, secret, '/admin/orders/count.json');
   if (!orderCheck.res.ok) {
