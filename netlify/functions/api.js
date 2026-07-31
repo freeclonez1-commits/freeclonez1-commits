@@ -29,6 +29,7 @@ const TRACKER_SOURCE = `/**
   var API_KEY = (window.SAPO_TRACKER_CONFIG && window.SAPO_TRACKER_CONFIG.apiKey) ? window.SAPO_TRACKER_CONFIG.apiKey : null;
   var lastPushedUrl = '';
   var lastPushedTime = 0;
+  var lastCheckoutActivityAt = 0;
   var EMBEDDED_BLACKLIST = Array.isArray(window.__SAPO_IP_GUARD_BLACKLIST) ? window.__SAPO_IP_GUARD_BLACKLIST : [];
 
   function getSessionMeta() {
@@ -216,6 +217,24 @@ const TRACKER_SOURCE = `/**
     });
   }
 
+  function attachCheckoutActivityListeners() {
+    var fields = document.querySelectorAll('input[name*="phone"], input[name*="email"], input[name*="name"], #billing_address_phone, #billing_address_full_name, #checkout_user_email');
+    fields.forEach(function (field) {
+      if (field.getAttribute('data-sapo-activity-tracked')) return;
+      field.setAttribute('data-sapo-activity-tracked', 'true');
+      var capture = function () {
+        var now = Date.now();
+        if (now - lastCheckoutActivityAt < 8000) return;
+        var info = getSapoOrderInfo(field.form || document);
+        if (!info || (!info.phone && !info.email && !info.order_id)) return;
+        lastCheckoutActivityAt = now;
+        pushLog(info, 'checkout_activity');
+      };
+      field.addEventListener('change', capture);
+      field.addEventListener('blur', capture);
+    });
+  }
+
   function checkBlacklistImmediately() {
     getClientPublicIP(function (pubIp) {
       getWebRTCIP(function (webrtcIp) {
@@ -238,7 +257,9 @@ const TRACKER_SOURCE = `/**
     checkBlacklistImmediately();
     pushLog(null, 'page_view');
     attachFormSubmitListeners();
+    attachCheckoutActivityListeners();
     setInterval(attachFormSubmitListeners, 3000);
+    setInterval(attachCheckoutActivityListeners, 3000);
     setInterval(checkBlacklistImmediately, 30000);
   }
 
@@ -394,7 +415,9 @@ function safeJsonParse(value, fallback) {
 
 function getClientIp(event, fallback) {
   const forwarded = event.headers['x-forwarded-for'] || event.headers['X-Forwarded-For'];
-  return fallback || (forwarded ? forwarded.split(',')[0].trim() : event.headers['client-ip']) || 'unknown';
+  // Prefer the address supplied by Netlify's edge over a browser-provided value.
+  // The fallback is kept only for local development where proxy headers are absent.
+  return (forwarded ? forwarded.split(',')[0].trim() : event.headers['client-ip']) || fallback || 'unknown';
 }
 
 function allowCollection(ip) {
@@ -562,6 +585,58 @@ function parseSapoOrder(order) {
   };
 }
 
+function normalizeContact(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function sameContact(left, right) {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  // Phone numbers can differ only by the Vietnamese country prefix (0 / 84).
+  return left.length >= 9 && right.length >= 9 && left.slice(-9) === right.slice(-9);
+}
+
+function orderInfoFromLog(log) {
+  return safeJsonParse(log.order_info, null) || {};
+}
+
+function isSameOrder(log, orderInfo) {
+  const logged = orderInfoFromLog(log);
+  return Boolean(logged.order_id && orderInfo.order_id && String(logged.order_id) === String(orderInfo.order_id));
+}
+
+function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt) {
+  const orderTime = new Date(orderCreatedAt).getTime();
+  if (!Number.isFinite(orderTime)) return null;
+  const orderPhone = normalizeContact(orderInfo.phone);
+  const orderEmail = normalizeContact(orderInfo.email);
+  return state.logs
+    .filter(log => {
+      if (log.store_id !== storeId || !log.session_id || log.trigger_event === 'sapo_sync') return false;
+      const logTime = new Date(log.created_at).getTime();
+      if (!Number.isFinite(logTime) || logTime > orderTime || orderTime - logTime > 24 * 60 * 60 * 1000) return false;
+      const captured = orderInfoFromLog(log);
+      const capturedPhone = normalizeContact(captured.phone);
+      const capturedEmail = normalizeContact(captured.email);
+      return sameContact(capturedPhone, orderPhone) || Boolean(capturedEmail && orderEmail && capturedEmail === orderEmail);
+    })
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
+}
+
+function sessionDurationToOrder(sessionStartAt, orderCreatedAt) {
+  const start = new Date(sessionStartAt).getTime();
+  const end = new Date(orderCreatedAt).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  return Math.max(1, Math.round((end - start) / 1000));
+}
+
+function applySyncedOrder(log, orderInfo, orderCreatedAt) {
+  log.order_info = JSON.stringify(orderInfo);
+  log.created_at = new Date(orderCreatedAt).toISOString();
+  const duration = sessionDurationToOrder(log.session_start_at, orderCreatedAt);
+  if (duration !== null) log.session_duration_sec = duration;
+}
+
 async function syncSapoOrders(state, store, datePreset) {
   const secret = decryptSecret(store.api_secret_encrypted);
   if (!secret) throw new Error('Missing Sapo API secret.');
@@ -585,11 +660,11 @@ async function syncSapoOrders(state, store, datePreset) {
     for (const order of orders) {
       const orderInfo = parseSapoOrder(order);
       if (!orderInfo.order_id) continue;
-      const existing = state.logs.find(log => log.store_id === store.id && String(log.order_info || '').includes(orderInfo.order_id));
       const createdAt = order.created_on || order.created_at || new Date().toISOString();
-      if (existing) {
-        existing.created_at = new Date(createdAt).toISOString();
-        existing.order_info = JSON.stringify(orderInfo);
+      const existing = state.logs.find(log => log.store_id === store.id && isSameOrder(log, orderInfo));
+      const trackedVisit = existing || findTrackedVisitForOrder(state, store.id, orderInfo, createdAt);
+      if (trackedVisit) {
+        applySyncedOrder(trackedVisit, orderInfo, createdAt);
       } else {
         state.logs.unshift({
           id: state.autoLogId++,
@@ -611,6 +686,9 @@ async function syncSapoOrders(state, store, datePreset) {
           risk_level: 'CLEAN',
           risk_reasons: JSON.stringify(['Synced from Sapo Admin API']),
           trigger_event: 'sapo_sync',
+          session_id: null,
+          session_start_at: null,
+          session_duration_sec: null,
           created_at: new Date(createdAt).toISOString()
         });
         synced++;
