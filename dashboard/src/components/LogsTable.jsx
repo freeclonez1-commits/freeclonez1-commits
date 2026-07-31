@@ -74,6 +74,7 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
   };
 
   const renderOriginIpBadge = (log, isHighRisk) => {
+    const webrtcStatus = log.webrtc_status || (log.webrtc_ip ? 'captured' : 'unknown');
     if (log.webrtc_ip) {
       return (
         <span className="font-mono font-black text-white bg-[#34C759] px-2.5 py-0.5 rounded-md flex items-center gap-1 shadow-sm">
@@ -82,9 +83,14 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
       );
     }
     if (isHighRisk && hasConnectionRisk(log)) {
+      const detail = webrtcStatus === 'unsupported'
+        ? 'Trình duyệt không hỗ trợ WebRTC, chặn theo IP kết nối'
+        : webrtcStatus === 'private_only'
+          ? 'WebRTC chỉ lộ IP nội bộ, chặn theo IP kết nối'
+          : 'WebRTC bị ẩn, chặn theo IP kết nối';
       return (
         <span className="text-[#B45309] bg-[#FFF4E5] px-2 py-0.5 rounded text-[11px] font-bold border border-[#FF9500]/25">
-          ⚠️ WebRTC bị ẩn, đang chặn theo IP kết nối
+          ⚠️ {detail}
         </span>
       );
     }

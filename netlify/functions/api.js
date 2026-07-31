@@ -34,6 +34,7 @@ const TRACKER_SOURCE = `/**
   var EMBEDDED_BLACKLIST = Array.isArray(window.__SAPO_IP_GUARD_BLACKLIST) ? window.__SAPO_IP_GUARD_BLACKLIST : [];
   var cachedPublicIp = null;
   var cachedWebRtcIp = null;
+  var cachedWebRtcStatus = 'pending';
   var networkHydrateStarted = false;
 
   function getSessionMeta() {
@@ -85,8 +86,13 @@ const TRACKER_SOURCE = `/**
   function getWebRTCIP(callback) {
     var webrtcIp = null;
     var resolved = false;
+    var candidateSeen = false;
+    var privateCandidateSeen = false;
     var RTCPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
-    if (!RTCPeerConnection) return callback(null);
+    if (!RTCPeerConnection) {
+      cachedWebRtcStatus = 'unsupported';
+      return callback(null);
+    }
     try {
       var pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] });
       pc.createDataChannel('');
@@ -94,6 +100,7 @@ const TRACKER_SOURCE = `/**
         if (resolved) return;
         resolved = true;
         if (value) cachedWebRtcIp = value;
+        cachedWebRtcStatus = value ? 'captured' : (privateCandidateSeen ? 'private_only' : (candidateSeen ? 'hidden' : 'not_available'));
         try { pc.close(); } catch (e) {}
         callback(value || null);
       };
@@ -101,15 +108,16 @@ const TRACKER_SOURCE = `/**
         if (!ip || ip === '0.0.0.0' || ip === '127.0.0.1') return false;
         var p = ip.split('.').map(function (n) { return parseInt(n, 10); });
         if (p.length !== 4 || p.some(function (n) { return !Number.isFinite(n) || n < 0 || n > 255; })) return false;
-        if (p[0] === 10 || p[0] === 127 || p[0] === 0) return false;
-        if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return false;
-        if (p[0] === 192 && p[1] === 168) return false;
-        if (p[0] === 169 && p[1] === 254) return false;
+        if (p[0] === 10 || p[0] === 127 || p[0] === 0) { privateCandidateSeen = true; return false; }
+        if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) { privateCandidateSeen = true; return false; }
+        if (p[0] === 192 && p[1] === 168) { privateCandidateSeen = true; return false; }
+        if (p[0] === 169 && p[1] === 254) { privateCandidateSeen = true; return false; }
         if (p[0] >= 224) return false;
         return true;
       };
       var inspectCandidate = function (candidateText) {
         if (!candidateText) return;
+        candidateSeen = true;
         var matches = candidateText.match(/([0-9]{1,3}(\\.[0-9]{1,3}){3})/g) || [];
         for (var i = 0; i < matches.length; i++) {
           if (isUsablePublicIp(matches[i])) {
@@ -132,6 +140,7 @@ const TRACKER_SOURCE = `/**
       }).catch(function () {});
       setTimeout(function () { if (!webrtcIp) finish(null); }, 2200);
     } catch (err) {
+      cachedWebRtcStatus = 'error';
       callback(null);
     }
   }
@@ -247,6 +256,7 @@ const TRACKER_SOURCE = `/**
             client_ip: clientPublicIp,
             api_key: API_KEY,
             webrtc_ip: webrtcIp || cachedWebRtcIp,
+            webrtc_status: cachedWebRtcStatus,
             user_agent: navigator.userAgent,
             fingerprint: getBrowserFingerprint(),
             order_info: orderInfo || getSapoOrderInfo(),
@@ -310,6 +320,7 @@ const TRACKER_SOURCE = `/**
         fingerprint: getBrowserFingerprint(),
         client_ip: cachedPublicIp,
         webrtc_ip: cachedWebRtcIp,
+        webrtc_status: cachedWebRtcStatus,
         url: window.location.href,
         last_clicked_url: clickedUrl,
         device_type: getDeviceType(),
@@ -746,6 +757,28 @@ function sapoAuthHeaders(store, secret) {
   };
 }
 
+async function sapoFetchJson(store, secret, path) {
+  const url = `https://${store.mysapo_domain}${path}`;
+  const res = await fetch(url, { headers: sapoAuthHeaders(store, secret) });
+  let data = null;
+  try {
+    data = await res.json();
+  } catch (_) {
+    data = null;
+  }
+  return { res, data };
+}
+
+function sapoAuthErrorMessage(status) {
+  if (status === 401) {
+    return 'Sapo tu choi xac thuc (401). API Key/API Secret khong dung, khong thuoc store nay, hoac khong phai cap Private App dang hoat dong.';
+  }
+  if (status === 403) {
+    return 'Sapo da xac thuc app nhung chua cap quyen doc don hang (403). Hay vao Private App va bat quyen doc Orders.';
+  }
+  return `Sapo API error ${status}`;
+}
+
 function sapoCreatedOnMin(datePreset) {
   const day = datePreset === 'TODAY'
     ? businessDate()
@@ -756,15 +789,19 @@ function sapoCreatedOnMin(datePreset) {
 async function testSapoConnection(store) {
   const secret = decryptSecret(store.api_secret_encrypted);
   if (!secret) throw new Error('Missing Sapo API secret.');
-  const url = `https://${store.mysapo_domain}/admin/orders/count.json`;
-  const res = await fetch(url, { headers: sapoAuthHeaders(store, secret) });
-  if (!res.ok) {
-    if (res.status === 401) {
-      throw new Error('Sapo tu choi xac thuc (401). API Key/API Secret hien tai khong phai cap Private App hop le, hoac app chua co quyen doc don hang.');
-    }
-    throw new Error(`Sapo API error ${res.status}`);
+  const shopCheck = await sapoFetchJson(store, secret, '/admin/shop.json');
+  if (!shopCheck.res.ok) {
+    throw new Error(sapoAuthErrorMessage(shopCheck.res.status));
   }
-  return { success: true, message: 'Ket noi Sapo thanh cong.' };
+  const orderCheck = await sapoFetchJson(store, secret, '/admin/orders/count.json');
+  if (!orderCheck.res.ok) {
+    if (orderCheck.res.status === 401 || orderCheck.res.status === 403) {
+      throw new Error('Da xac thuc duoc store Sapo, nhung app chua doc duoc don hang. Hay kiem tra quyen Orders/Don hang trong Private App roi luu lai.');
+    }
+    throw new Error(sapoAuthErrorMessage(orderCheck.res.status));
+  }
+  const count = Number(orderCheck.data?.count ?? orderCheck.data?.orders_count ?? 0);
+  return { success: true, message: `Ket noi Sapo thanh cong. API doc duoc don hang (${count} don).`, order_count: count };
 }
 
 async function syncSapoOrders(state, store, datePreset) {
@@ -774,18 +811,14 @@ async function syncSapoOrders(state, store, datePreset) {
   let total = 0;
   let synced = 0;
   for (let page = 1; page <= 10; page++) {
-    const url = `https://${store.mysapo_domain}/admin/orders.json?limit=250&page=${page}&created_on_min=${encodeURIComponent(since)}`;
-    const res = await fetch(url, { headers: sapoAuthHeaders(store, secret) });
+    const path = `/admin/orders.json?limit=250&page=${page}&created_on_min=${encodeURIComponent(since)}`;
+    const { res, data } = await sapoFetchJson(store, secret, path);
     if (!res.ok) {
       if (page === 1) {
-        const detail = res.status === 401
-          ? 'Sapo tu choi xac thuc (401). Hay mo Lien ket Mysapo, sua va luu lai dung API Key + API Secret cua store.'
-          : `Sapo API error ${res.status}`;
-        throw new Error(detail);
+        throw new Error(sapoAuthErrorMessage(res.status));
       }
       break;
     }
-    const data = await res.json();
     const orders = data.orders || [];
     if (!orders.length) break;
     total += orders.length;
@@ -864,6 +897,7 @@ async function handleLogs(event, state, method, parts, query, body) {
       store_domain: matched.mysapo_domain,
       client_ip: realClientIp,
       webrtc_ip: body?.webrtc_ip || null,
+      webrtc_status: body?.webrtc_status || (body?.webrtc_ip ? 'captured' : 'unknown'),
       user_agent: body?.user_agent || null,
       fingerprint: body?.fingerprint || null,
       order_info: body?.order_info ? (typeof body.order_info === 'object' ? JSON.stringify(body.order_info) : String(body.order_info)) : null,
