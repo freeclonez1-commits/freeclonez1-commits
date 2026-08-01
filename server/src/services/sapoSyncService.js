@@ -50,7 +50,7 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
 
   const seenOrderIds = new Set();
   for (let page = 1; page <= 50; page++) {
-    const minParam = minDate ? `&created_at_min=${encodeURIComponent(minDate)}` : '';
+    const minParam = minDate ? `&created_on_min=${encodeURIComponent(minDate)}` : '';
     let url = `https://${mysapo_domain}/admin/orders.json?limit=250&page=${page}${minParam}`;
     try {
       let res = await axios.get(url, {
@@ -111,18 +111,24 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
   let syncCount = 0;
   let updatedCount = 0;
 
+  const ipAnalysisCache = new Map();
+
   for (const ord of sapoOrders) {
-    const clientIp = ord.browser_ip || ord.client_details?.browser_ip || 'unknown';
     const orderIdStr = ord.name || `#${ord.id}`;
     
-    // Check both created_on and created_at fields from Sapo API
-    const sapoRawDate = ord.created_on || ord.created_at || ord.processed_at;
-    const realCreatedAt = parseSapoDate(sapoRawDate);
-
     // Check if order log already exists
     const existing = db.prepare(`
-      SELECT * FROM logs WHERE store_id = ? AND order_info LIKE ?
+      SELECT id FROM logs WHERE store_id = ? AND order_info LIKE ?
     `).get(store.id, `%${orderIdStr}%`);
+
+    if (existing) {
+      updatedCount++;
+      continue;
+    }
+
+    const clientIp = ord.browser_ip || ord.client_details?.browser_ip || 'unknown';
+    const sapoRawDate = ord.created_on || ord.created_at || ord.processed_at;
+    const realCreatedAt = parseSapoDate(sapoRawDate);
 
     const orderInfoObj = {
       order_id: orderIdStr,
@@ -132,8 +138,15 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
       total_price: ord.total_price || ord.total
     };
 
-    // Analyze Risk
-    const analysis = await analyzeRisk(clientIp, null);
+    // Fast cached Risk Analysis
+    let analysis;
+    if (ipAnalysisCache.has(clientIp)) {
+      analysis = ipAnalysisCache.get(clientIp);
+    } else {
+      analysis = await analyzeRisk(clientIp, null);
+      ipAnalysisCache.set(clientIp, analysis);
+    }
+
     const blacklistCheck = db.prepare('SELECT * FROM blacklist WHERE ip = ?').get(clientIp);
 
     let finalRiskLevel = analysis.riskLevel;
@@ -144,54 +157,36 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
       finalReasons.push(`IP nằm trong Danh sách đen (Lý do: ${blacklistCheck.reason || 'Bị chặn bởi quản trị viên'})`);
     }
 
-    // Only set capturedWebRtcIp if a real browser session matched this order
-    let capturedWebRtcIp = null;
+    const stmt = db.prepare(`
+      INSERT INTO logs (
+        store_id, store_domain, client_ip, webrtc_ip, user_agent, fingerprint, order_info,
+        country, country_code, city, isp, org,
+        is_vpn, is_datacenter, webrtc_mismatch, risk_level, risk_reasons, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
 
-    if (!existing) {
-      const stmt = db.prepare(`
-        INSERT INTO logs (
-          store_id, store_domain, client_ip, webrtc_ip, user_agent, fingerprint, order_info,
-          country, country_code, city, isp, org,
-          is_vpn, is_datacenter, webrtc_mismatch, risk_level, risk_reasons, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
+    stmt.run(
+      store.id,
+      store.mysapo_domain,
+      clientIp,
+      null,
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Sapo Order Sync',
+      'FP-SAPO-SYNCED',
+      JSON.stringify(orderInfoObj),
+      analysis.ipData.country || 'Vietnam',
+      analysis.ipData.countryCode || 'VN',
+      analysis.ipData.city || 'Hanoi',
+      analysis.ipData.isp || 'Viettel Group',
+      analysis.ipData.org || 'Viettel Network',
+      analysis.isVpn ? 1 : 0,
+      analysis.isDatacenter ? 1 : 0,
+      0,
+      finalRiskLevel,
+      JSON.stringify(finalReasons),
+      realCreatedAt
+    );
 
-      stmt.run(
-        store.id,
-        store.mysapo_domain,
-        clientIp,
-        capturedWebRtcIp,
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Sapo Order Sync',
-        'FP-SAPO-SYNCED',
-        JSON.stringify(orderInfoObj),
-        analysis.ipData.country || 'Vietnam',
-        analysis.ipData.countryCode || 'VN',
-        analysis.ipData.city || 'Hanoi',
-        analysis.ipData.isp || 'Viettel Group',
-        analysis.ipData.org || 'Viettel Network',
-        analysis.isVpn ? 1 : 0,
-        analysis.isDatacenter ? 1 : 0,
-        0,
-        finalRiskLevel,
-        JSON.stringify(finalReasons),
-        realCreatedAt
-      );
-
-      syncCount++;
-    } else {
-      const updateStmt = db.prepare(`
-        UPDATE logs SET client_ip = ?, risk_level = ?, order_info = ?, risk_reasons = ? WHERE id = ?
-      `);
-      updateStmt.run(clientIp, finalRiskLevel, JSON.stringify(orderInfoObj), JSON.stringify(finalReasons), existing.id);
-
-      // Directly update created_at timestamp in memory store
-      const allLogs = db.prepare('SELECT * FROM logs').all();
-      const targetLog = allLogs.find(l => l.id === existing.id);
-      if (targetLog) {
-        targetLog.created_at = realCreatedAt;
-      }
-      updatedCount++;
-    }
+    syncCount++;
   }
 
   console.log(`[Sapo Sync Summary] Total Sapo Orders: ${sapoOrders.length}, Synced New: ${syncCount}, Updated Dates: ${updatedCount}`);
