@@ -226,7 +226,29 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
               Tất cả thời gian
             </button>
           </div>
-        </div>
+        {/* Info Banner when logs exist in system but filtered count is 0 */}
+        {logs && logs.length > 0 && displayedLogs.length === 0 && (
+          <div className="p-3.5 px-5 rounded-2xl bg-[#E8F2FF] border border-[#0071E3]/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs font-bold text-[#0071E3] animate-fadeIn">
+            <div className="flex items-center gap-2">
+              <Calendar className="w-4 h-4 shrink-0 text-[#0071E3]" />
+              <span>
+                {isTodayDefault
+                  ? `Đã lưu ${logs.length} dữ liệu trong hệ thống. Chưa phát sinh đơn mới trong ngày hôm nay (${new Date().toLocaleDateString('vi-VN')}).`
+                  : `Đã lưu ${logs.length} dữ liệu trong hệ thống. Không có mục nào khớp bộ lọc hiện tại.`}
+              </span>
+            </div>
+            <button
+              onClick={() => {
+                handleDatePreset('ALL');
+                handleRiskFilter('ALL');
+                setFilters(prev => ({ ...prev, search: '', page: 1 }));
+              }}
+              className="px-3.5 py-1.5 bg-[#0071E3] text-white rounded-full transition-all shrink-0 hover:bg-[#0077ED] cursor-pointer shadow-sm text-xs font-extrabold"
+            >
+              🌐 Hiển thị tất cả ({logs.length})
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Spacious Widescreen Table */}
@@ -577,6 +599,7 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
           </div>
         </div>
       )}
+    </div>
     </div>
   );
 }

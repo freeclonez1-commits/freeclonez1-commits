@@ -911,10 +911,16 @@ function sapoAuthErrorMessage(status) {
 }
 
 function sapoCreatedOnMin(datePreset) {
-  const day = datePreset === 'TODAY'
-    ? businessDate()
-    : businessDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
-  return `${day} 00:00`;
+  if (datePreset === 'ALL') return '2020-01-01 00:00';
+  if (datePreset === '7_DAYS') {
+    const d = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
+    return `${businessDate(d)} 00:00`;
+  }
+  if (datePreset === '30_DAYS') {
+    const d = new Date(Date.now() - 29 * 24 * 60 * 60 * 1000);
+    return `${businessDate(d)} 00:00`;
+  }
+  return `${businessDate()} 00:00`;
 }
 
 async function testSapoConnection(store) {
@@ -924,7 +930,7 @@ async function testSapoConnection(store) {
   if (!storeCheck.res.ok) {
     throw new Error(sapoAuthErrorMessage(storeCheck.res.status));
   }
-  const orderCheck = await sapoFetchJson(store, secret, '/admin/orders/count.json');
+  const orderCheck = await sapoFetchJson(store, secret, '/admin/orders/count.json?status=any');
   if (!orderCheck.res.ok) {
     if (orderCheck.res.status === 401 || orderCheck.res.status === 403) {
       throw new Error('Da xac thuc duoc store Sapo, nhung app chua doc duoc don hang. Hay kiem tra quyen Orders/Don hang trong Private App roi luu lai.');
@@ -942,15 +948,24 @@ async function syncSapoOrders(state, store, datePreset) {
   let total = 0;
   let synced = 0;
   for (let page = 1; page <= 10; page++) {
-    const path = `/admin/orders.json?limit=250&page=${page}&created_on_min=${encodeURIComponent(since)}`;
-    const { res, data } = await sapoFetchJson(store, secret, path);
+    let path = `/admin/orders.json?status=any&limit=250&page=${page}&created_on_min=${encodeURIComponent(since)}`;
+    let { res, data } = await sapoFetchJson(store, secret, path);
+    if (!res.ok || !data?.orders?.length) {
+      // Fallback try with created_at_min parameter if created_on_min returned empty
+      const altPath = `/admin/orders.json?status=any&limit=250&page=${page}&created_at_min=${encodeURIComponent(since)}`;
+      const altResult = await sapoFetchJson(store, secret, altPath);
+      if (altResult.res.ok && altResult.data?.orders?.length) {
+        res = altResult.res;
+        data = altResult.data;
+      }
+    }
     if (!res.ok) {
       if (page === 1) {
         throw new Error(sapoAuthErrorMessage(res.status));
       }
       break;
     }
-    const orders = data.orders || [];
+    const orders = data?.orders || [];
     if (!orders.length) break;
     total += orders.length;
     for (const order of orders) {
