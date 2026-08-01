@@ -87,22 +87,17 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
   };
 
   const renderOriginIpBadge = (log, { full = false } = {}) => {
-    if (log.webrtc_ip && log.webrtc_status !== 'stale') {
-      const isDifferent = log.webrtc_ip !== log.client_ip;
+    if (log.webrtc_ip && log.webrtc_ip !== log.client_ip && log.webrtc_status !== 'stale') {
       return (
-        <span title={log.webrtc_ip} className={`font-mono font-black px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all ${isDifferent ? 'text-white bg-[#34C759] border-[#34C759]' : 'text-[#147A3D] bg-[#E9F8EF] border-[#34C759]/30'}`}>
+        <span title={log.webrtc_ip} className="font-mono font-black px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-white bg-[#FF3B30] border-[#FF3B30] shadow-sm">
           {full ? log.webrtc_ip : compactIp(log.webrtc_ip)}
-          <span className="font-sans text-[10px] font-semibold">
-            {isDifferent ? '(khác IP kết nối)' : '(trùng IP kết nối)'}
+          <span className="font-sans text-[10px] font-black">
+            (Dấu vết Fake IP)
           </span>
         </span>
       );
     }
-    return (
-      <span className="text-[#86868B] font-semibold text-[11px]" title="Trình duyệt không cung cấp địa chỉ public qua WebRTC">
-        —
-      </span>
-    );
+    return null;
   };
 
   return (
@@ -122,30 +117,10 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
             />
           </div>
 
-          {/* View Mode Toggle: Orders Only vs All */}
-          <div className="flex items-center gap-1 bg-[#E8F2FF] p-1 rounded-full text-xs font-bold border border-[#0071E3]/20 overflow-x-auto">
-            <button
-              onClick={() => handleViewMode(true)}
-              className={`px-3 sm:px-4 py-1.5 rounded-full transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                ordersOnlyFilter
-                  ? 'bg-[#0071E3] text-white shadow-sm'
-                  : 'text-[#0071E3] hover:bg-[#0071E3]/10'
-              }`}
-            >
-              <ShoppingCart className="w-3.5 h-3.5 shrink-0" />
-              <span>🛒 Chỉ Đơn Hàng ({pagination?.orderTotal ?? (logs ? logs.filter(l => l.order_info !== null).length : 0)})</span>
-            </button>
-            <button
-              onClick={() => handleViewMode(false)}
-              className={`px-3 sm:px-4 py-1.5 rounded-full transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                !ordersOnlyFilter
-                  ? 'bg-[#1D1D1F] text-[#E5E5EA] shadow-sm'
-                  : 'text-[#86868B] hover:text-[#1D1D1F]'
-              }`}
-            >
-              <Globe className="w-3.5 h-3.5 shrink-0" />
-              <span>🌐 Tất Cả (Gồm lượt xem trang)</span>
-            </button>
+          {/* Orders Counter Badge */}
+          <div className="flex items-center gap-1.5 bg-[#E8F2FF] px-4 py-2 rounded-full text-xs font-black text-[#0071E3] border border-[#0071E3]/20 shadow-sm shrink-0">
+            <ShoppingCart className="w-4 h-4 shrink-0 text-[#0071E3]" />
+            <span>🛒 Danh sách Đơn Hàng ({pagination?.orderTotal ?? (logs ? logs.filter(l => l.order_info !== null).length : 0)})</span>
           </div>
 
           {/* Status Tabs */}
@@ -363,11 +338,13 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
                             </div>
                           )}
 
-                          {/* Only show a WebRTC IP when the current scan captured one. */}
-                          <div className="flex items-center gap-2 text-xs">
-                            <span className="text-[#86868B] font-bold text-[11px] w-24 shrink-0">IP WebRTC:</span>
-                            {renderOriginIpBadge(log)}
-                          </div>
+                          {/* Only show a WebRTC IP when there is a real WebRTC leak / Fake IP */}
+                          {log.webrtc_ip && log.webrtc_ip !== log.client_ip && (
+                            <div className="flex items-center gap-2 text-xs">
+                              <span className="text-[#86868B] font-bold text-[11px] w-24 shrink-0">IP WebRTC:</span>
+                              {renderOriginIpBadge(log)}
+                            </div>
+                          )}
                         </div>
                       </td>
 
@@ -478,6 +455,128 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
             </tbody>
           </table>
         </div>
+      </div>
+
+      {/* Mobile Card List (visible on mobile < lg) */}
+      <div className="block lg:hidden space-y-3.5">
+        {displayedLogs && displayedLogs.length > 0 ? (
+          displayedLogs.map((log) => {
+            const isHighRisk = log.risk_level === 'HIGH_RISK';
+            const isUnknown = isUnknownLog(log);
+            const order = log.order_info;
+            const isBlocked = log.is_blacklisted;
+
+            return (
+              <div
+                key={log.id}
+                className={`p-4 rounded-3xl apple-card bg-white border border-[#E5E5EA] shadow-sm space-y-3 ${
+                  isBlocked ? 'border-[#FF3B30]/40 bg-[#FF3B30]/5' : (isHighRisk ? 'border-[#FF3B30]/30' : '')
+                }`}
+              >
+                {/* Header: Date + Status Badge */}
+                <div className="flex items-center justify-between gap-2 border-b border-[#F2F2F7] pb-2.5">
+                  <div className="text-[11px] font-bold text-[#86868B] font-mono">
+                    ⏰ {new Date(log.created_at).toLocaleTimeString('vi-VN')} · {new Date(log.created_at).toLocaleDateString('vi-VN')}
+                  </div>
+                  {isBlocked ? (
+                    <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-[#FF3B30] text-white">
+                      🚫 ĐÃ CHẶN
+                    </span>
+                  ) : isHighRisk ? (
+                    <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-[#FF3B30]/10 text-[#FF3B30] border border-[#FF3B30]/30">
+                      🔴 FAKE IP / VPN
+                    </span>
+                  ) : (
+                    <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-[#34C759]/10 text-[#34C759] border border-[#34C759]/30">
+                      🟢 IP THẬT AN TOÀN
+                    </span>
+                  )}
+                </div>
+
+                {/* Body: Order Info & User Time */}
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    {order ? (
+                      <div className="space-y-1">
+                        <span className="inline-flex items-center gap-1 font-black text-[#0071E3] text-sm bg-[#E8F2FF] px-2.5 py-0.5 rounded-lg border border-[#0071E3]/20">
+                          🛒 {order.order_id || 'N/A'}
+                        </span>
+                        <div className="font-bold text-[#1D1D1F] text-xs">
+                          {order.customer_name || 'Khách vãng lai'}
+                        </div>
+                        {order.phone && (
+                          <div className="text-[11px] text-[#0071E3] font-mono font-bold">
+                            📞 {order.phone}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="font-bold text-xs text-[#1D1D1F]">Lượt xem trang</span>
+                    )}
+                  </div>
+
+                  <div className="text-right">
+                    <span className="text-[10px] font-bold text-[#86868B] block">Thao tác:</span>
+                    <span className="inline-flex items-center gap-1 text-xs font-black text-[#1D1D1F] bg-[#F2F2F7] px-2.5 py-1 rounded-lg border border-[#E5E5EA]">
+                      ⏱️ {log.time_to_order || 'Chưa bắt được phiên'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* IP Info Box */}
+                <div className="p-3 rounded-2xl bg-[#F9F9FB] border border-[#E5E5EA] space-y-1.5 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-1">
+                    <span className="text-[#86868B] font-bold text-[11px]">IP Kết nối:</span>
+                    <span className={`font-mono font-extrabold text-xs px-2 py-0.5 rounded-md ${isHighRisk ? 'text-[#FF3B30] bg-[#FF3B30]/10' : 'text-[#34C759] bg-[#34C759]/10'}`}>
+                      {log.client_ip} ({log.isp || 'N/A'})
+                    </span>
+                  </div>
+                  {log.webrtc_ip && log.webrtc_ip !== log.client_ip && (
+                    <div className="flex flex-wrap items-center justify-between gap-1 pt-1 border-t border-[#E5E5EA]">
+                      <span className="text-[#86868B] font-bold text-[11px]">IP WebRTC:</span>
+                      <span className="font-mono font-black text-xs text-white bg-[#FF3B30] px-2 py-0.5 rounded-md">
+                        {log.webrtc_ip} (Fake IP)
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Action Buttons */}
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={() => setSelectedLog(log)}
+                    className="flex-1 py-2 bg-[#F2F2F7] hover:bg-[#E5E5EA] text-[#0071E3] font-bold text-xs rounded-xl flex items-center justify-center gap-1 cursor-pointer"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>Chi tiết</span>
+                  </button>
+                  {isBlocked ? (
+                    <button
+                      onClick={() => handleUnblockIp(log)}
+                      className="flex-1 py-2 bg-[#34C759] text-white font-extrabold text-xs rounded-xl flex items-center justify-center gap-1 cursor-pointer shadow-sm"
+                    >
+                      <Unlock className="w-3.5 h-3.5" />
+                      <span>Bỏ Chặn IP</span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => handleBlockIp(log)}
+                      disabled={isUnknown}
+                      className={`flex-1 py-2 font-bold text-xs rounded-xl flex items-center justify-center gap-1 ${
+                        isUnknown
+                          ? 'bg-[#F2F2F7] text-[#AEAEB2] cursor-not-allowed'
+                          : 'bg-[#FF3B30] text-white cursor-pointer shadow-sm'
+                      }`}
+                    >
+                      <Ban className="w-3.5 h-3.5" />
+                      <span>Chặn IP</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })
+        ) : null}
       </div>
 
       {/* Detail Modal with Time to Order */}
