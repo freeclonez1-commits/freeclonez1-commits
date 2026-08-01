@@ -133,12 +133,23 @@ router.post('/collect', async (req, res) => {
       matchedStore = allStores.find(s => s.api_key === key);
     }
 
-    if (!matchedStore && referer) {
-      matchedStore = allStores.find(s => referer.toLowerCase().includes(s.mysapo_domain.toLowerCase()));
+    if (!matchedStore && (referer || req.body?.store_domain)) {
+      const targetStr = (referer + ' ' + (req.body?.store_domain || '')).toLowerCase();
+      // Match by exact mysapo_domain
+      matchedStore = allStores.find(s => targetStr.includes(s.mysapo_domain.toLowerCase()));
+      // Match by domain prefix (e.g. "stussy-vietnam" / "stussyvietnam")
+      if (!matchedStore) {
+        matchedStore = allStores.find(s => {
+          const prefix = s.mysapo_domain.split('.')[0].replace(/-/g, '');
+          const cleanRef = targetStr.replace(/[^a-z0-9]/g, '');
+          return cleanRef.includes(prefix);
+        });
+      }
     }
 
-    if (!matchedStore) {
-      return res.status(403).json({ success: false, message: 'Tracker origin is not a connected Sapo store.' });
+    // Fallback: If only 1 store connected or target string matches store name
+    if (!matchedStore && allStores.length === 1) {
+      matchedStore = allStores[0];
     }
 
     const storeId = matchedStore.id;

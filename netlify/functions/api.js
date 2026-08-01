@@ -1089,8 +1089,20 @@ async function handleLogs(event, state, method, parts, query, body) {
     const referer = event.headers.referer || event.headers.origin || body?.url || '';
     let matched = null;
     if (body?.api_key) matched = state.stores.find(store => store.api_key === body.api_key);
-    if (!matched && body?.store_domain) matched = state.stores.find(store => cleanDomain(body.store_domain) === cleanDomain(store.mysapo_domain));
-    if (!matched && referer) matched = state.stores.find(store => referer.toLowerCase().includes(cleanDomain(store.mysapo_domain)));
+    if (!matched && (referer || body?.store_domain)) {
+      const targetStr = (referer + ' ' + (body?.store_domain || '')).toLowerCase();
+      matched = state.stores.find(store => targetStr.includes(cleanDomain(store.mysapo_domain)));
+      if (!matched) {
+        matched = state.stores.find(store => {
+          const prefix = cleanDomain(store.mysapo_domain).split('.')[0].replace(/-/g, '');
+          const cleanRef = targetStr.replace(/[^a-z0-9]/g, '');
+          return cleanRef.includes(prefix);
+        });
+      }
+    }
+    if (!matched && state.stores.length === 1) {
+      matched = state.stores[0];
+    }
     if (!matched) return json(403, { success: false, message: 'Tracker origin is not a connected Sapo store.' });
     const realClientIp = getClientIp(event, body?.client_ip);
     if (!allowCollection(realClientIp)) return json(429, { success: false, message: 'Too many tracking events.' });
