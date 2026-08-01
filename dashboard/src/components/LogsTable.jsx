@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, AlertTriangle, ShieldCheck, ShieldAlert, Ban, Eye, X, Globe, Calendar, ShoppingCart, Wifi, Clock, CheckCircle2, Unlock, Monitor, Smartphone, Tablet, MousePointer2, CircleOff } from 'lucide-react';
+import { Search, AlertTriangle, ShieldCheck, ShieldAlert, Ban, Eye, X, Globe, Calendar, ShoppingCart, Wifi, Clock, CheckCircle2, Unlock, Monitor, Smartphone, Tablet, MousePointer2, CircleOff, ChevronLeft, ChevronRight } from 'lucide-react';
 import { businessDate, businessDateDaysAgo } from '../utils/dates';
 
 export default function LogsTable({ logs, pagination, filters, setFilters, onAddToBlacklist, onRemoveFromBlacklist, onDeleteLog }) {
@@ -36,13 +36,13 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
 
   const handleDatePreset = (preset) => {
     if (preset === 'ALL') {
-      setFilters(prev => ({ ...prev, startDate: '', endDate: '', page: 1 }));
+      setFilters(prev => ({ ...prev, startDate: '', endDate: '', page: 1, limit: 100 }));
     } else if (preset === 'TODAY') {
-      setFilters(prev => ({ ...prev, startDate: todayStr, endDate: todayStr, page: 1 }));
+      setFilters(prev => ({ ...prev, startDate: todayStr, endDate: todayStr, page: 1, limit: 20 }));
     } else if (preset === '7_DAYS') {
-      setFilters(prev => ({ ...prev, startDate: businessDateDaysAgo(6), endDate: todayStr, page: 1 }));
+      setFilters(prev => ({ ...prev, startDate: businessDateDaysAgo(6), endDate: todayStr, page: 1, limit: 50 }));
     } else if (preset === '30_DAYS') {
-      setFilters(prev => ({ ...prev, startDate: businessDateDaysAgo(29), endDate: todayStr, page: 1 }));
+      setFilters(prev => ({ ...prev, startDate: businessDateDaysAgo(29), endDate: todayStr, page: 1, limit: 50 }));
     }
   };
 
@@ -72,13 +72,13 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
     return true;
   };
 
-  // Backend filters orders before pagination; keep this as a visual guard while data refreshes.
+  // Backend filters orders before pagination; render full log dataset received
   const displayedLogs = logs ? logs.filter(log => {
     if (ordersOnlyFilter) {
       return log.order_info !== null;
     }
     return true;
-  }).slice(0, 20) : [];
+  }) : [];
 
   const renderDeviceIcon = (device) => {
     if (device === 'Mobile') return <Smartphone className="w-3.5 h-3.5" />;
@@ -578,6 +578,47 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
           })
         ) : null}
       </div>
+
+      {/* Pagination Controls Bar */}
+      {pagination && pagination.totalPages > 1 && (
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-4 sm:p-5 rounded-3xl apple-card bg-white border border-[#E5E5EA] shadow-sm text-xs font-bold w-full">
+          <div className="text-[#86868B] font-bold">
+            Hiển thị trang <strong className="text-[#1D1D1F]">{pagination.page}</strong> / <strong className="text-[#1D1D1F]">{pagination.totalPages}</strong> (Tổng cộng <strong className="text-[#0071E3]">{pagination.total}</strong> đơn hàng trong khoảng thời gian đã chọn)
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setFilters(prev => ({ ...prev, page: Math.max(1, (pagination.page || 1) - 1) }))}
+              disabled={pagination.page <= 1}
+              className={`px-4 py-2 rounded-full transition-all flex items-center gap-1 shadow-sm text-xs font-bold ${
+                pagination.page <= 1
+                  ? 'bg-[#F2F2F7] text-[#AEAEB2] cursor-not-allowed'
+                  : 'bg-[#0071E3] text-white hover:bg-[#0077ED] cursor-pointer'
+              }`}
+            >
+              <ChevronLeft className="w-4 h-4" />
+              <span>Trang trước</span>
+            </button>
+
+            <span className="px-3.5 py-1.5 bg-[#F2F2F7] rounded-full font-mono text-[#1D1D1F] font-extrabold border border-[#E5E5EA]">
+              {pagination.page} / {pagination.totalPages}
+            </span>
+
+            <button
+              onClick={() => setFilters(prev => ({ ...prev, page: Math.min(pagination.totalPages, (pagination.page || 1) + 1) }))}
+              disabled={pagination.page >= pagination.totalPages}
+              className={`px-4 py-2 rounded-full transition-all flex items-center gap-1 shadow-sm text-xs font-bold ${
+                pagination.page >= pagination.totalPages
+                  ? 'bg-[#F2F2F7] text-[#AEAEB2] cursor-not-allowed'
+                  : 'bg-[#0071E3] text-white hover:bg-[#0077ED] cursor-pointer'
+              }`}
+            >
+              <span>Trang tiếp</span>
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Detail Modal with Time to Order */}
       {selectedLog && (
