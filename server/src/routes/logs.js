@@ -322,19 +322,9 @@ router.get('/', (req, res) => {
     const earliestLogsStmt = db.prepare('SELECT * FROM logs ORDER BY created_at ASC');
     const allLogRows = earliestLogsStmt.all();
 
-    // Build map of client_ip -> webrtc_ip from existing logs so orders automatically inherit WebRTC IPs
-    const webrtcLookupStmt = db.prepare('SELECT client_ip, webrtc_ip FROM logs WHERE webrtc_ip IS NOT NULL AND webrtc_ip != "" ORDER BY id DESC');
-    const webrtcRows = webrtcLookupStmt.all();
-    const clientIpToWebRtc = {};
-    for (const r of webrtcRows) {
-      if (!clientIpToWebRtc[r.client_ip]) {
-        clientIpToWebRtc[r.client_ip] = r.webrtc_ip;
-      }
-    }
-
     const logs = rows.map(row => {
-      // Auto-inherit WebRTC IP if missing for this client IP
-      const effectiveWebRtcIp = row.webrtc_ip || clientIpToWebRtc[row.client_ip] || null;
+      // Only use exact webrtc_ip recorded on the log itself
+      const effectiveWebRtcIp = row.webrtc_ip || null;
 
       // Calculate time taken to place order (from first visit on this IP to order created_at)
       let timeToOrderFormatted = null;
