@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const dotenv = require('dotenv');
 
-dotenv.config();
+dotenv.config({ path: path.join(__dirname, '../.env') });
 
 const db = require('./db');
 const logsRoutes = require('./routes/logs');

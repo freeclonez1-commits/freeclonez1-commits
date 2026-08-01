@@ -937,16 +937,13 @@ function sapoAuthErrorMessage(status) {
 }
 
 function sapoCreatedOnMin(datePreset) {
-  if (datePreset === 'ALL') return '2020-01-01T00:00:00+07:00';
-  if (datePreset === '7_DAYS') {
-    const d = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
-    return `${businessDate(d)}T00:00:00+07:00`;
-  }
-  if (datePreset === '30_DAYS') {
-    const d = new Date(Date.now() - 29 * 24 * 60 * 60 * 1000);
-    return `${businessDate(d)}T00:00:00+07:00`;
-  }
-  return `${businessDate()}T00:00:00+07:00`;
+  if (datePreset === 'ALL') return null;
+  let daysAgo = 0;
+  if (datePreset === '7_DAYS') daysAgo = 6;
+  if (datePreset === '30_DAYS') daysAgo = 29;
+  const d = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString();
 }
 
 async function testSapoConnection(store) {
@@ -980,12 +977,14 @@ async function syncSapoOrders(state, store, datePreset) {
   for (let page = 1; page <= 10; page++) {
     if (Date.now() - syncStartTime > 6500) break;
 
-    let path = `/admin/orders.json?status=any&limit=250&page=${page}&${queryParam}=${encodeURIComponent(since)}`;
+    const minParam = since ? `&${queryParam}=${encodeURIComponent(since)}` : '';
+    let path = `/admin/orders.json?status=any&limit=250&page=${page}${minParam}`;
     let { res, data } = await sapoFetchJson(store, secret, path);
 
     if (page === 1 && (!res.ok || !data?.orders?.length)) {
       const altParam = queryParam === 'created_on_min' ? 'created_at_min' : 'created_on_min';
-      const altPath = `/admin/orders.json?status=any&limit=250&page=1&${altParam}=${encodeURIComponent(since)}`;
+      const altMinParam = since ? `&${altParam}=${encodeURIComponent(since)}` : '';
+      const altPath = `/admin/orders.json?status=any&limit=250&page=1${altMinParam}`;
       const altResult = await sapoFetchJson(store, secret, altPath);
       if (altResult.res.ok && altResult.data?.orders?.length) {
         res = altResult.res;

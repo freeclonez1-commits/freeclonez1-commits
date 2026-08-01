@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { syncSapoOrders } = require('../services/sapoSyncService');
+const { syncSapoOrders, testSapoConnection } = require('../services/sapoSyncService');
 const { requireAdmin } = require('../middleware/adminAuth');
 const { encryptSecret } = require('../services/secretService');
 
@@ -87,6 +87,20 @@ router.post('/:id/sync', async (req, res) => {
   } catch (error) {
     console.error('Error syncing Sapo orders:', error);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/v1/stores/:id/test
+ * Test connection to Sapo Admin API for a specific store
+ */
+router.post('/:id/test', async (req, res) => {
+  try {
+    const result = await testSapoConnection(req.params.id);
+    res.json(result);
+  } catch (error) {
+    console.error('Error testing Sapo connection:', error);
+    res.status(400).json({ success: false, message: error.message });
   }
 });
 

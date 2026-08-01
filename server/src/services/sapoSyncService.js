@@ -38,10 +38,10 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
   } else if (datePreset === '30_DAYS') {
     minDate = startOfBusinessDay(-29);
   } else if (datePreset === 'ALL') {
-    minDate = startOfBusinessDay(-364);
+    minDate = null;
   }
 
-  console.log(`[Sapo Sync] Fetching orders for store ${store.store_name} (${mysapo_domain}) since ${minDate}...`);
+  console.log(`[Sapo Sync] Fetching orders for store ${store.store_name} (${mysapo_domain}) since ${minDate || 'BEGINNING_OF_TIME'}...`);
 
   let sapoOrders = [];
   let apiSuccess = false;
@@ -50,9 +50,10 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
 
   const seenOrderIds = new Set();
   for (let page = 1; page <= 50; page++) {
-    const url = `https://${mysapo_domain}/admin/orders.json?created_at_min=${encodeURIComponent(minDate)}&limit=250&page=${page}`;
+    const minParam = minDate ? `&created_at_min=${encodeURIComponent(minDate)}` : '';
+    let url = `https://${mysapo_domain}/admin/orders.json?status=any&limit=250&page=${page}${minParam}`;
     try {
-      const res = await axios.get(url, {
+      let res = await axios.get(url, {
         headers: {
           'Authorization': authHeaderBasic,
           'X-Sapo-Access-Token': api_secret,
@@ -62,6 +63,25 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
         },
         timeout: 6000
       });
+
+      if (!res.data || (!res.data.orders && !Array.isArray(res.data))) {
+        if (minDate && page === 1) {
+          const altUrl = `https://${mysapo_domain}/admin/orders.json?status=any&limit=250&page=1&created_on_min=${encodeURIComponent(minDate)}`;
+          const altRes = await axios.get(altUrl, {
+            headers: {
+              'Authorization': authHeaderBasic,
+              'X-Sapo-Access-Token': api_secret,
+              'X-Bizweb-Access-Token': api_secret,
+              'Content-Type': 'application/json',
+              'User-Agent': 'SapoAntiFakeIP/1.0'
+            },
+            timeout: 6000
+          });
+          if (altRes.data && (altRes.data.orders || Array.isArray(altRes.data))) {
+            res = altRes;
+          }
+        }
+      }
 
       if (res.data && (res.data.orders || Array.isArray(res.data))) {
         const pageOrders = res.data.orders || res.data;
@@ -189,7 +209,43 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
   };
 }
 
+async function testSapoConnection(storeId) {
+  const store = db.prepare('SELECT * FROM stores WHERE id = ?').get(storeId);
+  if (!store) throw new Error('Cửa hàng không tồn tại');
+  const { mysapo_domain, api_key } = store;
+  const api_secret = decryptSecret(store.api_secret_encrypted || store.api_secret);
+  if (!api_secret) throw new Error('Thiếu API secret');
+
+  const authHeaderBasic = 'Basic ' + Buffer.from(`${api_key}:${api_secret}`).toString('base64');
+  const headers = {
+    'Authorization': authHeaderBasic,
+    'X-Sapo-Access-Token': api_secret,
+    'X-Bizweb-Access-Token': api_secret,
+    'Content-Type': 'application/json',
+    'User-Agent': 'SapoAntiFakeIP/1.0'
+  };
+
+  try {
+    const storeRes = await axios.get(`https://${mysapo_domain}/admin/store.json`, { headers, timeout: 6000 });
+    if (storeRes.status !== 200) throw new Error(`Sapo API error ${storeRes.status}`);
+
+    const countRes = await axios.get(`https://${mysapo_domain}/admin/orders/count.json?status=any`, { headers, timeout: 6000 });
+    const count = countRes.data?.count ?? countRes.data?.orders_count ?? 0;
+    return { success: true, message: `Kết nối Sapo thành công. API đọc được đơn hàng (${count} đơn).`, order_count: count };
+  } catch (err) {
+    const status = err.response?.status;
+    if (status === 401) {
+      throw new Error('Sapo từ chối xác thực (401). API Key / Secret không đúng hoặc Private App bị tắt.');
+    }
+    if (status === 403) {
+      throw new Error('Sapo đã xác thực nhưng chưa bật quyền đọc Đơn hàng (Orders) trong Private App (403).');
+    }
+    throw new Error(err.message || 'Không thể kết nối API Sapo.');
+  }
+}
+
 module.exports = {
   syncSapoOrders,
+  testSapoConnection,
   parseSapoDate
 };
