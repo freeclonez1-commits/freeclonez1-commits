@@ -941,9 +941,12 @@ function sapoCreatedOnMin(datePreset) {
   let daysAgo = 0;
   if (datePreset === '7_DAYS') daysAgo = 6;
   if (datePreset === '30_DAYS') daysAgo = 29;
-  const d = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
-  d.setHours(0, 0, 0, 0);
-  return d.toISOString();
+
+  const now = new Date();
+  const vnTime = new Date(now.getTime() + (7 * 60 * 60 * 1000));
+  const vnDateStr = vnTime.toISOString().slice(0, 10);
+  const vnStartUtcMs = new Date(`${vnDateStr}T00:00:00.000Z`).getTime() - (7 * 60 * 60 * 1000) - (daysAgo * 24 * 60 * 60 * 1000);
+  return new Date(vnStartUtcMs).toISOString();
 }
 
 async function testSapoConnection(store) {
