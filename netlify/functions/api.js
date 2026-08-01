@@ -907,6 +907,8 @@ function sapoAuthHeaders(store, secret) {
   const auth = Buffer.from(`${store.api_key}:${secret}`).toString('base64');
   return {
     Authorization: `Basic ${auth}`,
+    'X-Sapo-Access-Token': secret,
+    'X-Bizweb-Access-Token': secret,
     Accept: 'application/json',
     'User-Agent': 'Sapo-IP-Guard/1.0'
   };
@@ -935,16 +937,16 @@ function sapoAuthErrorMessage(status) {
 }
 
 function sapoCreatedOnMin(datePreset) {
-  if (datePreset === 'ALL') return '2020-01-01 00:00';
+  if (datePreset === 'ALL') return '2020-01-01T00:00:00+07:00';
   if (datePreset === '7_DAYS') {
     const d = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
-    return `${businessDate(d)} 00:00`;
+    return `${businessDate(d)}T00:00:00+07:00`;
   }
   if (datePreset === '30_DAYS') {
     const d = new Date(Date.now() - 29 * 24 * 60 * 60 * 1000);
-    return `${businessDate(d)} 00:00`;
+    return `${businessDate(d)}T00:00:00+07:00`;
   }
-  return `${businessDate()} 00:00`;
+  return `${businessDate()}T00:00:00+07:00`;
 }
 
 async function testSapoConnection(store) {

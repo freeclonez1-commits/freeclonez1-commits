@@ -172,15 +172,42 @@ export default function App() {
       } else if (filters.startDate === businessDateDaysAgo(29)) {
         syncPreset = '30_DAYS';
       }
-      const targetStoreId = selectedStoreId !== 'ALL' ? selectedStoreId : (stores.length > 0 ? stores[0].id : 1);
-      const res = await syncStoreOrders(targetStoreId, syncPreset);
-      if (res.success) {
-        await fetchData();
-        setNotice({ type: 'success', message: `Đồng bộ xong ${res.total_orders} đơn (${syncPreset}).` });
+
+      const targetStores = selectedStoreId !== 'ALL'
+        ? stores.filter(s => String(s.id) === String(selectedStoreId))
+        : stores;
+
+      if (!targetStores.length) {
+        setNotice({ type: 'error', message: 'Chưa có cửa hàng Sapo nào được chọn hoặc liên kết.' });
+        return;
+      }
+
+      let totalSyncedNew = 0;
+      let totalOrdersCount = 0;
+      const errors = [];
+
+      for (const st of targetStores) {
+        try {
+          const res = await syncStoreOrders(st.id, syncPreset);
+          if (res.success) {
+            totalSyncedNew += res.synced_new || 0;
+            totalOrdersCount += res.total_orders || 0;
+          }
+        } catch (err) {
+          const errMsg = err.response?.data?.message || err.message || 'Lỗi kết nối';
+          errors.push(`[${st.store_name}]: ${errMsg}`);
+        }
+      }
+
+      await fetchData();
+      if (errors.length > 0) {
+        setNotice({ type: 'error', message: `Lỗi đồng bộ: ${errors.join(' | ')}` });
+      } else {
+        setNotice({ type: 'success', message: `Đã đồng bộ thành công ${totalOrdersCount} đơn hàng từ Sapo (${syncPreset}).` });
       }
     } catch (err) {
       console.error('Failed to sync Sapo orders:', err);
-      setNotice({ type: 'error', message: err.response?.data?.message || 'Đồng bộ đơn thất bại. Kiểm tra API Key và API Secret của cửa hàng.' });
+      setNotice({ type: 'error', message: err.response?.data?.message || 'Đồng bộ đơn thất bại.' });
     } finally {
       setIsSyncing(false);
     }
