@@ -1,5 +1,5 @@
 [build]
-  command = "npm ci --prefix dashboard && npm run build --prefix dashboard"
+  command = "npm install --prefix dashboard && npm run build --prefix dashboard"
   publish = "dashboard/dist"
   functions = "netlify/functions"
 
