@@ -1027,16 +1027,13 @@ async function syncSapoOrders(state, store, datePreset) {
         trackedVisit.webrtc_mismatch = analysis.webrtcMismatch;
         trackedVisit.risk_level = analysis.riskLevel;
       } else {
-        const inheritedWebRtcIp = state.logs.find(log =>
-          isKnownIp(orderClientIp) && (log.client_ip === orderClientIp || log.webrtc_ip === orderClientIp) && isKnownIp(log.webrtc_ip)
-        )?.webrtc_ip || null;
-        const analysis = await analyzeRisk(orderClientIp, inheritedWebRtcIp, ipCache, state.logs);
+        const analysis = await analyzeRisk(orderClientIp, null, ipCache, state.logs);
         state.logs.unshift({
           id: state.autoLogId++,
           store_id: store.id,
           store_domain: store.mysapo_domain,
           client_ip: isKnownIp(orderClientIp) ? orderClientIp : 'unknown',
-          webrtc_ip: inheritedWebRtcIp,
+          webrtc_ip: null,
           user_agent: 'Sapo API Sync',
           fingerprint: 'FP-SAPO-SYNCED',
           order_info: JSON.stringify(orderInfo),
@@ -1047,7 +1044,7 @@ async function syncSapoOrders(state, store, datePreset) {
           org: analysis.ipData.org || 'Unknown',
           is_vpn: analysis.isVpn,
           is_datacenter: analysis.isDatacenter,
-          webrtc_mismatch: analysis.webrtcMismatch,
+          webrtc_mismatch: false,
           risk_level: analysis.riskLevel,
           risk_reasons: JSON.stringify([...analysis.riskReasons, 'Synced from Sapo Admin API']),
           trigger_event: 'sapo_sync',
@@ -1075,12 +1072,6 @@ async function syncSapoOrders(state, store, datePreset) {
           if (!log.session_start_at && match.session_start_at) {
             log.session_start_at = match.session_start_at;
             log.session_duration_sec = sessionDurationToOrder(match.session_start_at, log.created_at);
-          }
-        } else {
-          const inherited = state.logs.find(l => l.id !== log.id && isKnownIp(log.client_ip) && (l.client_ip === log.client_ip || l.webrtc_ip === log.client_ip) && isKnownIp(l.webrtc_ip))?.webrtc_ip;
-          if (inherited) {
-            log.webrtc_ip = inherited;
-            log.webrtc_mismatch = Boolean(log.client_ip && log.webrtc_ip && log.webrtc_ip !== log.client_ip);
           }
         }
       }

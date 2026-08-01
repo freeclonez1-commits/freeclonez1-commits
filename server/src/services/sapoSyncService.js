@@ -144,12 +144,8 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
       finalReasons.push(`IP nằm trong Danh sách đen (Lý do: ${blacklistCheck.reason || 'Bị chặn bởi quản trị viên'})`);
     }
 
-    // Auto-discover captured WebRTC IP for this client IP if available
+    // Only set capturedWebRtcIp if a real browser session matched this order
     let capturedWebRtcIp = null;
-    const webRtcMatch = db.prepare('SELECT webrtc_ip FROM logs WHERE client_ip = ? AND webrtc_ip IS NOT NULL AND webrtc_ip != "" ORDER BY id DESC').get(clientIp);
-    if (webRtcMatch) {
-      capturedWebRtcIp = webRtcMatch.webrtc_ip;
-    }
 
     if (!existing) {
       const stmt = db.prepare(`
