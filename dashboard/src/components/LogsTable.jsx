@@ -417,7 +417,39 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
               ) : (
                 <tr>
                   <td colSpan="6" className="py-12 text-center text-[#86868B] text-xs font-medium">
-                    {ordersOnlyFilter ? 'Không tìm thấy đơn hàng phù hợp với bộ lọc đã chọn' : 'Chưa có lượt tương tác mới. Dữ liệu sẽ tự xuất hiện sau khi khách nhấp trên website.'}
+                    <div className="max-w-md mx-auto space-y-3">
+                      <p className="font-bold text-[#1D1D1F] text-sm">
+                        {isTodayDefault
+                          ? `Chưa có đơn hàng trong ngày hôm nay (${new Date().toLocaleDateString('vi-VN')})`
+                          : 'Không tìm thấy đơn hàng phù hợp với bộ lọc'}
+                      </p>
+                      <p className="text-xs text-[#86868B]">
+                        {isTodayDefault
+                          ? 'Mặc định hệ thống hiển thị đơn "Hôm nay". Các đơn tạo ngày hôm qua vẫn được lưu an toàn. Bấm xem "Tất cả thời gian" để hiển thị lại:'
+                          : (filters.risk_level !== 'ALL' || filters.search)
+                          ? 'Đang có bộ lọc trạng thái hoặc từ khóa tìm kiếm. Hãy thử bỏ bộ lọc hoặc xem tất cả thời gian.'
+                          : 'Thử đổi khoảng thời gian hoặc bấm Đồng bộ đơn Sapo.'}
+                      </p>
+                      <div className="flex items-center justify-center gap-2 pt-2">
+                        <button
+                          onClick={() => handleDatePreset('ALL')}
+                          className="px-4 py-2 bg-[#0071E3] hover:bg-[#0077ED] text-white rounded-full text-xs font-bold transition-all shadow-sm cursor-pointer"
+                        >
+                          📅 Xem Tất Cả Thời Gian
+                        </button>
+                        {(filters.risk_level !== 'ALL' || filters.search) && (
+                          <button
+                            onClick={() => {
+                              handleRiskFilter('ALL');
+                              setFilters(prev => ({ ...prev, search: '', page: 1 }));
+                            }}
+                            className="px-4 py-2 bg-[#F2F2F7] hover:bg-[#E5E5EA] text-[#1D1D1F] rounded-full text-xs font-bold transition-all cursor-pointer"
+                          >
+                            🔄 Xóa Bộ Lọc Trạng Thái
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </td>
                 </tr>
               )}
