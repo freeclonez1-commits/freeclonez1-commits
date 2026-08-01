@@ -978,13 +978,13 @@ async function syncSapoOrders(state, store, datePreset) {
     if (Date.now() - syncStartTime > 6500) break;
 
     const minParam = since ? `&${queryParam}=${encodeURIComponent(since)}` : '';
-    let path = `/admin/orders.json?status=any&limit=250&page=${page}${minParam}`;
+    let path = `/admin/orders.json?limit=250&page=${page}${minParam}`;
     let { res, data } = await sapoFetchJson(store, secret, path);
 
     if (page === 1 && (!res.ok || !data?.orders?.length)) {
       const altParam = queryParam === 'created_on_min' ? 'created_at_min' : 'created_on_min';
       const altMinParam = since ? `&${altParam}=${encodeURIComponent(since)}` : '';
-      const altPath = `/admin/orders.json?status=any&limit=250&page=1${altMinParam}`;
+      const altPath = `/admin/orders.json?limit=250&page=1${altMinParam}`;
       const altResult = await sapoFetchJson(store, secret, altPath);
       if (altResult.res.ok && altResult.data?.orders?.length) {
         res = altResult.res;

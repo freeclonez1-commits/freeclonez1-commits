@@ -51,7 +51,7 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
   const seenOrderIds = new Set();
   for (let page = 1; page <= 50; page++) {
     const minParam = minDate ? `&created_at_min=${encodeURIComponent(minDate)}` : '';
-    let url = `https://${mysapo_domain}/admin/orders.json?status=any&limit=250&page=${page}${minParam}`;
+    let url = `https://${mysapo_domain}/admin/orders.json?limit=250&page=${page}${minParam}`;
     try {
       let res = await axios.get(url, {
         headers: {
@@ -64,9 +64,10 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
         timeout: 6000
       });
 
-      if (!res.data || (!res.data.orders && !Array.isArray(res.data))) {
-        if (minDate && page === 1) {
-          const altUrl = `https://${mysapo_domain}/admin/orders.json?status=any&limit=250&page=1&created_on_min=${encodeURIComponent(minDate)}`;
+      if (!res.data || !res.data.orders || !res.data.orders.length) {
+        if (page === 1) {
+          const altMinParam = minDate ? `&created_on_min=${encodeURIComponent(minDate)}` : '';
+          const altUrl = `https://${mysapo_domain}/admin/orders.json?limit=250&page=1${altMinParam}`;
           const altRes = await axios.get(altUrl, {
             headers: {
               'Authorization': authHeaderBasic,
@@ -77,7 +78,7 @@ async function syncSapoOrders(storeId, datePreset = 'TODAY') {
             },
             timeout: 6000
           });
-          if (altRes.data && (altRes.data.orders || Array.isArray(altRes.data))) {
+          if (altRes.data && altRes.data.orders && altRes.data.orders.length) {
             res = altRes;
           }
         }
