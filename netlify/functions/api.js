@@ -602,7 +602,12 @@ function isKnownIp(ip) {
 async function lookupIp(ip) {
   if (!isKnownIp(ip)) return {};
   try {
-    const res = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,city,isp,org,as,proxy,hosting`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 600);
+    const res = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,city,isp,org,as,proxy,hosting`, {
+      signal: controller.signal
+    });
+    clearTimeout(timer);
     const data = await res.json();
     return data.status === 'success' ? data : {};
   } catch (_) {
@@ -610,7 +615,7 @@ async function lookupIp(ip) {
   }
 }
 
-async function analyzeRisk(clientIp, webrtcIp) {
+async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
   if (!isKnownIp(clientIp)) {
     return {
       ipData: {},
@@ -621,7 +626,26 @@ async function analyzeRisk(clientIp, webrtcIp) {
       riskReasons: ['No usable IP captured']
     };
   }
-  const ipData = await lookupIp(clientIp);
+
+  let ipData = ipCache ? ipCache.get(clientIp) : null;
+  if (!ipData) {
+    const existing = stateLogs?.find(l => l.client_ip === clientIp && l.isp && l.isp !== 'Unknown');
+    if (existing) {
+      ipData = {
+        country: existing.country,
+        countryCode: existing.country_code,
+        city: existing.city,
+        isp: existing.isp,
+        org: existing.org,
+        hosting: existing.is_datacenter,
+        proxy: existing.is_vpn
+      };
+    } else {
+      ipData = await lookupIp(clientIp);
+    }
+    if (ipCache) ipCache.set(clientIp, ipData);
+  }
+
   const orgText = `${ipData.isp || ''} ${ipData.org || ''} ${ipData.as || ''}`.toLowerCase();
   const datacenterWords = ['hosting', 'host', 'vpn', 'proxy', 'cloud', 'cloudflare', 'warp', 'amazon', 'aws', 'google', 'digitalocean', 'linode', 'ovh', 'hetzner', 'gthost', 'm247', 'datacenter'];
   const isDatacenter = Boolean(ipData.hosting || datacenterWords.some(word => orgText.includes(word)));
@@ -942,23 +966,32 @@ async function testSapoConnection(store) {
 }
 
 async function syncSapoOrders(state, store, datePreset) {
+  const syncStartTime = Date.now();
   const secret = decryptSecret(store.api_secret_encrypted);
   if (!secret) throw new Error('Missing Sapo API secret.');
   const since = sapoCreatedOnMin(datePreset);
+  const ipCache = new Map();
   let total = 0;
   let synced = 0;
+  let queryParam = 'created_on_min';
+
   for (let page = 1; page <= 10; page++) {
-    let path = `/admin/orders.json?status=any&limit=250&page=${page}&created_on_min=${encodeURIComponent(since)}`;
+    if (Date.now() - syncStartTime > 6500) break;
+
+    let path = `/admin/orders.json?status=any&limit=250&page=${page}&${queryParam}=${encodeURIComponent(since)}`;
     let { res, data } = await sapoFetchJson(store, secret, path);
-    if (!res.ok || !data?.orders?.length) {
-      // Fallback try with created_at_min parameter if created_on_min returned empty
-      const altPath = `/admin/orders.json?status=any&limit=250&page=${page}&created_at_min=${encodeURIComponent(since)}`;
+
+    if (page === 1 && (!res.ok || !data?.orders?.length)) {
+      const altParam = queryParam === 'created_on_min' ? 'created_at_min' : 'created_on_min';
+      const altPath = `/admin/orders.json?status=any&limit=250&page=1&${altParam}=${encodeURIComponent(since)}`;
       const altResult = await sapoFetchJson(store, secret, altPath);
       if (altResult.res.ok && altResult.data?.orders?.length) {
         res = altResult.res;
         data = altResult.data;
+        queryParam = altParam;
       }
     }
+
     if (!res.ok) {
       if (page === 1) {
         throw new Error(sapoAuthErrorMessage(res.status));
@@ -968,22 +1001,35 @@ async function syncSapoOrders(state, store, datePreset) {
     const orders = data?.orders || [];
     if (!orders.length) break;
     total += orders.length;
+
     for (const order of orders) {
+      if (Date.now() - syncStartTime > 7500) break;
       const orderInfo = parseSapoOrder(order);
       if (!orderInfo.order_id) continue;
       const createdAt = order.created_on || order.created_at || new Date().toISOString();
       const orderClientIp = sapoOrderClientIp(order);
       const existing = state.logs.find(log => log.store_id === store.id && isSameOrder(log, orderInfo));
       const trackedVisit = existing || findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
+
       if (trackedVisit) {
         applySyncedOrder(trackedVisit, orderInfo, createdAt);
         const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : trackedVisit.client_ip;
-        await applyIpAnalysis(trackedVisit, effectiveClientIp, trackedVisit.webrtc_ip, ['Synced browser IP from Sapo Admin API']);
+        const analysis = await analyzeRisk(effectiveClientIp, trackedVisit.webrtc_ip, ipCache, state.logs);
+        trackedVisit.client_ip = effectiveClientIp;
+        trackedVisit.country = analysis.ipData.country || 'Unknown';
+        trackedVisit.country_code = analysis.ipData.countryCode || 'XX';
+        trackedVisit.city = analysis.ipData.city || 'Unknown';
+        trackedVisit.isp = analysis.ipData.isp || 'Unknown';
+        trackedVisit.org = analysis.ipData.org || 'Unknown';
+        trackedVisit.is_vpn = analysis.isVpn;
+        trackedVisit.is_datacenter = analysis.isDatacenter;
+        trackedVisit.webrtc_mismatch = analysis.webrtcMismatch;
+        trackedVisit.risk_level = analysis.riskLevel;
       } else {
         const inheritedWebRtcIp = state.logs.find(log =>
           isKnownIp(orderClientIp) && (log.client_ip === orderClientIp || log.webrtc_ip === orderClientIp) && isKnownIp(log.webrtc_ip)
         )?.webrtc_ip || null;
-        const analysis = await analyzeRisk(orderClientIp, inheritedWebRtcIp);
+        const analysis = await analyzeRisk(orderClientIp, inheritedWebRtcIp, ipCache, state.logs);
         state.logs.unshift({
           id: state.autoLogId++,
           store_id: store.id,
@@ -1015,7 +1061,7 @@ async function syncSapoOrders(state, store, datePreset) {
     if (orders.length < 250) break;
   }
 
-  // Backfill/repair pass for existing order logs in state.logs that lack WebRTC IP or time-to-order
+  // Fast backfill pass for missing WebRTC / session_duration
   for (const log of state.logs) {
     if (log.store_id === store.id && hasOrderInfo(log.order_info)) {
       const ordInfo = safeJsonParse(log.order_info, null);
@@ -1024,16 +1070,16 @@ async function syncSapoOrders(state, store, datePreset) {
         const match = findTrackedVisitForOrder(state, store.id, ordInfo, log.created_at, log.client_ip);
         if (match && isKnownIp(match.webrtc_ip)) {
           log.webrtc_ip = match.webrtc_ip;
+          log.webrtc_mismatch = Boolean(log.client_ip && log.webrtc_ip && log.webrtc_ip !== log.client_ip);
           if (!log.session_start_at && match.session_start_at) {
             log.session_start_at = match.session_start_at;
             log.session_duration_sec = sessionDurationToOrder(match.session_start_at, log.created_at);
           }
-          await applyIpAnalysis(log, log.client_ip, log.webrtc_ip, ['Inherited WebRTC IP from session match']);
         } else {
           const inherited = state.logs.find(l => l.id !== log.id && isKnownIp(log.client_ip) && (l.client_ip === log.client_ip || l.webrtc_ip === log.client_ip) && isKnownIp(l.webrtc_ip))?.webrtc_ip;
           if (inherited) {
             log.webrtc_ip = inherited;
-            await applyIpAnalysis(log, log.client_ip, log.webrtc_ip, ['Inherited WebRTC IP from IP history']);
+            log.webrtc_mismatch = Boolean(log.client_ip && log.webrtc_ip && log.webrtc_ip !== log.client_ip);
           }
         }
       }
