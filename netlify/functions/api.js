@@ -33,6 +33,7 @@ const TRACKER_SOURCE = `/**
   var lastCheckoutActivityAt = 0;
   var lastInteractionAt = 0;
   var EMBEDDED_BLACKLIST = Array.isArray(window.__SAPO_IP_GUARD_BLACKLIST) ? window.__SAPO_IP_GUARD_BLACKLIST : [];
+  var INITIAL_BLOCK = window.__SAPO_IP_GUARD_INITIAL_BLOCK || null;
   var cachedPublicIp = null;
   var cachedWebRtcIp = null;
   var cachedWebRtcStatus = 'pending';
@@ -358,6 +359,18 @@ const TRACKER_SOURCE = `/**
   }
 
   function checkBlacklistImmediately() {
+    if (INITIAL_BLOCK && INITIAL_BLOCK.is_blacklisted) {
+      renderAccessDeniedScreen(INITIAL_BLOCK.ip);
+      return;
+    }
+
+    // The API reads the visitor address from the edge request. This check runs
+    // immediately instead of waiting for IPify or WebRTC discovery.
+    fetch(BACKEND_URL + '/api/v1/blacklist/check')
+      .then(function (r) { return r.json(); })
+      .then(function (res) { if (res && res.is_blacklisted) renderAccessDeniedScreen(res.ip); })
+      .catch(function () {});
+
     getClientPublicIP(function (pubIp) {
       cachedPublicIp = pubIp || cachedPublicIp;
       getWebRTCIP(function (webrtcIp) {
@@ -378,6 +391,10 @@ const TRACKER_SOURCE = `/**
   }
 
   function initTracking() {
+    if (INITIAL_BLOCK && INITIAL_BLOCK.is_blacklisted) {
+      renderAccessDeniedScreen(INITIAL_BLOCK.ip);
+      return;
+    }
     hydrateNetworkIdentity();
     checkBlacklistImmediately();
     pushLog(null, 'page_view');
@@ -1079,6 +1096,22 @@ function sapoCreatedOnMin(datePreset) {
   return new Date(vnStartUtcMs).toISOString();
 }
 
+function isSapoOrderInDatePreset(createdAt, datePreset) {
+  if (datePreset === 'ALL') return true;
+  if (!createdAt) return false;
+
+  const timestamp = new Date(createdAt);
+  if (!Number.isFinite(timestamp.getTime())) return false;
+
+  const orderDay = businessDate(timestamp);
+  const today = businessDate();
+  let daysAgo = 0;
+  if (datePreset === '7_DAYS') daysAgo = 6;
+  if (datePreset === '30_DAYS') daysAgo = 29;
+  const startDay = businessDate(new Date(Date.now() - (daysAgo * 24 * 60 * 60 * 1000)));
+  return orderDay >= startDay && orderDay <= today;
+}
+
 async function testSapoConnection(store) {
   const secret = decryptSecret(store.api_secret_encrypted);
   if (!secret) throw new Error('Missing Sapo API secret.');
@@ -1108,7 +1141,7 @@ async function syncSapoOrders(state, store, datePreset) {
   let updated = 0;
   let queryParam = 'created_at_min';
 
-  const pageLimit = 250;
+  const pageLimit = datePreset === 'TODAY' ? 100 : 250;
   const maxPages = datePreset === 'TODAY' ? 2 : (datePreset === '7_DAYS' ? 4 : 8);
   for (let page = 1; page <= maxPages; page++) {
     if (Date.now() - syncStartTime > 13500) break;
@@ -1137,13 +1170,18 @@ async function syncSapoOrders(state, store, datePreset) {
     }
     const orders = data?.orders || [];
     if (!orders.length) break;
-    total += orders.length;
+    let reachedOlderOrder = false;
 
     for (const order of orders) {
       if (Date.now() - syncStartTime > 14000) break;
+      const createdAt = order.created_on || order.created_at || null;
+      if (!isSapoOrderInDatePreset(createdAt, datePreset)) {
+        reachedOlderOrder = true;
+        continue;
+      }
       const orderInfo = parseSapoOrder(order);
       if (!orderInfo.order_id) continue;
-      const createdAt = order.created_on || order.created_at || new Date().toISOString();
+      total++;
       const orderClientIp = sapoOrderClientIp(order);
       const existing = state.logs.find(log => log.store_id === store.id && isSameOrder(log, orderInfo));
       const candidateVisit = findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
@@ -1203,7 +1241,9 @@ async function syncSapoOrders(state, store, datePreset) {
         synced++;
       }
     }
-    if (orders.length < pageLimit) break;
+    // Sapo occasionally ignores created_at_min. Orders are newest first, so do
+    // not fetch another page once the response has crossed the selected range.
+    if (reachedOlderOrder || orders.length < pageLimit) break;
   }
 
   // Deduplicate orders by order_id per store
@@ -1439,7 +1479,10 @@ exports.handler = async (event) => {
     if (rawPath === '/client-tracker.js') {
       const state = await loadState({ includeLogs: false, includeStores: false });
       const blacklist = state.blacklist.map(item => item.ip).filter(Boolean);
-      return response(200, `window.__SAPO_IP_GUARD_BLACKLIST = ${JSON.stringify(blacklist)};\n${TRACKER_SOURCE}`, {
+      const visitorIp = getClientIp(event);
+      const block = state.blacklist.find(item => item.ip === visitorIp);
+      const initialBlock = block ? { is_blacklisted: true, ip: visitorIp } : null;
+      return response(200, `window.__SAPO_IP_GUARD_BLACKLIST = ${JSON.stringify(blacklist)};\nwindow.__SAPO_IP_GUARD_INITIAL_BLOCK = ${JSON.stringify(initialBlock)};\n${TRACKER_SOURCE}`, {
         'Content-Type': 'application/javascript; charset=utf-8',
         'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'
       });
