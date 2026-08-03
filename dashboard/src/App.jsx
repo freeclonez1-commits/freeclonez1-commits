@@ -115,24 +115,7 @@ export default function App() {
         getBlacklist()
       ]);
 
-      // If Today has 0 orders, auto-fallback to 7 days so synced orders display immediately
-      if (
-        logsResult.status === 'fulfilled' &&
-        logsResult.value?.success &&
-        (!logsResult.value.data || logsResult.value.data.length === 0) &&
-        activeFilters.startDate === businessDateDaysAgo(0)
-      ) {
-        const fallbackFilters = {
-          ...activeFilters,
-          startDate: businessDateDaysAgo(6),
-          endDate: businessDateDaysAgo(0)
-        };
-        const fallbackLogs = await getLogs({ ...fallbackFilters, store_id: selectedStoreId, orders_only: activeFilters.orders_only !== false });
-        if (fallbackLogs.success && fallbackLogs.data && fallbackLogs.data.length > 0) {
-          logsResult = { status: 'fulfilled', value: fallbackLogs };
-          setFilters(prev => ({ ...prev, startDate: businessDateDaysAgo(6), endDate: businessDateDaysAgo(0), page: 1 }));
-        }
-      }
+
 
       const authenticationFailed = [overviewResult, chartResult, logsResult, blacklistResult].some(result => result.status === 'rejected' && result.reason?.response?.status === 401);
       if (authenticationFailed) {
@@ -213,9 +196,7 @@ export default function App() {
         }
       }
 
-      const expandedFilters = { ...filters, startDate: businessDateDaysAgo(6), endDate: businessDateDaysAgo(0), page: 1 };
-      setFilters(expandedFilters);
-      await fetchData(expandedFilters);
+      await fetchData(filters);
 
       if (errors.length > 0) {
         setNotice({ type: 'error', message: `Lỗi đồng bộ: ${errors.join(' | ')}` });
