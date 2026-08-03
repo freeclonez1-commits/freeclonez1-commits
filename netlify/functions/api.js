@@ -689,7 +689,7 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
 
   let ipData = ipCache ? ipCache.get(clientIp) : null;
   if (!ipData) {
-    const existing = stateLogs?.find(l => l.client_ip === clientIp && l.isp && l.isp !== 'Unknown');
+    const existing = stateLogs?.find(l => l.client_ip === clientIp && l.isp && l.isp !== 'Unknown' && l.country !== 'Vietnam');
     if (existing) {
       ipData = {
         country: existing.country,
