@@ -1,11 +1,7 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import Header from './components/Header';
 import Sidebar from './components/Sidebar';
-import Overview from './components/Overview';
 import LogsTable from './components/LogsTable';
-import BlacklistManager from './components/BlacklistManager';
-import StoreManager from './components/StoreManager';
-import ScriptGenerator from './components/ScriptGenerator';
 import AdminAccess from './components/AdminAccess';
 import { businessDate, businessDateDaysAgo } from './utils/dates';
 
@@ -24,6 +20,15 @@ import {
   removeFromBlacklist,
   deleteLog
 } from './api/client';
+
+const Overview = lazy(() => import('./components/Overview'));
+const BlacklistManager = lazy(() => import('./components/BlacklistManager'));
+const StoreManager = lazy(() => import('./components/StoreManager'));
+const ScriptGenerator = lazy(() => import('./components/ScriptGenerator'));
+
+function PanelLoader() {
+  return <div className="min-h-[260px] flex items-center justify-center text-sm font-semibold text-[#86868B]">Đang tải...</div>;
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('logs');
@@ -56,6 +61,7 @@ export default function App() {
   const [stats, setStats] = useState(null);
   const [chartData, setChartData] = useState([]);
   const [logs, setLogs] = useState([]);
+  const [isLogsLoading, setIsLogsLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, limit: 20, total: 0, totalPages: 1 });
   const [blacklist, setBlacklist] = useState([]);
 
@@ -112,39 +118,27 @@ export default function App() {
     }
   }, [adminKey]);
 
-  // Fetch all dashboard data
+  // Only fetch dashboard charts when the overview tab is visible.
   const fetchData = useCallback(async (overrideFilters = null, options = {}) => {
     if (!adminKey || refreshInFlightRef.current) return;
     refreshInFlightRef.current = true;
     setIsRefreshing(true);
     if (!options.silent) setDataError('');
     try {
-      let activeFilters = overrideFilters || filters;
-      let queryFilters = buildQueryFilters(activeFilters);
-
-      let [overviewResult, chartResult, logsResult, blacklistResult, storesResult] = await Promise.allSettled([
+      let [overviewResult, chartResult] = await Promise.allSettled([
         getOverviewStats({ store_id: selectedStoreId }),
-        getChartStats({ store_id: selectedStoreId }),
-        getLogs(queryFilters),
-        getBlacklist(),
-        getStores()
+        getChartStats({ store_id: selectedStoreId })
       ]);
 
-      const authenticationFailed = [overviewResult, chartResult, logsResult, blacklistResult, storesResult].some(result => result.status === 'rejected' && result.reason?.response?.status === 401);
+      const authenticationFailed = [overviewResult, chartResult].some(result => result.status === 'rejected' && result.reason?.response?.status === 401);
       if (authenticationFailed) {
         sessionStorage.removeItem('sapo_admin_api_key');
         setAdminKey('');
         setAuthError('Khóa quản trị không đúng hoặc đã hết hiệu lực.');
         return;
       }
-      if (storesResult.status === 'fulfilled' && storesResult.value?.success) setStores(storesResult.value.data);
       if (overviewResult.status === 'fulfilled' && overviewResult.value.success) setStats(overviewResult.value.data);
       if (chartResult.status === 'fulfilled' && chartResult.value.success) setChartData(chartResult.value.data);
-      if (logsResult.status === 'fulfilled' && logsResult.value.success) {
-        setLogs(logsResult.value.data);
-        setPagination(logsResult.value.pagination);
-      }
-      if (blacklistResult.status === 'fulfilled' && blacklistResult.value.success) setBlacklist(blacklistResult.value.data);
     } catch (error) {
       console.error('Error fetching dashboard data:', error);
       const message = 'Không thể kết nối dashboard với server.';
@@ -156,11 +150,12 @@ export default function App() {
       setTimeout(() => setIsRefreshing(false), 400);
       refreshInFlightRef.current = false;
     }
-  }, [adminKey, filters, selectedStoreId, buildQueryFilters]);
+  }, [adminKey, selectedStoreId]);
 
   const refreshLogsOnly = useCallback(async (overrideFilters = null) => {
     if (!adminKey || logsRefreshInFlightRef.current) return;
     logsRefreshInFlightRef.current = true;
+    setIsLogsLoading(true);
     try {
       const activeFilters = overrideFilters || filters;
       const logsResult = await getLogs(buildQueryFilters(activeFilters));
@@ -176,8 +171,23 @@ export default function App() {
       }
     } finally {
       logsRefreshInFlightRef.current = false;
+      setIsLogsLoading(false);
     }
   }, [adminKey, filters, buildQueryFilters]);
+
+  const refreshBlacklist = useCallback(async () => {
+    if (!adminKey) return;
+    try {
+      const result = await getBlacklist();
+      if (result.success) setBlacklist(result.data);
+    } catch (err) {
+      if (err.response?.status === 401) {
+        sessionStorage.removeItem('sapo_admin_api_key');
+        setAdminKey('');
+        setAuthError('Khóa quản trị không đúng hoặc đã hết hiệu lực.');
+      }
+    }
+  }, [adminKey]);
 
   const runOrderSync = useCallback(async (preset = 'TODAY', options = {}) => {
     if (!adminKey || syncInFlightRef.current || preset === 'ALL') return { success: false, skipped: true };
@@ -232,24 +242,29 @@ export default function App() {
   }, [fetchStores]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    refreshLogsOnly();
+  }, [refreshLogsOnly]);
+
+  useEffect(() => {
+    if (activeTab === 'overview') fetchData(null, { silent: true });
+    if (activeTab === 'blacklist') refreshBlacklist();
+  }, [activeTab, fetchData, refreshBlacklist]);
 
   // Refresh the visible table frequently, but keep heavy stats/stores calls out of this loop.
   useEffect(() => {
     const interval = setInterval(() => {
       if (activeTab === 'logs') refreshLogsOnly();
-    }, 3000);
+    }, 8000);
     return () => clearInterval(interval);
   }, [activeTab, refreshLogsOnly]);
 
   // Background Sapo sync: new orders appear without F5 or manual sync.
   useEffect(() => {
     const interval = setInterval(() => {
-      if (activeTab === 'logs') {
+      if (activeTab === 'logs' && document.visibilityState === 'visible') {
         runOrderSync(syncPresetFromFilters(filters), { quiet: true });
       }
-    }, 12000);
+    }, 30000);
     return () => clearInterval(interval);
   }, [activeTab, filters, runOrderSync, syncPresetFromFilters]);
 
@@ -258,7 +273,7 @@ export default function App() {
     try {
       const result = await runOrderSync(syncPresetFromFilters(filters), { quiet: false });
       if (result.skipped) setNotice({ type: 'error', message: 'Chưa có cửa hàng Sapo nào được chọn hoặc không thể đồng bộ chế độ Tất cả thời gian.' });
-      await fetchData(filters, { silent: true });
+      if (activeTab === 'overview') await fetchData(filters, { silent: true });
     } catch (err) {
       console.error('Failed to sync Sapo orders:', err);
       setNotice({ type: 'error', message: err.response?.data?.message || 'Đồng bộ đơn thất bại.' });
@@ -273,8 +288,8 @@ export default function App() {
       startDate: preset === 'TODAY' ? todayISO : (preset === '7_DAYS' ? businessDateDaysAgo(6) : businessDateDaysAgo(29)),
       endDate: todayISO
     };
-    runOrderSync(preset, { quiet: true }).then(() => fetchData(presetFilters, { silent: true }));
-  }, [filters, todayISO, runOrderSync, fetchData]);
+    runOrderSync(preset, { quiet: true }).then(() => refreshLogsOnly(presetFilters));
+  }, [filters, todayISO, runOrderSync, refreshLogsOnly]);
 
   const handleTestStoreConnection = async (id) => {
     try {
@@ -297,7 +312,7 @@ export default function App() {
       const res = await createStore(store_name, mysapo_domain, api_key, api_secret);
       if (res.success) {
         fetchStores();
-        fetchData();
+        refreshLogsOnly();
         setNotice({ type: 'success', message: 'Đã thêm cửa hàng.' });
         return true;
       }
@@ -315,7 +330,7 @@ export default function App() {
       const res = await updateStore(id, store_name, mysapo_domain, api_key, api_secret);
       if (res.success) {
         fetchStores();
-        fetchData();
+        refreshLogsOnly();
         setNotice({ type: 'success', message: 'Đã lưu cấu hình cửa hàng.' });
         return true;
       }
@@ -336,7 +351,7 @@ export default function App() {
         if (selectedStoreId === String(id)) {
           handleSelectStore('ALL');
         }
-        fetchData();
+        refreshLogsOnly();
         setNotice({ type: 'success', message: 'Đã xóa liên kết cửa hàng.' });
       }
     } catch (err) {
@@ -400,7 +415,7 @@ export default function App() {
     try {
       const res = await deleteLog(id);
       if (res.success) {
-        fetchData();
+        refreshLogsOnly();
         setNotice({ type: 'success', message: 'Đã xóa log.' });
       }
     } catch (error) {
@@ -452,18 +467,21 @@ export default function App() {
 
         <main className="flex-1 min-w-0 p-3 md:p-6 overflow-y-auto max-w-[1750px] mx-auto w-full">
           {activeTab === 'overview' && (
-            <Overview
-              stats={stats}
-              chartData={chartData}
-              onNavigateToLogs={() => setActiveTab('logs')}
-              isLoading={isRefreshing}
-              error={dataError}
-            />
+            <Suspense fallback={<PanelLoader />}>
+              <Overview
+                stats={stats}
+                chartData={chartData}
+                onNavigateToLogs={() => setActiveTab('logs')}
+                isLoading={isRefreshing}
+                error={dataError}
+              />
+            </Suspense>
           )}
 
           {activeTab === 'logs' && (
             <LogsTable
               logs={logs}
+              isLoading={isLogsLoading}
               pagination={pagination}
               filters={filters}
               setFilters={setFilters}
@@ -475,24 +493,28 @@ export default function App() {
           )}
 
           {activeTab === 'blacklist' && (
-            <BlacklistManager
-              blacklist={blacklist}
-              onAdd={handleAddToBlacklist}
-              onRemove={handleRemoveFromBlacklist}
-            />
+            <Suspense fallback={<PanelLoader />}>
+              <BlacklistManager
+                blacklist={blacklist}
+                onAdd={handleAddToBlacklist}
+                onRemove={handleRemoveFromBlacklist}
+              />
+            </Suspense>
           )}
 
           {activeTab === 'stores' && (
-            <StoreManager
-              stores={stores}
-              onAddStore={handleAddStore}
-              onUpdateStore={handleUpdateStore}
-              onDeleteStore={handleDeleteStore}
-              onTestStore={handleTestStoreConnection}
-            />
+            <Suspense fallback={<PanelLoader />}>
+              <StoreManager
+                stores={stores}
+                onAddStore={handleAddStore}
+                onUpdateStore={handleUpdateStore}
+                onDeleteStore={handleDeleteStore}
+                onTestStore={handleTestStoreConnection}
+              />
+            </Suspense>
           )}
 
-          {activeTab === 'script' && <ScriptGenerator />}
+          {activeTab === 'script' && <Suspense fallback={<PanelLoader />}><ScriptGenerator /></Suspense>}
         </main>
       </div>
     </div>

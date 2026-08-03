@@ -494,31 +494,58 @@ async function supabaseFetch(path, options = {}) {
   return data;
 }
 
-async function loadState() {
+async function loadState({ includeLogs = true, includeStores = true, includeBlacklist = true } = {}) {
   if (!hasSupabaseConfig()) {
     if (!inMemoryState) inMemoryState = stateTemplate();
     return inMemoryState;
   }
   try {
-    const keys = [DEFAULT_STATE_KEY, 'stores', 'blacklist'];
-    const rows = await supabaseFetch(`/app_state?key=in.(${keys.map(encodeURIComponent).join(',')})&select=key,value`);
-    const defaultRow = Array.isArray(rows) ? rows.find(row => row.key === DEFAULT_STATE_KEY) : null;
-    if (!defaultRow?.value) {
+    const keys = [];
+    if (includeLogs) keys.push('logs');
+    if (includeStores) keys.push('stores');
+    if (includeBlacklist) keys.push('blacklist');
+    let rows = await supabaseFetch(`/app_state?key=in.(${keys.map(encodeURIComponent).join(',')})&select=key,value`);
+    let logsRow = rows.find(row => row.key === 'logs');
+    let defaultRow = null;
+
+    // Older installations keep logs in the legacy default state. Read it only once
+    // to migrate, so normal dashboard requests never download that large blob again.
+    if (includeLogs && !logsRow?.value) {
+      const fallbackRows = await supabaseFetch(`/app_state?key=eq.${encodeURIComponent(DEFAULT_STATE_KEY)}&select=key,value`);
+      defaultRow = Array.isArray(fallbackRows) ? fallbackRows.find(row => row.key === DEFAULT_STATE_KEY) : null;
+      rows = [...rows, ...(Array.isArray(fallbackRows) ? fallbackRows : [])];
+    }
+
+    if (includeLogs && !logsRow?.value && !defaultRow?.value) {
       const initial = stateTemplate();
       await saveState(initial);
       await saveStoresState(initial);
+      await saveLogsState(initial);
+      await saveBlacklistState(initial);
       return initial;
     }
 
-    const state = { ...stateTemplate(), ...defaultRow.value };
+    const state = { ...stateTemplate(), ...(defaultRow?.value || {}) };
+    if (!includeLogs) state.logs = [];
+    if (!includeStores) state.stores = [];
+    if (!includeBlacklist) state.blacklist = [];
+
+    logsRow = rows.find(row => row.key === 'logs');
+    if (includeLogs && logsRow?.value) {
+      state.logs = Array.isArray(logsRow.value.logs) ? logsRow.value.logs : state.logs;
+      state.autoLogId = Number(logsRow.value.autoLogId || state.autoLogId);
+    } else if (includeLogs && defaultRow?.value) {
+      // Migrate existing installations once, then keep order-log reads lightweight.
+      await saveLogsState(state);
+    }
+
     const storesRow = rows.find(row => row.key === 'stores');
-    if (storesRow?.value) {
+    if (includeStores && storesRow?.value) {
       state.stores = Array.isArray(storesRow.value.stores) ? storesRow.value.stores : state.stores;
       state.autoStoreId = Number(storesRow.value.autoStoreId || state.autoStoreId);
     }
-    // Overlay blacklist from dedicated lightweight key if present
     const blacklistRow = rows.find(row => row.key === 'blacklist');
-    if (blacklistRow?.value && Array.isArray(blacklistRow.value.blacklist)) {
+    if (includeBlacklist && blacklistRow?.value && Array.isArray(blacklistRow.value.blacklist)) {
       state.blacklist = blacklistRow.value.blacklist;
       state.autoBlacklistId = Number(blacklistRow.value.autoBlacklistId || state.autoBlacklistId);
     }
@@ -549,6 +576,13 @@ async function saveStoresState(state) {
   await saveStateValue('stores', {
     stores: state.stores,
     autoStoreId: state.autoStoreId
+  });
+}
+
+async function saveLogsState(state) {
+  await saveStateValue('logs', {
+    logs: state.logs,
+    autoLogId: state.autoLogId
   });
 }
 
@@ -1215,7 +1249,7 @@ async function syncSapoOrders(state, store, datePreset) {
     }
   }
 
-  await saveState(state);
+  await saveLogsState(state);
   return { success: true, total_orders: total, synced_new: synced, updated_orders: updated };
 }
 
@@ -1254,7 +1288,7 @@ async function handleLogs(event, state, method, parts, query, body) {
       if (latestSessionLog) {
         latestSessionLog.connection_status = 'inactive';
         latestSessionLog.left_at = new Date().toISOString();
-        await saveState(state);
+        await saveLogsState(state);
         return json(200, { success: true, log_id: latestSessionLog.id, client_ip: realClientIp, is_blacklisted: Boolean(blacklistCheck), updated: 'session_inactive' });
       }
     }
@@ -1289,7 +1323,7 @@ async function handleLogs(event, state, method, parts, query, body) {
       created_at: new Date().toISOString()
     };
     state.logs.unshift(log);
-    await saveState(state);
+    await saveLogsState(state);
     return json(201, { success: true, log_id: log.id, client_ip: realClientIp, risk_level: riskLevel, is_blacklisted: Boolean(blacklistCheck), reasons });
   }
   if (method === 'GET' && parts.length === 0) {
@@ -1316,7 +1350,7 @@ async function handleLogs(event, state, method, parts, query, body) {
     const id = Number(parts[0]);
     const before = state.logs.length;
     state.logs = state.logs.filter(row => row.id !== id);
-    await saveState(state);
+    await saveLogsState(state);
     return before === state.logs.length ? json(404, { success: false, message: 'Log not found' }) : json(200, { success: true, message: 'Log deleted' });
   }
   return json(404, { success: false, message: 'Not found' });
@@ -1402,9 +1436,8 @@ exports.handler = async (event) => {
       return json(200, { status: 'OK', system: 'Sapo IP Guard Netlify API', timestamp: new Date().toISOString() });
     }
 
-    const state = await loadState();
-
     if (rawPath === '/client-tracker.js') {
+      const state = await loadState({ includeLogs: false, includeStores: false });
       const blacklist = state.blacklist.map(item => item.ip).filter(Boolean);
       return response(200, `window.__SAPO_IP_GUARD_BLACKLIST = ${JSON.stringify(blacklist)};\n${TRACKER_SOURCE}`, {
         'Content-Type': 'application/javascript; charset=utf-8',
@@ -1419,10 +1452,24 @@ exports.handler = async (event) => {
     const query = event.queryStringParameters || {};
     const method = event.httpMethod;
 
-    if (resource === 'stores') return await handleStores(event, state, method, parts, body);
-    if (resource === 'logs') return await handleLogs(event, state, method, parts, query, body);
-    if (resource === 'blacklist') return await handleBlacklist(event, state, method, parts, query, body);
-    if (resource === 'stats') return handleStats(event, state, method, parts, query);
+    if (resource === 'stores') {
+      const isSync = method === 'POST' && parts[1] === 'sync';
+      const state = await loadState({ includeLogs: isSync, includeStores: true, includeBlacklist: isSync });
+      return await handleStores(event, state, method, parts, body);
+    }
+    if (resource === 'logs') {
+      const isCollection = method === 'POST' && parts[0] === 'collect';
+      const state = await loadState({ includeLogs: true, includeStores: isCollection, includeBlacklist: true });
+      return await handleLogs(event, state, method, parts, query, body);
+    }
+    if (resource === 'blacklist') {
+      const state = await loadState({ includeLogs: false, includeStores: false, includeBlacklist: true });
+      return await handleBlacklist(event, state, method, parts, query, body);
+    }
+    if (resource === 'stats') {
+      const state = await loadState({ includeLogs: true, includeStores: false, includeBlacklist: true });
+      return handleStats(event, state, method, parts, query);
+    }
 
     return json(404, { success: false, message: 'Not found' });
   } catch (error) {
