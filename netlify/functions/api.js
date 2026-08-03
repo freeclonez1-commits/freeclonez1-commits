@@ -53,6 +53,7 @@ const TRACKER_SOURCE = `/**
   var webRtcDiscoveryInFlight = false;
   var webRtcCallbacks = [];
   var lastNetworkIdentitySignature = '';
+  var forceNetworkIdentityPush = false;
   var NETWORK_CHECK_INTERVAL_MS = 15000;
 
   function getSessionMeta() {
@@ -116,8 +117,8 @@ const TRACKER_SOURCE = `/**
       });
   }
 
-  function getWebRTCIP(callback) {
-    if (cachedWebRtcStatus !== 'pending') {
+  function getWebRTCIP(callback, force) {
+    if (!force && cachedWebRtcStatus !== 'pending') {
       callback(cachedWebRtcIp);
       return;
     }
@@ -230,15 +231,14 @@ const TRACKER_SOURCE = `/**
     getWebRTCIP(function () {
       webRtcReady = true;
       finishHydration();
-    });
+    }, Boolean(force));
   }
 
   function refreshNetworkIdentity(knownPublicIp) {
     if (networkHydrateStarted || document.hidden) return;
     var trustedPublicIp = typeof knownPublicIp === 'string' ? knownPublicIp : null;
-    cachedPublicIp = trustedPublicIp;
-    cachedWebRtcIp = null;
-    cachedWebRtcStatus = 'pending';
+    if (trustedPublicIp) cachedPublicIp = trustedPublicIp;
+    forceNetworkIdentityPush = true;
     hydrateNetworkIdentity(true, trustedPublicIp);
   }
 
@@ -370,7 +370,9 @@ const TRACKER_SOURCE = `/**
     if (cachedWebRtcStatus === 'pending') return;
     var meta = getSessionMeta();
     var signature = [meta.session_id, cachedPublicIp || '', cachedWebRtcIp || '', cachedWebRtcStatus].join('|');
-    if (signature === lastNetworkIdentitySignature) return;
+    var forcePush = forceNetworkIdentityPush;
+    forceNetworkIdentityPush = false;
+    if (signature === lastNetworkIdentitySignature && !forcePush) return;
     lastNetworkIdentitySignature = signature;
     sendCollection(buildCollectionPayload(null, 'network_identity', window.location.href, meta));
   }
@@ -1072,10 +1074,16 @@ function decorateLog(row, state) {
   let timeToOrder = null;
   if (hasOrder && row.session_duration_sec) timeToOrder = formatDuration(Number(row.session_duration_sec));
   const effectiveWebrtc = (row.webrtc_ip && isKnownIp(row.webrtc_ip)) ? row.webrtc_ip : null;
+  let effectiveWebrtcStatus = row.webrtc_status || (effectiveWebrtc ? 'captured' : 'not_available');
+  const rowAgeMs = Date.now() - new Date(row.created_at || 0).getTime();
+  if (!effectiveWebrtc && effectiveWebrtcStatus === 'pending' && Number.isFinite(rowAgeMs) && rowAgeMs > 30 * 1000) {
+    effectiveWebrtcStatus = 'not_available';
+  }
   const isBlacklisted = blacklisted.has(row.client_ip) || (row.webrtc_ip && blacklisted.has(row.webrtc_ip));
   return {
     ...row,
     webrtc_ip: effectiveWebrtc,
+    webrtc_status: effectiveWebrtcStatus,
     is_vpn: Boolean(row.is_vpn),
     is_datacenter: Boolean(row.is_datacenter || inferredDatacenter),
     risk_level: riskLevel,
@@ -1208,6 +1216,7 @@ function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt, ord
   // Filter candidate browsing logs from tracker (not sapo_sync) within 15 mins prior to order creation for the same store
   const candidates = state.logs.filter(log => {
     if (log.trigger_event === 'sapo_sync') return false;
+    if (hasOrderInfo(log.order_info)) return false;
     if (storeId && log.store_id && log.store_id !== storeId) return false;
     const logTime = new Date(log.created_at).getTime();
     if (!Number.isFinite(logTime)) return false;
