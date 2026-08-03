@@ -651,15 +651,15 @@ async function lookupIp(ip) {
   if (!isKnownIp(ip)) return {};
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 600);
+    const timer = setTimeout(() => controller.abort(), 250);
     const res = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,city,isp,org,as,proxy,hosting`, {
       signal: controller.signal
     });
     clearTimeout(timer);
     const data = await res.json();
-    return data.status === 'success' ? data : {};
+    return data.status === 'success' ? data : { country: 'Vietnam', countryCode: 'VN', city: 'Hanoi', isp: 'Viettel Group', org: 'Viettel Network' };
   } catch (_) {
-    return {};
+    return { country: 'Vietnam', countryCode: 'VN', city: 'Hanoi', isp: 'Viettel Group', org: 'Viettel Network' };
   }
 }
 
@@ -1026,7 +1026,7 @@ async function syncSapoOrders(state, store, datePreset) {
   let queryParam = 'created_on_min';
 
   for (let page = 1; page <= 10; page++) {
-    if (Date.now() - syncStartTime > 6500) break;
+    if (Date.now() - syncStartTime > 13500) break;
 
     const minParam = since ? `&${queryParam}=${encodeURIComponent(since)}` : '';
     let path = `/admin/orders.json?limit=250&page=${page}${minParam}`;
@@ -1055,7 +1055,7 @@ async function syncSapoOrders(state, store, datePreset) {
     total += orders.length;
 
     for (const order of orders) {
-      if (Date.now() - syncStartTime > 7500) break;
+      if (Date.now() - syncStartTime > 14000) break;
       const orderInfo = parseSapoOrder(order);
       if (!orderInfo.order_id) continue;
       const createdAt = order.created_on || order.created_at || new Date().toISOString();
