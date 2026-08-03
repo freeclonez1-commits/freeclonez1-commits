@@ -1220,7 +1220,7 @@ async function handleLogs(event, state, method, parts, query, body) {
       }
     }
     const log = {
-      id: state.autoLogId++,
+      id: getNextId(state),
       store_id: matched.id,
       store_domain: matched.mysapo_domain,
       client_ip: realClientIp,
