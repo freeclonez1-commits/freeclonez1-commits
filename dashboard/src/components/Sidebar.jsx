@@ -3,10 +3,9 @@ import { LayoutDashboard, ListFilter, ShieldAlert, Code2, Store } from 'lucide-r
 
 export default function Sidebar({ activeTab, setActiveTab }) {
   const navItems = [
-    { id: 'overview', label: 'Tổng quan (KPIs)', icon: LayoutDashboard },
-    { id: 'logs', label: 'Lịch sử Logs & IP', icon: ListFilter },
+    { id: 'logs', label: 'Danh sách Đơn', icon: ListFilter },
     { id: 'blacklist', label: 'Danh sách đen', icon: ShieldAlert },
-    { id: 'stores', label: 'Liên kết Mysapo (Stores)', icon: Store },
+    { id: 'stores', label: 'Liên kết Mysapo', icon: Store },
     { id: 'script', label: 'Mã nhúng Sapo', icon: Code2 },
   ];
 

@@ -26,7 +26,7 @@ import {
 } from './api/client';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('overview');
+  const [activeTab, setActiveTab] = useState('logs');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const DEFAULT_ADMIN_KEY = 'd621f8ea480f914ab7c3d5e61f2098a4bc75e0d3f8a902c4de167fb5902ac83e';
