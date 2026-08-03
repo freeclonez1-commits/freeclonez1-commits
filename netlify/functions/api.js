@@ -1047,7 +1047,8 @@ async function syncSapoOrders(state, store, datePreset) {
   let synced = 0;
   let queryParam = 'created_on_min';
 
-  for (let page = 1; page <= 10; page++) {
+  const maxPages = datePreset === 'TODAY' ? 1 : (datePreset === '7_DAYS' ? 2 : 5);
+  for (let page = 1; page <= maxPages; page++) {
     if (Date.now() - syncStartTime > 13500) break;
 
     const minParam = since ? `&${queryParam}=${encodeURIComponent(since)}` : '';

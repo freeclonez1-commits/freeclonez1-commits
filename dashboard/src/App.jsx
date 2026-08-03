@@ -150,13 +150,13 @@ export default function App() {
     fetchData();
   }, [fetchData]);
 
-  // Live click activity updates quickly; order reporting can poll less often.
+  // Real-time auto refresh every 3 seconds so new orders appear automatically without clicking sync
   useEffect(() => {
     const interval = setInterval(() => {
       fetchData();
-    }, filters.orders_only === false ? 3000 : 10000);
+    }, 3000);
     return () => clearInterval(interval);
-  }, [fetchData, filters.orders_only]);
+  }, [fetchData]);
 
   // Sync Sapo Orders Handler
   const handleSyncOrders = async () => {
