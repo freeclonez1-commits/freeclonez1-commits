@@ -1064,10 +1064,10 @@ async function syncSapoOrders(state, store, datePreset) {
 
       if (trackedVisit) {
         applySyncedOrder(trackedVisit, orderInfo, createdAt);
-        if (candidateVisit && isKnownIp(candidateVisit.webrtc_ip)) {
+        if (candidateVisit && candidateVisit.webrtc_ip) {
           trackedVisit.webrtc_ip = candidateVisit.webrtc_ip;
         }
-        if (candidateVisit && candidateVisit.session_start_at && !trackedVisit.session_start_at) {
+        if (candidateVisit && candidateVisit.session_start_at) {
           trackedVisit.session_start_at = candidateVisit.session_start_at;
           trackedVisit.session_duration_sec = sessionDurationToOrder(candidateVisit.session_start_at, createdAt);
         }
