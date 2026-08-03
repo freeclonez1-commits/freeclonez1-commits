@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 const DEFAULT_STATE_KEY = 'default';
 const BUSINESS_TIME_ZONE = process.env.BUSINESS_TIME_ZONE || 'Asia/Ho_Chi_Minh';
@@ -6,6 +7,8 @@ const COLLECT_WINDOW_MS = 60 * 1000;
 const COLLECT_MAX_PER_WINDOW = 30;
 const collectCounters = new Map();
 const syncLocks = new Map();
+const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
+const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
 
 const TRACKER_SOURCE = `/**
  * Sapo Fake IP & WebRTC Leak Tracker Script
@@ -531,6 +534,29 @@ async function supabaseFetch(path, options = {}) {
   return data;
 }
 
+function unpackLogsValue(value) {
+  if (!value || value.encoding !== COMPRESSED_LOGS_ENCODING || !value.data) return value;
+  try {
+    return JSON.parse(zlib.gunzipSync(Buffer.from(value.data, 'base64')).toString('utf8'));
+  } catch (_) {
+    throw new Error('Stored logs could not be decompressed.');
+  }
+}
+
+function packLogsValue(logs, autoLogId) {
+  const value = { logs, autoLogId };
+  const serialized = JSON.stringify(value);
+  if (Buffer.byteLength(serialized, 'utf8') < LOG_COMPRESSION_THRESHOLD_BYTES) return value;
+  return {
+    encoding: COMPRESSED_LOGS_ENCODING,
+    data: zlib.gzipSync(Buffer.from(serialized, 'utf8')).toString('base64')
+  };
+}
+
+function isCompressedLogsValue(value) {
+  return Boolean(value && value.encoding === COMPRESSED_LOGS_ENCODING && value.data);
+}
+
 async function loadState({ includeLogs = true, includeStores = true, includeBlacklist = true } = {}) {
   if (!hasSupabaseConfig()) {
     throw new Error('Persistent storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');
@@ -568,8 +594,14 @@ async function loadState({ includeLogs = true, includeStores = true, includeBlac
 
     logsRow = rows.find(row => row.key === 'logs');
     if (includeLogs && logsRow?.value) {
-      state.logs = Array.isArray(logsRow.value.logs) ? logsRow.value.logs : state.logs;
-      state.autoLogId = Number(logsRow.value.autoLogId || state.autoLogId);
+      const logsValue = unpackLogsValue(logsRow.value);
+      state.logs = Array.isArray(logsValue?.logs) ? logsValue.logs : state.logs;
+      state.autoLogId = Number(logsValue?.autoLogId || state.autoLogId);
+      // Migrate the legacy JSON object on the next successful read. This keeps
+      // the existing data intact while making future dashboard reads much smaller.
+      if (!isCompressedLogsValue(logsRow.value) && Buffer.byteLength(JSON.stringify(logsValue || {}), 'utf8') >= LOG_COMPRESSION_THRESHOLD_BYTES) {
+        await saveLogsState(state);
+      }
     } else if (includeLogs && defaultRow?.value) {
       // Migrate existing installations once, then keep order-log reads lightweight.
       await saveLogsState(state);
@@ -613,10 +645,7 @@ async function saveStoresState(state) {
 }
 
 async function saveLogsState(state) {
-  await saveStateValue('logs', {
-    logs: state.logs,
-    autoLogId: state.autoLogId
-  });
+  await saveStateValue('logs', packLogsValue(state.logs, state.autoLogId));
 }
 
 async function saveBlacklistState(state) {
