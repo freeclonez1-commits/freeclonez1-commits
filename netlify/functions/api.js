@@ -1060,6 +1060,7 @@ async function syncSapoOrders(state, store, datePreset) {
       const orderInfo = parseSapoOrder(order);
       if (!orderInfo.order_id) continue;
       const createdAt = order.created_on || order.created_at || new Date().toISOString();
+      const orderClientIp = sapoOrderClientIp(order);
       const existing = state.logs.find(log => log.store_id === store.id && isSameOrder(log, orderInfo));
       const candidateVisit = findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
       const trackedVisit = existing || candidateVisit;
