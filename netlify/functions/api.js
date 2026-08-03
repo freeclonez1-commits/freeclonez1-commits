@@ -1148,21 +1148,8 @@ async function syncSapoOrders(state, store, datePreset) {
     }
   });
 
-  // Fast backfill pass for missing WebRTC / session_duration / GeoIP correction
+  // Fast backfill pass for missing WebRTC / session_duration
   for (const log of state.logs) {
-    if (log.client_ip && isKnownIp(log.client_ip) && (log.country === 'Vietnam' || log.country === 'Unknown')) {
-      const fresh = await lookupIp(log.client_ip);
-      if (fresh && fresh.country && fresh.country !== 'Vietnam' && fresh.country !== 'Unknown') {
-        log.country = fresh.country;
-        log.country_code = fresh.countryCode || 'XX';
-        log.city = fresh.city || 'Unknown';
-        log.isp = fresh.isp || 'Unknown';
-        log.org = fresh.org || 'Unknown';
-        log.is_vpn = fresh.proxy;
-        log.is_datacenter = fresh.hosting;
-        log.risk_level = (fresh.proxy || fresh.hosting) ? 'HIGH_RISK' : log.risk_level;
-      }
-    }
     if (log.store_id === store.id && hasOrderInfo(log.order_info)) {
       const ordInfo = safeJsonParse(log.order_info, null);
       if (!ordInfo) continue;

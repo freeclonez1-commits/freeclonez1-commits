@@ -201,6 +201,9 @@ export default function App() {
       }
 
       await fetchData();
+      if (totalOrdersCount > 0) {
+        setFilters(prev => ({ ...prev, startDate: businessDateDaysAgo(6), endDate: businessDateDaysAgo(0), page: 1 }));
+      }
       if (errors.length > 0) {
         setNotice({ type: 'error', message: `Lỗi đồng bộ: ${errors.join(' | ')}` });
       } else {
