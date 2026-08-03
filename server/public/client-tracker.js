@@ -183,18 +183,14 @@
       }
     }
 
-    // 2. Inspect DOM elements for Order Code (#18931)
-    if (!info.order_id) {
+    // 2. Inspect DOM elements for Order Code (#18931) on checkout/thank-you pages
+    var path = (window.location.pathname || '').toLowerCase();
+    var isCheckoutPage = path.indexOf('/checkouts') !== -1 || path.indexOf('/thank') !== -1 || path.indexOf('/orders/') !== -1;
+    if (!info.order_id && isCheckoutPage) {
       var orderCodeEl = document.querySelector('.order-number, .thankyou-order-id, #order_code, .order-code, [data-order-name], .os-order-number');
       if (orderCodeEl) {
         var text = orderCodeEl.innerText.trim();
         if (text) info.order_id = text.startsWith('#') ? text : '#' + text;
-      } else {
-        var bodyText = document.body ? document.body.innerText : '';
-        var match = bodyText.match(/(?:#|đơn hàng|order)\s*([0-9]{4,8})/i);
-        if (match) {
-          info.order_id = '#' + match[1];
-        }
       }
     }
 
