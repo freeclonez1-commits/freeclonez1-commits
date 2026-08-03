@@ -1058,12 +1058,19 @@ async function syncSapoOrders(state, store, datePreset) {
       const orderInfo = parseSapoOrder(order);
       if (!orderInfo.order_id) continue;
       const createdAt = order.created_on || order.created_at || new Date().toISOString();
-      const orderClientIp = sapoOrderClientIp(order);
       const existing = state.logs.find(log => log.store_id === store.id && isSameOrder(log, orderInfo));
-      const trackedVisit = existing || findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
+      const candidateVisit = findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
+      const trackedVisit = existing || candidateVisit;
 
       if (trackedVisit) {
         applySyncedOrder(trackedVisit, orderInfo, createdAt);
+        if (candidateVisit && isKnownIp(candidateVisit.webrtc_ip)) {
+          trackedVisit.webrtc_ip = candidateVisit.webrtc_ip;
+        }
+        if (candidateVisit && candidateVisit.session_start_at && !trackedVisit.session_start_at) {
+          trackedVisit.session_start_at = candidateVisit.session_start_at;
+          trackedVisit.session_duration_sec = sessionDurationToOrder(candidateVisit.session_start_at, createdAt);
+        }
         const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : trackedVisit.client_ip;
         const analysis = await analyzeRisk(effectiveClientIp, trackedVisit.webrtc_ip, ipCache, state.logs);
         trackedVisit.client_ip = effectiveClientIp;
