@@ -381,6 +381,7 @@ const TRACKER_SOURCE = `/**
   function initTracking() {
     hydrateNetworkIdentity();
     checkBlacklistImmediately();
+    pushLog(null, 'page_view');
     attachFormSubmitListeners();
     attachCheckoutActivityListeners();
     attachClickListeners();
