@@ -5,6 +5,7 @@ const BUSINESS_TIME_ZONE = process.env.BUSINESS_TIME_ZONE || 'Asia/Ho_Chi_Minh';
 const COLLECT_WINDOW_MS = 60 * 1000;
 const COLLECT_MAX_PER_WINDOW = 30;
 const collectCounters = new Map();
+const syncLocks = new Map();
 
 const TRACKER_SOURCE = `/**
  * Sapo Fake IP & WebRTC Leak Tracker Script
@@ -674,7 +675,7 @@ async function lookupIp(ip) {
   if (!isKnownIp(ip)) return {};
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1200);
+    const timer = setTimeout(() => controller.abort(), 650);
     const res = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, {
       signal: controller.signal
     });
@@ -873,9 +874,19 @@ async function handleStores(event, state, method, parts, body) {
     return json(200, await testSapoConnection(store));
   }
   if (method === 'POST' && parts[1] === 'sync') {
-    const result = await syncSapoOrders(state, store, body?.datePreset || 'TODAY');
-    await saveState(state);
-    return json(200, result);
+    const preset = body?.datePreset || 'TODAY';
+    const lockKey = `${store.id}:${preset}`;
+    if (syncLocks.has(lockKey)) {
+      return json(202, { success: true, syncing: true, total_orders: 0, synced_new: 0, message: 'Sync dang chay, dashboard se tu cap nhat ngay khi co du lieu moi.' });
+    }
+    const syncPromise = syncSapoOrders(state, store, preset);
+    syncLocks.set(lockKey, syncPromise);
+    try {
+      const result = await syncPromise;
+      return json(200, result);
+    } finally {
+      syncLocks.delete(lockKey);
+    }
   }
   return json(404, { success: false, message: 'Not found' });
 }
@@ -972,8 +983,8 @@ function applySyncedOrder(log, orderInfo, orderCreatedAt) {
   }
 }
 
-async function applyIpAnalysis(log, clientIp, webrtcIp, extraReasons = []) {
-  const analysis = await analyzeRisk(clientIp, webrtcIp);
+async function applyIpAnalysis(log, clientIp, webrtcIp, extraReasons = [], ipCache = null) {
+  const analysis = await analyzeRisk(clientIp, webrtcIp, ipCache);
   log.client_ip = isKnownIp(clientIp) ? clientIp : 'unknown';
   log.webrtc_ip = isKnownIp(webrtcIp) ? webrtcIp : null;
   log.country = analysis.ipData.country || 'Unknown';
@@ -1060,20 +1071,22 @@ async function syncSapoOrders(state, store, datePreset) {
   const ipCache = new Map();
   let total = 0;
   let synced = 0;
+  let updated = 0;
   let queryParam = 'created_at_min';
 
-  const maxPages = datePreset === 'TODAY' ? 1 : (datePreset === '7_DAYS' ? 2 : 5);
+  const pageLimit = 250;
+  const maxPages = datePreset === 'TODAY' ? 2 : (datePreset === '7_DAYS' ? 4 : 8);
   for (let page = 1; page <= maxPages; page++) {
     if (Date.now() - syncStartTime > 13500) break;
 
     const minParam = since ? `&${queryParam}=${encodeURIComponent(since)}` : '';
-    let path = `/admin/orders.json?limit=100&page=${page}${minParam}`;
+    let path = `/admin/orders.json?limit=${pageLimit}&page=${page}${minParam}`;
     let { res, data } = await sapoFetchJson(store, secret, path);
 
     if (page === 1 && (!res.ok || !data?.orders?.length)) {
       const altParam = queryParam === 'created_at_min' ? 'created_on_min' : 'created_at_min';
       const altMinParam = since ? `&${altParam}=${encodeURIComponent(since)}` : '';
-      const altPath = `/admin/orders.json?limit=100&page=1${altMinParam}`;
+      const altPath = `/admin/orders.json?limit=${pageLimit}&page=1${altMinParam}`;
       const altResult = await sapoFetchJson(store, secret, altPath);
       if (altResult.res.ok && altResult.data?.orders?.length) {
         res = altResult.res;
@@ -1098,7 +1111,7 @@ async function syncSapoOrders(state, store, datePreset) {
       if (!orderInfo.order_id) continue;
       const createdAt = order.created_on || order.created_at || new Date().toISOString();
       const orderClientIp = sapoOrderClientIp(order);
-      const existing = state.logs.find(log => isSameOrder(log, orderInfo));
+      const existing = state.logs.find(log => log.store_id === store.id && isSameOrder(log, orderInfo));
       const candidateVisit = findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
       const trackedVisit = existing || candidateVisit;
 
@@ -1118,9 +1131,13 @@ async function syncSapoOrders(state, store, datePreset) {
           }
         }
         trackedVisit.client_ip = effectiveClientIp;
+        if ((Date.now() - syncStartTime) < 9500 || ipCache.has(effectiveClientIp)) {
+          await applyIpAnalysis(trackedVisit, effectiveClientIp, trackedVisit.webrtc_ip, [], ipCache);
+        }
+        updated++;
       } else {
-        const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : '127.0.0.1';
-        state.logs.unshift({
+        const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : 'unknown';
+        const newLog = {
           id: getNextId(state),
           store_id: store.id,
           store_domain: store.mysapo_domain,
@@ -1144,11 +1161,15 @@ async function syncSapoOrders(state, store, datePreset) {
           session_start_at: null,
           session_duration_sec: null,
           created_at: new Date(createdAt).toISOString()
-        });
+        };
+        if ((Date.now() - syncStartTime) < 9500 || ipCache.has(effectiveClientIp)) {
+          await applyIpAnalysis(newLog, effectiveClientIp, null, [], ipCache);
+        }
+        state.logs.unshift(newLog);
         synced++;
       }
     }
-    if (orders.length < 100) break;
+    if (orders.length < pageLimit) break;
   }
 
   // Deduplicate orders by order_id per store
@@ -1195,7 +1216,7 @@ async function syncSapoOrders(state, store, datePreset) {
   }
 
   await saveState(state);
-  return { success: true, total_orders: total, synced_new: synced };
+  return { success: true, total_orders: total, synced_new: synced, updated_orders: updated };
 }
 
 async function handleLogs(event, state, method, parts, query, body) {
@@ -1273,7 +1294,7 @@ async function handleLogs(event, state, method, parts, query, body) {
   }
   if (method === 'GET' && parts.length === 0) {
     const page = Math.max(1, Number(query.page || 1));
-    const limit = Math.min(20, Math.max(1, Number(query.limit || 20)));
+    const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
     const filtered = filterLogs(state.logs, query);
     const orderTotal = filterLogs(state.logs, { ...query, orders_only: 'true' }).length;
     const allTotal = filterLogs(state.logs, { ...query, orders_only: 'false' }).length;

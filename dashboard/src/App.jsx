@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Header from './components/Header';
 import Sidebar from './components/Sidebar';
 import Overview from './components/Overview';
@@ -29,6 +29,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('logs');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const refreshInFlightRef = useRef(false);
+  const logsRefreshInFlightRef = useRef(false);
+  const syncInFlightRef = useRef(false);
   const DEFAULT_ADMIN_KEY = 'd621f8ea480f914ab7c3d5e61f2098a4bc75e0d3f8a902c4de167fb5902ac83e';
   const [adminKey, setAdminKey] = useState(() => sessionStorage.getItem('sapo_admin_api_key') || DEFAULT_ADMIN_KEY);
   const [notice, setNotice] = useState(null);
@@ -70,6 +73,19 @@ export default function App() {
     orders_only: true
   });
 
+  const syncPresetFromFilters = useCallback((sourceFilters = filters) => {
+    if (!sourceFilters.startDate && !sourceFilters.endDate) return 'ALL';
+    if (sourceFilters.startDate === businessDateDaysAgo(6) && sourceFilters.endDate === todayISO) return '7_DAYS';
+    if (sourceFilters.startDate === businessDateDaysAgo(29) && sourceFilters.endDate === todayISO) return '30_DAYS';
+    return 'TODAY';
+  }, [filters, todayISO]);
+
+  const buildQueryFilters = useCallback((sourceFilters = filters) => ({
+    ...sourceFilters,
+    store_id: selectedStoreId,
+    orders_only: sourceFilters.orders_only !== false
+  }), [filters, selectedStoreId]);
+
   useEffect(() => {
     if (!notice) return undefined;
     const timer = setTimeout(() => setNotice(null), 5000);
@@ -97,17 +113,14 @@ export default function App() {
   }, [adminKey]);
 
   // Fetch all dashboard data
-  const fetchData = useCallback(async (overrideFilters = null) => {
-    if (!adminKey) return;
+  const fetchData = useCallback(async (overrideFilters = null, options = {}) => {
+    if (!adminKey || refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     setIsRefreshing(true);
-    setDataError('');
+    if (!options.silent) setDataError('');
     try {
       let activeFilters = overrideFilters || filters;
-      let queryFilters = {
-        ...activeFilters,
-        store_id: selectedStoreId,
-        orders_only: activeFilters.orders_only !== false
-      };
+      let queryFilters = buildQueryFilters(activeFilters);
 
       let [overviewResult, chartResult, logsResult, blacklistResult, storesResult] = await Promise.allSettled([
         getOverviewStats({ store_id: selectedStoreId }),
@@ -135,12 +148,84 @@ export default function App() {
     } catch (error) {
       console.error('Error fetching dashboard data:', error);
       const message = 'Không thể kết nối dashboard với server.';
-      setDataError(message);
-      setNotice({ type: 'error', message });
+      if (!options.silent) {
+        setDataError(message);
+        setNotice({ type: 'error', message });
+      }
     } finally {
       setTimeout(() => setIsRefreshing(false), 400);
+      refreshInFlightRef.current = false;
     }
-  }, [adminKey, filters, selectedStoreId]);
+  }, [adminKey, filters, selectedStoreId, buildQueryFilters]);
+
+  const refreshLogsOnly = useCallback(async (overrideFilters = null) => {
+    if (!adminKey || logsRefreshInFlightRef.current) return;
+    logsRefreshInFlightRef.current = true;
+    try {
+      const activeFilters = overrideFilters || filters;
+      const logsResult = await getLogs(buildQueryFilters(activeFilters));
+      if (logsResult.success) {
+        setLogs(logsResult.data);
+        setPagination(logsResult.pagination);
+      }
+    } catch (err) {
+      if (err.response?.status === 401) {
+        sessionStorage.removeItem('sapo_admin_api_key');
+        setAdminKey('');
+        setAuthError('Khóa quản trị không đúng hoặc đã hết hiệu lực.');
+      }
+    } finally {
+      logsRefreshInFlightRef.current = false;
+    }
+  }, [adminKey, filters, buildQueryFilters]);
+
+  const runOrderSync = useCallback(async (preset = 'TODAY', options = {}) => {
+    if (!adminKey || syncInFlightRef.current || preset === 'ALL') return { success: false, skipped: true };
+    const targetStores = selectedStoreId !== 'ALL'
+      ? stores.filter(s => String(s.id) === String(selectedStoreId))
+      : stores;
+
+    if (!targetStores.length) return { success: false, skipped: true };
+
+    syncInFlightRef.current = true;
+    setIsSyncing(true);
+    try {
+      let totalSyncedNew = 0;
+      let totalOrdersCount = 0;
+      const errors = [];
+
+      const results = await Promise.allSettled(
+        targetStores.map(st => syncStoreOrders(st.id, preset).then(res => ({ store: st, res })))
+      );
+
+      results.forEach(result => {
+        if (result.status === 'fulfilled' && result.value.res?.success) {
+          totalSyncedNew += result.value.res.synced_new || 0;
+          totalOrdersCount += result.value.res.total_orders || 0;
+        } else {
+          const st = result.status === 'fulfilled' ? result.value.store : null;
+          const err = result.reason;
+          const errMsg = err?.response?.data?.message || err?.message || 'Lỗi kết nối';
+          errors.push(`${st ? `[${st.store_name}]: ` : ''}${errMsg}`);
+        }
+      });
+
+      await refreshLogsOnly();
+
+      if (!options.quiet) {
+        if (errors.length > 0) {
+          setNotice({ type: 'error', message: `Lỗi đồng bộ: ${errors.join(' | ')}` });
+        } else {
+          const newText = totalSyncedNew > 0 ? `, có ${totalSyncedNew} đơn mới` : '';
+          setNotice({ type: 'success', message: `Đã quét ${totalOrdersCount} đơn Sapo${newText}.` });
+        }
+      }
+      return { success: errors.length === 0, totalSyncedNew, totalOrdersCount };
+    } finally {
+      syncInFlightRef.current = false;
+      setIsSyncing(false);
+    }
+  }, [adminKey, selectedStoreId, stores, refreshLogsOnly]);
 
   useEffect(() => {
     fetchStores();
@@ -150,67 +235,46 @@ export default function App() {
     fetchData();
   }, [fetchData]);
 
-  // Real-time auto refresh every 3 seconds so new orders appear automatically without clicking sync
+  // Refresh the visible table frequently, but keep heavy stats/stores calls out of this loop.
   useEffect(() => {
     const interval = setInterval(() => {
-      fetchData();
+      if (activeTab === 'logs') refreshLogsOnly();
     }, 3000);
     return () => clearInterval(interval);
-  }, [fetchData]);
+  }, [activeTab, refreshLogsOnly]);
+
+  // Background Sapo sync: new orders appear without F5 or manual sync.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (activeTab === 'logs') {
+        runOrderSync(syncPresetFromFilters(filters), { quiet: true });
+      }
+    }, 12000);
+    return () => clearInterval(interval);
+  }, [activeTab, filters, runOrderSync, syncPresetFromFilters]);
 
   // Sync Sapo Orders Handler
   const handleSyncOrders = async () => {
-    setIsSyncing(true);
     try {
-      let syncPreset = 'TODAY';
-      if (!filters.startDate && !filters.endDate) {
-        syncPreset = 'ALL';
-      } else if (filters.startDate === businessDateDaysAgo(6)) {
-        syncPreset = '7_DAYS';
-      } else if (filters.startDate === businessDateDaysAgo(29)) {
-        syncPreset = '30_DAYS';
-      }
-
-      const targetStores = selectedStoreId !== 'ALL'
-        ? stores.filter(s => String(s.id) === String(selectedStoreId))
-        : stores;
-
-      if (!targetStores.length) {
-        setNotice({ type: 'error', message: 'Chưa có cửa hàng Sapo nào được chọn hoặc liên kết.' });
-        return;
-      }
-
-      let totalSyncedNew = 0;
-      let totalOrdersCount = 0;
-      const errors = [];
-
-      for (const st of targetStores) {
-        try {
-          const res = await syncStoreOrders(st.id, syncPreset);
-          if (res.success) {
-            totalSyncedNew += res.synced_new || 0;
-            totalOrdersCount += res.total_orders || 0;
-          }
-        } catch (err) {
-          const errMsg = err.response?.data?.message || err.message || 'Lỗi kết nối';
-          errors.push(`[${st.store_name}]: ${errMsg}`);
-        }
-      }
-
-      await fetchData(filters);
-
-      if (errors.length > 0) {
-        setNotice({ type: 'error', message: `Lỗi đồng bộ: ${errors.join(' | ')}` });
-      } else {
-        setNotice({ type: 'success', message: `Đã đồng bộ thành công ${totalOrdersCount} đơn hàng từ Sapo.` });
-      }
+      const result = await runOrderSync(syncPresetFromFilters(filters), { quiet: false });
+      if (result.skipped) setNotice({ type: 'error', message: 'Chưa có cửa hàng Sapo nào được chọn hoặc không thể đồng bộ chế độ Tất cả thời gian.' });
+      await fetchData(filters, { silent: true });
     } catch (err) {
       console.error('Failed to sync Sapo orders:', err);
       setNotice({ type: 'error', message: err.response?.data?.message || 'Đồng bộ đơn thất bại.' });
-    } finally {
-      setIsSyncing(false);
     }
   };
+
+  const handleDatePresetSync = useCallback((preset) => {
+    const presetFilters = {
+      ...filters,
+      page: 1,
+      limit: preset === 'TODAY' ? 20 : 50,
+      startDate: preset === 'TODAY' ? todayISO : (preset === '7_DAYS' ? businessDateDaysAgo(6) : businessDateDaysAgo(29)),
+      endDate: todayISO
+    };
+    runOrderSync(preset, { quiet: true }).then(() => fetchData(presetFilters, { silent: true }));
+  }, [filters, todayISO, runOrderSync, fetchData]);
 
   const handleTestStoreConnection = async (id) => {
     try {
@@ -286,7 +350,18 @@ export default function App() {
     try {
       const res = await addToBlacklist(ip, reason);
       if (res.success) {
-        await fetchData();
+        setBlacklist(prev => {
+          const exists = prev.some(item => item.ip === ip);
+          if (exists) {
+            return prev.map(item => item.ip === ip ? { ...item, reason, source: 'MANUAL', created_at: new Date().toISOString() } : item);
+          }
+          return [{ id: `local-${ip}`, ip, reason, source: 'MANUAL', created_at: new Date().toISOString() }, ...prev];
+        });
+        setLogs(prev => prev.map(log => (log.client_ip === ip || log.webrtc_ip === ip)
+          ? { ...log, is_blacklisted: true, risk_level: 'HIGH_RISK' }
+          : log
+        ));
+        refreshLogsOnly();
         setNotice({ type: 'success', message: `Đã chặn IP ${ip}.` });
         return true;
       }
@@ -303,7 +378,12 @@ export default function App() {
     try {
       const res = await removeFromBlacklist(ip);
       if (res.success) {
-        await fetchData();
+        setBlacklist(prev => prev.filter(item => item.ip !== ip));
+        setLogs(prev => prev.map(log => (log.client_ip === ip || log.webrtc_ip === ip)
+          ? { ...log, is_blacklisted: Boolean((log.client_ip !== ip && log.client_ip) || (log.webrtc_ip !== ip && log.webrtc_ip)) && log.is_blacklisted }
+          : log
+        ));
+        refreshLogsOnly();
         setNotice({ type: 'success', message: res.already_unblocked ? `IP ${ip} đã được bỏ chặn trước đó.` : `Đã bỏ chặn IP ${ip}.` });
         return true;
       }
@@ -390,6 +470,7 @@ export default function App() {
               onAddToBlacklist={handleAddToBlacklist}
               onRemoveFromBlacklist={handleRemoveFromBlacklist}
               onDeleteLog={handleDeleteLog}
+              onDatePresetChange={handleDatePresetSync}
             />
           )}
 

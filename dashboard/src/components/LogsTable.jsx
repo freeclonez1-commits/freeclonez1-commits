@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Search, AlertTriangle, ShieldCheck, ShieldAlert, Ban, Eye, X, Globe, Calendar, ShoppingCart, Wifi, Clock, CheckCircle2, Unlock, Monitor, Smartphone, Tablet, MousePointer2, CircleOff, ChevronLeft, ChevronRight } from 'lucide-react';
 import { businessDate, businessDateDaysAgo } from '../utils/dates';
 
-export default function LogsTable({ logs, pagination, filters, setFilters, onAddToBlacklist, onRemoveFromBlacklist, onDeleteLog }) {
+export default function LogsTable({ logs, pagination, filters, setFilters, onAddToBlacklist, onRemoveFromBlacklist, onDeleteLog, onDatePresetChange }) {
   const [selectedLog, setSelectedLog] = useState(null);
   const ordersOnlyFilter = filters.orders_only !== false;
   const isKnownIp = (ip) => {
@@ -44,6 +44,7 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
     } else if (preset === '30_DAYS') {
       setFilters(prev => ({ ...prev, startDate: businessDateDaysAgo(29), endDate: todayStr, page: 1, limit: 50 }));
     }
+    if (preset !== 'ALL') onDatePresetChange?.(preset);
   };
 
   const handleBlockIp = async (log) => {
@@ -52,19 +53,21 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
       return false;
     }
     const reason = `Chặn IP truy cập website từ Đơn ${log.order_info?.order_id || log.id} (${log.isp})`;
-    const blockedClientIp = await onAddToBlacklist(log.client_ip, reason);
+    const tasks = [onAddToBlacklist(log.client_ip, reason)];
     if (log.webrtc_ip && log.webrtc_ip !== log.client_ip) {
-      await onAddToBlacklist(log.webrtc_ip, `Chặn IP Gốc WebRTC từ Đơn ${log.order_info?.order_id || log.id}`);
+      tasks.push(onAddToBlacklist(log.webrtc_ip, `Chặn IP Gốc WebRTC từ Đơn ${log.order_info?.order_id || log.id}`));
     }
+    const [blockedClientIp] = await Promise.all(tasks);
     return Boolean(blockedClientIp);
   };
 
   const handleUnblockIp = async (log) => {
     if (!isKnownIp(log.client_ip)) return false;
-    const unblockedClientIp = await onRemoveFromBlacklist(log.client_ip);
+    const tasks = [onRemoveFromBlacklist(log.client_ip)];
     if (log.webrtc_ip && log.webrtc_ip !== log.client_ip) {
-      await onRemoveFromBlacklist(log.webrtc_ip);
+      tasks.push(onRemoveFromBlacklist(log.webrtc_ip));
     }
+    const [unblockedClientIp] = await Promise.all(tasks);
     return Boolean(unblockedClientIp);
   };
 
