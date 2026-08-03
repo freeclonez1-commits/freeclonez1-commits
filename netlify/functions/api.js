@@ -429,12 +429,31 @@ function assertAdmin(event) {
 
 function stateTemplate() {
   return {
-    stores: [],
+    stores: [
+      {
+        id: 3,
+        store_name: "Stussy",
+        mysapo_domain: "stussy-vietnam.mysapo.net",
+        api_key: "e8685cda41d44c1d8f0547b2cec7de02",
+        api_secret_encrypted: "v1.m7IfSYk3hLJa5HaQ.Zn7mWZl2Yj+CQRVtlLamYg==.+V1zLLvByK2YycLiUYCF19IHXz1FFp7G1IvgwsXNlJo=",
+        is_active: 1,
+        created_at: "2026-08-01T03:13:09.047Z"
+      },
+      {
+        id: 2,
+        store_name: "TEST VUA ĐỒ FAKE",
+        mysapo_domain: "vua-do-hieu.mysapo.net",
+        api_key: "19f31439d2e24491b17c3c7ec574f81d",
+        api_secret_encrypted: "v1.tJj0ELtWHf4zfrro.bO2iT54IP58bpHQVnDj7gA==.AoV+HQWD1soFD6InnST/8r2CFUq9R+l5ilLGDxUiVVQ=",
+        is_active: 1,
+        created_at: "2026-07-31T02:13:31.070Z"
+      }
+    ],
     logs: [],
     blacklist: [],
-    autoStoreId: 1,
-    autoLogId: 1,
-    autoBlacklistId: 1
+    autoStoreId: 4,
+    autoLogId: 1000,
+    autoBlacklistId: 10
   };
 }
 
