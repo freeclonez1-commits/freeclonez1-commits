@@ -650,6 +650,11 @@ function getNextId(state) {
   return state.logs.length > 0 ? Math.max(...state.logs.map(r => Number(r.id) || 0)) + 1 : 1000;
 }
 
+function getNextBlacklistId(state) {
+  const list = state.blacklist || [];
+  return list.length > 0 ? Math.max(...list.map(r => Number(r.id) || 0)) + 1 : 100;
+}
+
 async function lookupIp(ip) {
   if (!isKnownIp(ip)) return {};
   try {
@@ -1307,7 +1312,7 @@ async function handleBlacklist(event, state, method, parts, query, body) {
       existing.source = body?.source || 'MANUAL';
       existing.created_at = new Date().toISOString();
     } else {
-      state.blacklist.unshift({ id: state.autoBlacklistId++, ip, reason: body?.reason || 'Manual block', source: body?.source || 'MANUAL', created_at: new Date().toISOString() });
+      state.blacklist.unshift({ id: getNextBlacklistId(state), ip, reason: body?.reason || 'Manual block', source: body?.source || 'MANUAL', created_at: new Date().toISOString() });
     }
     state.logs.forEach(log => { if (log.client_ip === ip || log.webrtc_ip === ip) log.risk_level = 'HIGH_RISK'; });
     await saveState(state);
