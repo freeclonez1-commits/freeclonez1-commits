@@ -85,17 +85,68 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
     return <Monitor className="w-3.5 h-3.5" />;
   };
 
+  const riskPresentation = (log) => {
+    if (log.webrtc_mismatch) return { label: 'LỆCH IP WEBRTC', mobileLabel: 'LỆCH WEBRTC' };
+    if (log.is_tor) return { label: 'PHÁT HIỆN TOR', mobileLabel: 'TOR' };
+    if (log.is_vpn || log.is_proxy) return { label: 'PHÁT HIỆN VPN / PROXY', mobileLabel: 'VPN / PROXY' };
+    if (log.is_datacenter && log.is_abuser) return { label: 'IP DATACENTER RỦI RO', mobileLabel: 'DATACENTER RỦI RO' };
+    if (log.is_datacenter) return { label: 'IP DATACENTER', mobileLabel: 'DATACENTER' };
+    if (log.is_abuser) return { label: 'IP CÓ RỦI RO', mobileLabel: 'IP RỦI RO' };
+    return { label: 'CẦN KIỂM TRA', mobileLabel: 'CẦN KIỂM TRA' };
+  };
+
+  const readableRiskReasons = (log) => {
+    const reasons = Array.isArray(log.risk_reasons) ? log.risk_reasons : [];
+    return reasons.map((reason) => {
+      if (reason.includes('WebRTC IP mismatch')) return 'IP WebRTC khác IP kết nối';
+      if (reason.includes('Datacenter/hosting')) return 'IP thuộc hạ tầng datacenter/hosting';
+      if (reason.includes('Abusive IP reputation')) return 'IP có danh tiếng rủi ro';
+      if (reason.includes('Tor exit')) return 'IP là điểm thoát Tor';
+      if (reason.includes('VPN')) return 'Phát hiện VPN/Proxy';
+      return reason;
+    });
+  };
+
   const networkLabel = (log) => {
-    const provider = log.vpn_service ? `${log.vpn_service} VPN` : (log.is_datacenter ? `${log.isp || 'Datacenter'} · Datacenter` : log.isp);
-    return `${log.country || 'Unknown'} · ${provider || 'Unknown'}`;
+    const country = log.country || 'Unknown';
+    if (log.webrtc_mismatch) return `${country} · Lệch WebRTC`;
+    if (log.is_tor) return `${country} · Tor`;
+    if (log.is_vpn || log.is_proxy) return `${country} · ${log.vpn_service || 'VPN / Proxy'}`;
+    if (log.is_datacenter && log.is_abuser) return `${country} · Datacenter rủi ro`;
+    if (log.is_datacenter) return `${country} · Datacenter`;
+    if (log.is_abuser) return `${country} · IP rủi ro`;
+    return `${country} · ${log.isp || 'ISP chưa rõ'}`;
+  };
+
+  const renderConnectionIp = (log) => {
+    if (isUnknownLog(log)) {
+      return (
+        <span className="font-mono font-extrabold text-[#86868B] bg-[#F2F2F7] px-2.5 py-0.5 rounded-md border border-[#D1D1D6]">
+          — Chưa có IP
+        </span>
+      );
+    }
+    const isHighRisk = log.risk_level === 'HIGH_RISK';
+    const color = isHighRisk ? 'text-[#FF3B30]' : 'text-[#34C759]';
+    const background = isHighRisk ? 'bg-[#FF3B30]/10 border-[#FF3B30]/30' : 'bg-[#34C759]/10 border-[#34C759]/30';
+    return (
+      <div className="flex flex-1 min-w-0 items-center gap-2" aria-label={`${log.client_ip}, ${log.isp || 'ISP chưa rõ'}${log.asn ? `, ${log.asn}` : ''}`}>
+        <span className={`shrink-0 font-mono font-extrabold px-2.5 py-0.5 rounded-md border ${color} ${background}`}>
+          {isHighRisk ? '🔴' : '🟢'} {compactIp(log.client_ip)}
+        </span>
+        <span className={`min-w-0 truncate text-[10px] font-sans font-medium ${color}`}>
+          {networkLabel(log)}
+        </span>
+      </div>
+    );
   };
 
   const renderOriginIpBadge = (log, { full = false } = {}) => {
     if (log.webrtc_ip && log.webrtc_ip !== log.client_ip && log.webrtc_status !== 'stale') {
-      const isRealFakeIp = log.webrtc_mismatch || log.risk_level === 'HIGH_RISK';
+      const isRealFakeIp = log.webrtc_mismatch;
       if (!isRealFakeIp) {
         return (
-          <span title={log.webrtc_ip} className="font-mono font-bold px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-[#1D1D1F] bg-[#F2F2F7] border-[#E5E5EA]">
+          <span className="font-mono font-bold px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-[#1D1D1F] bg-[#F2F2F7] border-[#E5E5EA]">
             {full ? log.webrtc_ip : compactIp(log.webrtc_ip)}
             <span className="font-sans text-[10px] text-[#86868B] font-medium">
               (IP WebRTC)
@@ -104,10 +155,10 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
         );
       }
       return (
-        <span title={log.webrtc_ip} className="font-mono font-black px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-white bg-[#FF3B30] border-[#FF3B30] shadow-sm">
+        <span className="font-mono font-black px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-white bg-[#FF3B30] border-[#FF3B30] shadow-sm">
           {full ? log.webrtc_ip : compactIp(log.webrtc_ip)}
           <span className="font-sans text-[10px] font-black">
-            (Dấu vết Fake IP)
+            (Lệch IP kết nối)
           </span>
         </span>
       );
@@ -121,7 +172,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
     }
     if (log.webrtc_ip && log.webrtc_ip === log.client_ip) {
       return (
-        <span title="WebRTC da kiem tra, IP trung voi IP ket noi" className="font-mono font-bold px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-[#1D1D1F] bg-[#F2F2F7] border-[#E5E5EA]">
+        <span className="font-mono font-bold px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-[#1D1D1F] bg-[#F2F2F7] border-[#E5E5EA]">
           {full ? log.webrtc_ip : compactIp(log.webrtc_ip)}
           <span className="font-sans text-[10px] text-[#86868B] font-medium">(trung IP ket noi)</span>
         </span>
@@ -137,7 +188,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
     };
     const status = log.webrtc_status || 'not_available';
     return (
-      <span title="Khong co IP WebRTC de doi chieu. VPN, tien ich bao mat, hoac trinh duyet co the chan WebRTC leak." className="font-sans font-bold px-2.5 py-0.5 rounded-md border text-[#86868B] bg-[#F2F2F7] border-[#E5E5EA]">
+      <span className="font-sans font-bold px-2.5 py-0.5 rounded-md border text-[#86868B] bg-[#F2F2F7] border-[#E5E5EA]">
         {labels[status] || 'Khong phat hien IP WebRTC'}
       </span>
     );
@@ -354,22 +405,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                           {/* Connection / Fake IP Line */}
                           <div className="flex items-center gap-2 text-xs">
                             <span className="text-[#86868B] font-bold text-[11px] w-24 shrink-0">IP Kết nối:</span>
-                            {isUnknown ? (
-                              <span className="font-mono font-extrabold text-[#86868B] bg-[#F2F2F7] px-2.5 py-0.5 rounded-md border border-[#D1D1D6] flex items-center gap-1">
-                                — Chưa có IP
-                                <span className="text-[10px] text-[#86868B] font-sans font-normal ml-1">(Sapo chưa trả browser_ip)</span>
-                              </span>
-                            ) : isHighRisk ? (
-                              <span title={log.client_ip} className="font-mono font-extrabold text-[#FF3B30] bg-[#FF3B30]/10 px-2.5 py-0.5 rounded-md border border-[#FF3B30]/30 flex items-center gap-1">
-                                🔴 {compactIp(log.client_ip)}
-                                <span title={`${log.isp || 'Unknown'}${log.asn ? ` · ${log.asn}` : ''}`} className="text-[10px] text-[#FF3B30] font-sans font-normal ml-1">({networkLabel(log)})</span>
-                              </span>
-                            ) : (
-                              <span title={log.client_ip} className="font-mono font-extrabold text-[#34C759] bg-[#34C759]/10 px-2.5 py-0.5 rounded-md border border-[#34C759]/30 flex items-center gap-1">
-                                🟢 {compactIp(log.client_ip)}
-                                <span title={`${log.isp || 'Unknown'}${log.asn ? ` · ${log.asn}` : ''}`} className="text-[10px] text-[#34C759] font-sans font-normal ml-1">({networkLabel(log)})</span>
-                              </span>
-                            )}
+                            {renderConnectionIp(log)}
                           </div>
 
                           {!order && (
@@ -403,7 +439,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                         ) : isHighRisk ? (
                           <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-black bg-[#FF3B30]/10 text-[#FF3B30] border border-[#FF3B30]/30 shadow-sm">
                             <ShieldAlert className="w-4 h-4" />
-                            <span>🔴 CẢNH BÁO FAKE IP</span>
+                            <span>{riskPresentation(log).label}</span>
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold bg-[#34C759]/10 text-[#34C759] border border-[#34C759]/30">
@@ -536,7 +572,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                     </span>
                   ) : isHighRisk ? (
                     <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-[#FF3B30]/10 text-[#FF3B30] border border-[#FF3B30]/30">
-                      🔴 FAKE IP / VPN
+                      {riskPresentation(log).mobileLabel}
                     </span>
                   ) : (
                     <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-[#34C759]/10 text-[#34C759] border border-[#34C759]/30">
@@ -577,11 +613,9 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
 
                 {/* IP Info Box */}
                 <div className="p-3 rounded-2xl bg-[#F9F9FB] border border-[#E5E5EA] space-y-1.5 text-xs">
-                  <div className="flex flex-wrap items-center justify-between gap-1">
+                  <div className="space-y-1">
                     <span className="text-[#86868B] font-bold text-[11px]">IP Kết nối:</span>
-                    <span className={`font-mono font-extrabold text-xs px-2 py-0.5 rounded-md ${isHighRisk ? 'text-[#FF3B30] bg-[#FF3B30]/10' : 'text-[#34C759] bg-[#34C759]/10'}`}>
-                      {log.client_ip} ({log.vpn_service ? `${log.vpn_service} VPN` : (log.isp || 'N/A')})
-                    </span>
+                    {renderConnectionIp(log)}
                   </div>
                   <div className="flex flex-wrap items-center justify-between gap-1 pt-1 border-t border-[#E5E5EA]">
                     <span className="text-[#86868B] font-bold text-[11px]">IP WebRTC:</span>
@@ -718,7 +752,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
               <div className="space-y-2">
                 <div className="p-3 rounded-xl bg-white border border-[#E5E5EA] flex items-center justify-between">
                   <div>
-                    <span className="text-[#86868B] font-bold block text-[11px]">1. IP KẾT NỐI (IP FAKE / VPN):</span>
+                    <span className="text-[#86868B] font-bold block text-[11px]">1. IP KẾT NỐI (Sapo/Vercel ghi nhận):</span>
                     <span className={`font-mono font-extrabold text-sm break-all ${isUnknownLog(selectedLog) ? 'text-[#86868B]' : (selectedLog.risk_level === 'HIGH_RISK' ? 'text-[#FF3B30]' : 'text-[#34C759]')}`}>
                       {isUnknownLog(selectedLog) ? 'Chưa có IP hợp lệ' : selectedLog.client_ip}
                     </span>
@@ -730,14 +764,26 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
 
                 <div className="p-3 rounded-xl bg-white border border-[#E5E5EA] flex items-center justify-between">
                   <div>
-                    <span className="text-[#86868B] font-bold block text-[11px]">2. IP PUBLIC QUA WEBRTC:</span>
+                    <span className="text-[#86868B] font-bold block text-[11px]">2. IP WEBRTC (nếu trình duyệt công bố):</span>
                     <div className="mt-1">
-                      {renderOriginIpBadge(selectedLog, { full: true })}
+                      {renderWebRtcResult(selectedLog, { full: true })}
                     </div>
                   </div>
                 </div>
               </div>
             </div>
+
+            {selectedLog.risk_level === 'HIGH_RISK' && (
+              <div className="p-3 rounded-xl bg-[#FF3B30]/5 border border-[#FF3B30]/20 text-xs">
+                <div className="flex items-center gap-2 font-extrabold text-[#B42318]">
+                  <ShieldAlert className="w-4 h-4" />
+                  <span>{riskPresentation(selectedLog).label}</span>
+                </div>
+                <p className="mt-1.5 text-[#6E6E73] leading-5">
+                  {readableRiskReasons(selectedLog).join(' · ') || 'IP này cần được kiểm tra thêm trước khi xử lý đơn.'}
+                </p>
+              </div>
+            )}
 
             {/* Order Details */}
             {selectedLog.order_info && (
