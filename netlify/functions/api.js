@@ -716,7 +716,7 @@ function filterLogs(logs, query) {
   let rows = [...logs];
   if (query.store_id && query.store_id !== 'ALL') {
     const storeId = Number(query.store_id);
-    rows = rows.filter(row => row.store_id === storeId || row.store_id === null);
+    rows = rows.filter(row => row.store_id === storeId);
   }
   if (query.risk_level && query.risk_level !== 'ALL') {
     rows = rows.filter(row => row.risk_level === query.risk_level);
@@ -883,9 +883,10 @@ function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt, ord
   const orderEmail = normalizeContact(orderInfo?.email);
   const orderIp = isKnownIp(orderClientIp) ? orderClientIp : null;
 
-  // Filter candidate browsing logs from tracker (not sapo_sync) within 15 mins prior to order creation
+  // Filter candidate browsing logs from tracker (not sapo_sync) within 15 mins prior to order creation for the same store
   const candidates = state.logs.filter(log => {
     if (log.trigger_event === 'sapo_sync') return false;
+    if (storeId && log.store_id && log.store_id !== storeId) return false;
     const logTime = new Date(log.created_at).getTime();
     if (!Number.isFinite(logTime)) return false;
     const diff = orderTime - logTime;
@@ -1071,6 +1072,8 @@ async function syncSapoOrders(state, store, datePreset) {
 
       if (trackedVisit) {
         applySyncedOrder(trackedVisit, orderInfo, createdAt);
+        trackedVisit.store_id = store.id;
+        trackedVisit.store_domain = store.mysapo_domain;
         const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : trackedVisit.client_ip;
         if (candidateVisit) {
           const candidateRealIp = candidateVisit.webrtc_ip || candidateVisit.client_ip;
