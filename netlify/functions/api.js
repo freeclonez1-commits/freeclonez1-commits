@@ -1099,7 +1099,7 @@ async function syncSapoOrders(state, store, datePreset) {
       } else {
         const analysis = await analyzeRisk(orderClientIp, null, ipCache, state.logs);
         state.logs.unshift({
-          id: state.autoLogId++,
+          id: getNextId(state),
           store_id: store.id,
           store_domain: store.mysapo_domain,
           client_ip: isKnownIp(orderClientIp) ? orderClientIp : 'unknown',
