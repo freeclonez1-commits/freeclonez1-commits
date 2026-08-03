@@ -647,6 +647,10 @@ function isKnownIp(ip) {
   return Boolean(value && value !== 'unknown' && value !== '0.0.0.0' && value !== '::');
 }
 
+function getNextId(state) {
+  return state.logs.length > 0 ? Math.max(...state.logs.map(r => Number(r.id) || 0)) + 1 : 1000;
+}
+
 async function lookupIp(ip) {
   if (!isKnownIp(ip)) return {};
   try {
