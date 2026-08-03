@@ -572,11 +572,27 @@ function encryptSecret(value) {
 }
 
 function decryptSecret(value) {
-  const [ivB64, tagB64, encryptedB64] = String(value || '').split(':');
-  if (!ivB64 || !tagB64 || !encryptedB64) return '';
-  const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(ivB64, 'base64'));
-  decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
-  return Buffer.concat([decipher.update(Buffer.from(encryptedB64, 'base64')), decipher.final()]).toString('utf8');
+  if (!value) return '';
+  if (String(value).startsWith('v1.')) {
+    try {
+      const [, ivBase64, tagBase64, ciphertextBase64] = String(value).split('.');
+      const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(ivBase64, 'base64'));
+      decipher.setAuthTag(Buffer.from(tagBase64, 'base64'));
+      return Buffer.concat([decipher.update(Buffer.from(ciphertextBase64, 'base64')), decipher.final()]).toString('utf8');
+    } catch (e) {
+      return '';
+    }
+  }
+  const parts = String(value || '').split(':');
+  if (parts.length < 3) return value;
+  try {
+    const [ivB64, tagB64, encryptedB64] = parts;
+    const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(ivB64, 'base64'));
+    decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+    return Buffer.concat([decipher.update(Buffer.from(encryptedB64, 'base64')), decipher.final()]).toString('utf8');
+  } catch (e) {
+    return value;
+  }
 }
 
 function businessDate(value = new Date()) {
