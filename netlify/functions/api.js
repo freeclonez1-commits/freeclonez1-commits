@@ -667,7 +667,7 @@ async function lookupIp(ip) {
     const data = await res.json();
     if (data && data.success !== false) {
       const orgText = `${data.connection?.isp || ''} ${data.connection?.org || ''} ${data.connection?.domain || ''}`.toLowerCase();
-      const datacenterWords = ['gthost', 'hosting', 'host', 'vpn', 'proxy', 'cloud', 'cloudflare', 'warp', 'amazon', 'aws', 'google', 'digitalocean', 'linode', 'ovh', 'hetzner', 'm247', 'datacenter'];
+      const datacenterWords = ['gthost', 'm247', 'vultr', 'digitalocean', 'linode', 'hetzner', 'ovh', 'aws', 'amazon', 'google cloud', 'azure', 'vpn', 'proxy', 'datacenter'];
       const isDatacenter = datacenterWords.some(word => orgText.includes(word));
       return {
         country: data.country || 'Unknown',
@@ -702,10 +702,26 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
   }
 
   const orgText = `${ipData.isp || ''} ${ipData.org || ''} ${ipData.as || ''}`.toLowerCase();
-  const datacenterWords = ['hosting', 'host', 'vpn', 'proxy', 'cloud', 'cloudflare', 'warp', 'amazon', 'aws', 'google', 'digitalocean', 'linode', 'ovh', 'hetzner', 'gthost', 'm247', 'datacenter'];
+  const datacenterWords = ['gthost', 'm247', 'vultr', 'digitalocean', 'linode', 'hetzner', 'ovh', 'aws', 'amazon', 'google cloud', 'azure', 'vpn', 'proxy', 'datacenter'];
   const isDatacenter = Boolean(ipData.hosting || datacenterWords.some(word => orgText.includes(word)));
   const isVpn = Boolean(ipData.proxy || orgText.includes('vpn') || orgText.includes('proxy'));
-  const webrtcMismatch = Boolean(webrtcIp && clientIp && webrtcIp !== clientIp);
+
+  let webrtcMismatch = false;
+  if (webrtcIp && clientIp && webrtcIp !== clientIp) {
+    if (isDatacenter || isVpn) {
+      webrtcMismatch = true;
+    } else {
+      let webrtcData = ipCache ? ipCache.get(webrtcIp) : null;
+      if (!webrtcData && isKnownIp(webrtcIp)) {
+        webrtcData = await lookupIp(webrtcIp);
+        if (ipCache) ipCache.set(webrtcIp, webrtcData);
+      }
+      if (webrtcData && ipData.country && webrtcData.country && ipData.country !== webrtcData.country) {
+        webrtcMismatch = true;
+      }
+    }
+  }
+
   const riskReasons = [];
   if (isVpn) riskReasons.push('VPN/Proxy detected');
   if (isDatacenter) riskReasons.push('Datacenter/hosting IP detected');
@@ -917,16 +933,6 @@ function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt, ord
   if (orderIp) {
     const ipMatch = candidates.find(log => log.client_ip === orderIp || log.webrtc_ip === orderIp);
     if (ipMatch) return ipMatch;
-  }
-
-  // Priority 3: Match by CLOSEST recent session prior to order creation (within 3 minutes)
-  const sortedByProximity = candidates
-    .map(log => ({ log, diff: Math.abs(orderTime - new Date(log.created_at).getTime()) }))
-    .filter(item => item.diff <= 3 * 60 * 1000)
-    .sort((a, b) => a.diff - b.diff);
-
-  if (sortedByProximity.length > 0) {
-    return sortedByProximity[0].log;
   }
 
   return null;
