@@ -499,7 +499,7 @@ async function loadState() {
     return inMemoryState;
   }
   try {
-    const keys = [DEFAULT_STATE_KEY, 'stores'];
+    const keys = [DEFAULT_STATE_KEY, 'stores', 'blacklist'];
     const rows = await supabaseFetch(`/app_state?key=in.(${keys.map(encodeURIComponent).join(',')})&select=key,value`);
     const defaultRow = Array.isArray(rows) ? rows.find(row => row.key === DEFAULT_STATE_KEY) : null;
     if (!defaultRow?.value) {
@@ -514,6 +514,12 @@ async function loadState() {
     if (storesRow?.value) {
       state.stores = Array.isArray(storesRow.value.stores) ? storesRow.value.stores : state.stores;
       state.autoStoreId = Number(storesRow.value.autoStoreId || state.autoStoreId);
+    }
+    // Overlay blacklist from dedicated lightweight key if present
+    const blacklistRow = rows.find(row => row.key === 'blacklist');
+    if (blacklistRow?.value && Array.isArray(blacklistRow.value.blacklist)) {
+      state.blacklist = blacklistRow.value.blacklist;
+      state.autoBlacklistId = Number(blacklistRow.value.autoBlacklistId || state.autoBlacklistId);
     }
     return state;
   } catch (e) {
@@ -542,6 +548,13 @@ async function saveStoresState(state) {
   await saveStateValue('stores', {
     stores: state.stores,
     autoStoreId: state.autoStoreId
+  });
+}
+
+async function saveBlacklistState(state) {
+  await saveStateValue('blacklist', {
+    blacklist: state.blacklist,
+    autoBlacklistId: state.autoBlacklistId
   });
 }
 
@@ -791,10 +804,12 @@ function decorateLog(row, state) {
   let timeToOrder = null;
   if (hasOrder && row.session_duration_sec) timeToOrder = formatDuration(Number(row.session_duration_sec));
   const effectiveWebrtc = (row.webrtc_ip && isKnownIp(row.webrtc_ip) && row.webrtc_ip !== row.client_ip) ? row.webrtc_ip : null;
+  const isBlacklisted = blacklisted.has(row.client_ip) || (row.webrtc_ip && blacklisted.has(row.webrtc_ip));
   return {
     ...row,
     webrtc_ip: effectiveWebrtc,
-    is_blacklisted: blacklisted.has(row.client_ip) || blacklisted.has(row.webrtc_ip),
+    webrtc_mismatch: Boolean(row.webrtc_mismatch),
+    is_blacklisted: isBlacklisted,
     time_to_order: timeToOrder || (hasOrder ? 'Chưa bắt được phiên' : null),
     order_info: hasOrder ? safeJsonParse(row.order_info, null) : null,
     risk_reasons: row.risk_reasons ? safeJsonParse(row.risk_reasons, []) : []
@@ -1307,14 +1322,16 @@ async function handleBlacklist(event, state, method, parts, query, body) {
       state.blacklist.unshift({ id: getNextBlacklistId(state), ip, reason: body?.reason || 'Manual block', source: body?.source || 'MANUAL', created_at: new Date().toISOString() });
     }
     state.logs.forEach(log => { if (log.client_ip === ip || log.webrtc_ip === ip) log.risk_level = 'HIGH_RISK'; });
-    await saveState(state);
+    // Save only the lightweight blacklist key — avoids writing the full MB-sized state blob
+    await saveBlacklistState(state);
     return json(201, { success: true, message: `IP ${ip} blocked` });
   }
   if (method === 'DELETE' && parts[0]) {
     const ip = decodeURIComponent(parts[0]);
     const before = state.blacklist.length;
     state.blacklist = state.blacklist.filter(item => item.ip !== ip);
-    await saveState(state);
+    // Save only the lightweight blacklist key — avoids writing the full MB-sized state blob
+    await saveBlacklistState(state);
     return json(200, {
       success: true,
       already_unblocked: before === state.blacklist.length,
