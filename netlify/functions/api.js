@@ -1045,20 +1045,20 @@ async function syncSapoOrders(state, store, datePreset) {
   const ipCache = new Map();
   let total = 0;
   let synced = 0;
-  let queryParam = 'created_on_min';
+  let queryParam = 'created_at_min';
 
   const maxPages = datePreset === 'TODAY' ? 1 : (datePreset === '7_DAYS' ? 2 : 5);
   for (let page = 1; page <= maxPages; page++) {
     if (Date.now() - syncStartTime > 13500) break;
 
     const minParam = since ? `&${queryParam}=${encodeURIComponent(since)}` : '';
-    let path = `/admin/orders.json?limit=250&page=${page}${minParam}`;
+    let path = `/admin/orders.json?limit=100&page=${page}${minParam}`;
     let { res, data } = await sapoFetchJson(store, secret, path);
 
     if (page === 1 && (!res.ok || !data?.orders?.length)) {
-      const altParam = queryParam === 'created_on_min' ? 'created_at_min' : 'created_on_min';
+      const altParam = queryParam === 'created_at_min' ? 'created_on_min' : 'created_at_min';
       const altMinParam = since ? `&${altParam}=${encodeURIComponent(since)}` : '';
-      const altPath = `/admin/orders.json?limit=250&page=1${altMinParam}`;
+      const altPath = `/admin/orders.json?limit=100&page=1${altMinParam}`;
       const altResult = await sapoFetchJson(store, secret, altPath);
       if (altResult.res.ok && altResult.data?.orders?.length) {
         res = altResult.res;
@@ -1102,38 +1102,28 @@ async function syncSapoOrders(state, store, datePreset) {
             trackedVisit.session_duration_sec = sessionDurationToOrder(candidateVisit.session_start_at, createdAt);
           }
         }
-        const analysis = await analyzeRisk(effectiveClientIp, trackedVisit.webrtc_ip, ipCache, state.logs);
         trackedVisit.client_ip = effectiveClientIp;
-        trackedVisit.country = analysis.ipData.country || 'Unknown';
-        trackedVisit.country_code = analysis.ipData.countryCode || 'XX';
-        trackedVisit.city = analysis.ipData.city || 'Unknown';
-        trackedVisit.isp = analysis.ipData.isp || 'Unknown';
-        trackedVisit.org = analysis.ipData.org || 'Unknown';
-        trackedVisit.is_vpn = analysis.isVpn;
-        trackedVisit.is_datacenter = analysis.isDatacenter;
-        trackedVisit.webrtc_mismatch = analysis.webrtcMismatch;
-        trackedVisit.risk_level = analysis.riskLevel;
       } else {
-        const analysis = await analyzeRisk(orderClientIp, null, ipCache, state.logs);
+        const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : '127.0.0.1';
         state.logs.unshift({
           id: getNextId(state),
           store_id: store.id,
           store_domain: store.mysapo_domain,
-          client_ip: isKnownIp(orderClientIp) ? orderClientIp : 'unknown',
+          client_ip: effectiveClientIp,
           webrtc_ip: null,
           user_agent: 'Sapo API Sync',
           fingerprint: 'FP-SAPO-SYNCED',
           order_info: JSON.stringify(orderInfo),
-          country: analysis.ipData.country || 'Unknown',
-          country_code: analysis.ipData.countryCode || 'XX',
-          city: analysis.ipData.city || 'Unknown',
-          isp: analysis.ipData.isp || 'Unknown',
-          org: analysis.ipData.org || 'Unknown',
-          is_vpn: analysis.isVpn,
-          is_datacenter: analysis.isDatacenter,
+          country: 'Viet Nam',
+          country_code: 'VN',
+          city: 'Unknown',
+          isp: 'Unknown',
+          org: 'Unknown',
+          is_vpn: false,
+          is_datacenter: false,
           webrtc_mismatch: false,
-          risk_level: analysis.riskLevel,
-          risk_reasons: JSON.stringify([...analysis.riskReasons, 'Synced from Sapo Admin API']),
+          risk_level: 'CLEAN',
+          risk_reasons: '[]',
           trigger_event: 'sapo_sync',
           session_id: null,
           session_start_at: null,
@@ -1143,7 +1133,7 @@ async function syncSapoOrders(state, store, datePreset) {
         synced++;
       }
     }
-    if (orders.length < 250) break;
+    if (orders.length < 100) break;
   }
 
   // Deduplicate orders by order_id per store
