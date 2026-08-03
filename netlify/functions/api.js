@@ -1149,7 +1149,9 @@ async function syncSapoOrders(state, store, datePreset) {
         if (seenOrders.has(dupKey)) return false;
         seenOrders.add(dupKey);
       }
+      return true;
     }
+    return true;
   });
 
   // Fast backfill pass for missing WebRTC / session_duration
