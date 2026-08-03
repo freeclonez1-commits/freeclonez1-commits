@@ -7,12 +7,15 @@ const COLLECT_WINDOW_MS = 60 * 1000;
 const COLLECT_MAX_PER_WINDOW = 30;
 const collectCounters = new Map();
 const syncLocks = new Map();
+const ipIntelligenceCache = new Map();
 const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
 const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
+const IP_INTELLIGENCE_VERSION = 2;
+const IP_INTELLIGENCE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const DATACENTER_PROVIDER_WORDS = [
   'gthost', 'm247', 'vultr', 'digitalocean', 'linode', 'hetzner', 'ovh',
   'aws', 'amazon', 'google cloud', 'azure', 'vpn', 'proxy', 'datacenter',
-  'datacamp', 'cdnext'
+  'datacamp', 'cdnext', 'cyberzone', 'cyberzon'
 ];
 
 const TRACKER_SOURCE = `/**
@@ -769,7 +772,8 @@ function hasDatacenterProvider(...values) {
 }
 
 function effectiveRiskLevel(row) {
-  return hasDatacenterProvider(row?.isp, row?.org) ? 'HIGH_RISK' : row?.risk_level;
+  const detectedRisk = row?.is_vpn || row?.is_datacenter || row?.is_proxy || row?.is_tor || row?.is_abuser || hasDatacenterProvider(row?.isp, row?.org);
+  return detectedRisk ? 'HIGH_RISK' : row?.risk_level;
 }
 
 function getNextId(state) {
@@ -781,27 +785,103 @@ function getNextBlacklistId(state) {
   return list.length > 0 ? Math.max(...list.map(r => Number(r.id) || 0)) + 1 : 100;
 }
 
+async function fetchJsonWithTimeout(url, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`IP intelligence request failed: ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function rememberIpData(ip, data, ttlMs = IP_INTELLIGENCE_CACHE_TTL_MS) {
+  if (data && Object.keys(data).length) {
+    ipIntelligenceCache.set(ip, { data, expiresAt: Date.now() + ttlMs });
+  }
+  return data;
+}
+
+function recentIpDataFromLogs(stateLogs, ip) {
+  const row = stateLogs.find(log => {
+    if (log.client_ip !== ip || log.ip_intelligence_version !== IP_INTELLIGENCE_VERSION) return false;
+    const checkedAt = new Date(log.ip_intelligence_checked_at || 0).getTime();
+    return Number.isFinite(checkedAt) && Date.now() - checkedAt < 24 * 60 * 60 * 1000;
+  });
+  if (!row) return null;
+  return {
+    country: row.country,
+    countryCode: row.country_code,
+    city: row.city,
+    isp: row.isp,
+    org: row.org,
+    as: row.asn,
+    hosting: Boolean(row.is_datacenter),
+    vpn: Boolean(row.is_vpn),
+    proxy: Boolean(row.is_proxy),
+    tor: Boolean(row.is_tor),
+    abuser: Boolean(row.is_abuser),
+    vpnService: row.vpn_service || null,
+    source: row.ip_intelligence_source || 'cache',
+    intelligenceVersion: IP_INTELLIGENCE_VERSION
+  };
+}
+
 async function lookupIp(ip) {
   if (!isKnownIp(ip)) return {};
+  const cached = ipIntelligenceCache.get(ip);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
+  if (cached) ipIntelligenceCache.delete(ip);
+
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 650);
-    const res = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, {
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    const data = await res.json();
+    const ipApiKey = process.env.IPAPI_IS_KEY || '';
+    const keyParam = ipApiKey ? `&key=${encodeURIComponent(ipApiKey)}` : '';
+    const data = await fetchJsonWithTimeout(`https://api.ipapi.is/?q=${encodeURIComponent(ip)}${keyParam}`, 1400);
+    if (data && !data.error) {
+      const company = data.company || {};
+      const asn = data.asn || {};
+      const location = data.location || {};
+      return rememberIpData(ip, {
+        country: location.country || 'Unknown',
+        countryCode: location.country_code || 'XX',
+        city: location.city || location.state || 'Unknown',
+        isp: company.name || asn.org || 'Unknown',
+        org: asn.org || company.name || 'Unknown',
+        as: asn.asn ? `AS${asn.asn}` : null,
+        hosting: Boolean(data.is_datacenter || company.type === 'hosting' || asn.type === 'hosting'),
+        vpn: Boolean(data.is_vpn),
+        proxy: Boolean(data.is_proxy),
+        tor: Boolean(data.is_tor),
+        abuser: Boolean(data.is_abuser),
+        vpnService: data.vpn?.service || null,
+        source: 'ipapi.is',
+        intelligenceVersion: IP_INTELLIGENCE_VERSION
+      });
+    }
+  } catch (_) {}
+
+  try {
+    const data = await fetchJsonWithTimeout(`https://ipwho.is/${encodeURIComponent(ip)}`, 900);
     if (data && data.success !== false) {
       const isDatacenter = hasDatacenterProvider(data.connection?.isp, data.connection?.org, data.connection?.domain);
-      return {
+      return rememberIpData(ip, {
         country: data.country || 'Unknown',
         countryCode: data.country_code || 'XX',
         city: data.city || 'Unknown',
         isp: data.connection?.isp || data.connection?.org || 'Unknown',
         org: data.connection?.org || data.connection?.isp || 'Unknown',
+        as: data.connection?.asn ? `AS${data.connection.asn}` : null,
         hosting: isDatacenter,
-        proxy: isDatacenter
-      };
+        vpn: false,
+        proxy: false,
+        tor: false,
+        abuser: false,
+        vpnService: null,
+        source: 'ipwho.is',
+        intelligenceVersion: 1
+      }, 5 * 60 * 1000);
     }
   } catch (_) {}
   return {};
@@ -820,6 +900,7 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
   }
 
   let ipData = ipCache ? ipCache.get(clientIp) : null;
+  if (!ipData) ipData = recentIpDataFromLogs(stateLogs, clientIp);
   if (!ipData) {
     ipData = await lookupIp(clientIp);
     if (ipCache) ipCache.set(clientIp, ipData);
@@ -837,7 +918,9 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
 
   const orgText = `${ipData.isp || ''} ${ipData.org || ''} ${ipData.as || ''}`.toLowerCase();
   const isDatacenter = Boolean(ipData.hosting || hasDatacenterProvider(ipData.isp, ipData.org, ipData.as));
-  const isVpn = Boolean(ipData.proxy || orgText.includes('vpn') || orgText.includes('proxy'));
+  const isVpn = Boolean(ipData.vpn || ipData.proxy || orgText.includes('vpn') || orgText.includes('proxy'));
+  const isTor = Boolean(ipData.tor);
+  const isAbuser = Boolean(ipData.abuser);
 
   let webrtcMismatch = false;
   if (webrtcIp && clientIp && webrtcIp !== clientIp) {
@@ -846,7 +929,7 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
     } else {
       let webrtcData = ipCache ? ipCache.get(webrtcIp) : null;
       if (!webrtcData && isKnownIp(webrtcIp)) {
-        webrtcData = await lookupIp(webrtcIp);
+        webrtcData = recentIpDataFromLogs(stateLogs, webrtcIp) || await lookupIp(webrtcIp);
         if (ipCache) ipCache.set(webrtcIp, webrtcData);
       }
       if (webrtcData && ipData.country && webrtcData.country && ipData.country !== webrtcData.country) {
@@ -856,13 +939,17 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
   }
 
   const riskReasons = [];
-  if (isVpn) riskReasons.push('VPN/Proxy detected');
+  if (isVpn) riskReasons.push(ipData.vpnService ? `${ipData.vpnService} VPN detected` : 'VPN/Proxy detected');
   if (isDatacenter) riskReasons.push('Datacenter/hosting IP detected');
+  if (isTor) riskReasons.push('Tor exit node detected');
+  if (isAbuser) riskReasons.push('Abusive IP reputation detected');
   if (webrtcMismatch) riskReasons.push('WebRTC IP mismatch detected');
   return {
     ipData,
     isVpn,
     isDatacenter,
+    isTor,
+    isAbuser,
     webrtcMismatch,
     riskLevel: riskReasons.length ? 'HIGH_RISK' : 'CLEAN',
     riskReasons
@@ -932,7 +1019,7 @@ function decorateLog(row, state) {
   return {
     ...row,
     webrtc_ip: effectiveWebrtc,
-    is_vpn: Boolean(row.is_vpn || inferredDatacenter),
+    is_vpn: Boolean(row.is_vpn),
     is_datacenter: Boolean(row.is_datacenter || inferredDatacenter),
     risk_level: riskLevel,
     webrtc_mismatch: Boolean(row.webrtc_mismatch),
@@ -1109,8 +1196,8 @@ function applySyncedOrder(log, orderInfo, orderCreatedAt) {
   }
 }
 
-async function applyIpAnalysis(log, clientIp, webrtcIp, extraReasons = [], ipCache = null) {
-  const analysis = await analyzeRisk(clientIp, webrtcIp, ipCache);
+async function applyIpAnalysis(log, clientIp, webrtcIp, extraReasons = [], ipCache = null, stateLogs = []) {
+  const analysis = await analyzeRisk(clientIp, webrtcIp, ipCache, stateLogs);
   log.client_ip = isKnownIp(clientIp) ? clientIp : 'unknown';
   log.webrtc_ip = isKnownIp(webrtcIp) ? webrtcIp : null;
   log.country = analysis.ipData.country || 'Unknown';
@@ -1118,8 +1205,16 @@ async function applyIpAnalysis(log, clientIp, webrtcIp, extraReasons = [], ipCac
   log.city = analysis.ipData.city || 'Unknown';
   log.isp = analysis.ipData.isp || 'Unknown';
   log.org = analysis.ipData.org || 'Unknown';
+  log.asn = analysis.ipData.as || null;
   log.is_vpn = analysis.isVpn;
   log.is_datacenter = analysis.isDatacenter;
+  log.is_proxy = Boolean(analysis.ipData.proxy);
+  log.is_tor = analysis.isTor;
+  log.is_abuser = analysis.isAbuser;
+  log.vpn_service = analysis.ipData.vpnService || null;
+  log.ip_intelligence_source = analysis.ipData.source || null;
+  log.ip_intelligence_version = Number(analysis.ipData.intelligenceVersion || 0);
+  log.ip_intelligence_checked_at = new Date().toISOString();
   log.webrtc_mismatch = analysis.webrtcMismatch;
   log.risk_level = analysis.riskLevel;
   log.risk_reasons = JSON.stringify([...analysis.riskReasons, ...extraReasons]);
@@ -1291,7 +1386,7 @@ async function syncSapoOrders(state, store, datePreset) {
         }
         trackedVisit.client_ip = effectiveClientIp;
         if ((Date.now() - syncStartTime) < 9500 || ipCache.has(effectiveClientIp)) {
-          await applyIpAnalysis(trackedVisit, effectiveClientIp, trackedVisit.webrtc_ip, [], ipCache);
+          await applyIpAnalysis(trackedVisit, effectiveClientIp, trackedVisit.webrtc_ip, [], ipCache, state.logs);
         }
         updated++;
       } else {
@@ -1322,7 +1417,7 @@ async function syncSapoOrders(state, store, datePreset) {
           created_at: new Date(createdAt).toISOString()
         };
         if ((Date.now() - syncStartTime) < 9500 || ipCache.has(effectiveClientIp)) {
-          await applyIpAnalysis(newLog, effectiveClientIp, null, [], ipCache);
+          await applyIpAnalysis(newLog, effectiveClientIp, null, [], ipCache, state.logs);
         }
         state.logs.unshift(newLog);
         synced++;
@@ -1415,7 +1510,7 @@ async function handleLogs(event, state, method, parts, query, body) {
         if (webRtcStatus !== 'pending') log.webrtc_status = webRtcStatus;
         if (!isKnownIp(log.client_ip)) log.client_ip = realClientIp;
         if (capturedWebrtcIp) {
-          await applyIpAnalysis(log, log.client_ip, capturedWebrtcIp);
+          await applyIpAnalysis(log, log.client_ip, capturedWebrtcIp, [], null, state.logs);
         }
         const logBlacklist = state.blacklist.find(item => item.ip === log.client_ip || (log.webrtc_ip && item.ip === log.webrtc_ip));
         if (logBlacklist) {
@@ -1435,7 +1530,7 @@ async function handleLogs(event, state, method, parts, query, body) {
         is_blacklisted: Boolean(blacklistCheck)
       });
     }
-    const analysis = await analyzeRisk(realClientIp, body?.webrtc_ip);
+    const analysis = await analyzeRisk(realClientIp, body?.webrtc_ip, null, state.logs);
     const reasons = [...analysis.riskReasons];
     let riskLevel = analysis.riskLevel;
     if (blacklistCheck) {
@@ -1466,8 +1561,16 @@ async function handleLogs(event, state, method, parts, query, body) {
       city: analysis.ipData.city || 'Unknown',
       isp: analysis.ipData.isp || 'Unknown',
       org: analysis.ipData.org || 'Unknown',
+      asn: analysis.ipData.as || null,
       is_vpn: analysis.isVpn,
       is_datacenter: analysis.isDatacenter,
+      is_proxy: Boolean(analysis.ipData.proxy),
+      is_tor: analysis.isTor,
+      is_abuser: analysis.isAbuser,
+      vpn_service: analysis.ipData.vpnService || null,
+      ip_intelligence_source: analysis.ipData.source || null,
+      ip_intelligence_version: Number(analysis.ipData.intelligenceVersion || 0),
+      ip_intelligence_checked_at: new Date().toISOString(),
       webrtc_mismatch: analysis.webrtcMismatch,
       risk_level: riskLevel,
       risk_reasons: JSON.stringify(reasons),

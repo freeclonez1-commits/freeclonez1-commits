@@ -85,6 +85,11 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
     return <Monitor className="w-3.5 h-3.5" />;
   };
 
+  const networkLabel = (log) => {
+    const provider = log.vpn_service ? `${log.vpn_service} VPN` : (log.is_datacenter ? `${log.isp || 'Datacenter'} · Datacenter` : log.isp);
+    return `${log.country || 'Unknown'} · ${provider || 'Unknown'}`;
+  };
+
   const renderOriginIpBadge = (log, { full = false } = {}) => {
     if (log.webrtc_ip && log.webrtc_ip !== log.client_ip && log.webrtc_status !== 'stale') {
       const isRealFakeIp = log.webrtc_mismatch || log.risk_level === 'HIGH_RISK';
@@ -357,12 +362,12 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                             ) : isHighRisk ? (
                               <span title={log.client_ip} className="font-mono font-extrabold text-[#FF3B30] bg-[#FF3B30]/10 px-2.5 py-0.5 rounded-md border border-[#FF3B30]/30 flex items-center gap-1">
                                 🔴 {compactIp(log.client_ip)}
-                                <span className="text-[10px] text-[#FF3B30] font-sans font-normal ml-1">({log.country || 'US'} · {log.isp})</span>
+                                <span title={`${log.isp || 'Unknown'}${log.asn ? ` · ${log.asn}` : ''}`} className="text-[10px] text-[#FF3B30] font-sans font-normal ml-1">({networkLabel(log)})</span>
                               </span>
                             ) : (
                               <span title={log.client_ip} className="font-mono font-extrabold text-[#34C759] bg-[#34C759]/10 px-2.5 py-0.5 rounded-md border border-[#34C759]/30 flex items-center gap-1">
                                 🟢 {compactIp(log.client_ip)}
-                                <span className="text-[10px] text-[#34C759] font-sans font-normal ml-1">({log.country || 'VN'} · {log.isp})</span>
+                                <span title={`${log.isp || 'Unknown'}${log.asn ? ` · ${log.asn}` : ''}`} className="text-[10px] text-[#34C759] font-sans font-normal ml-1">({networkLabel(log)})</span>
                               </span>
                             )}
                           </div>
@@ -575,7 +580,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                   <div className="flex flex-wrap items-center justify-between gap-1">
                     <span className="text-[#86868B] font-bold text-[11px]">IP Kết nối:</span>
                     <span className={`font-mono font-extrabold text-xs px-2 py-0.5 rounded-md ${isHighRisk ? 'text-[#FF3B30] bg-[#FF3B30]/10' : 'text-[#34C759] bg-[#34C759]/10'}`}>
-                      {log.client_ip} ({log.isp || 'N/A'})
+                      {log.client_ip} ({log.vpn_service ? `${log.vpn_service} VPN` : (log.isp || 'N/A')})
                     </span>
                   </div>
                   <div className="flex flex-wrap items-center justify-between gap-1 pt-1 border-t border-[#E5E5EA]">
