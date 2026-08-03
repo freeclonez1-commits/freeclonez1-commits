@@ -9,6 +9,11 @@ const collectCounters = new Map();
 const syncLocks = new Map();
 const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
 const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
+const DATACENTER_PROVIDER_WORDS = [
+  'gthost', 'm247', 'vultr', 'digitalocean', 'linode', 'hetzner', 'ovh',
+  'aws', 'amazon', 'google cloud', 'azure', 'vpn', 'proxy', 'datacenter',
+  'datacamp', 'cdnext'
+];
 
 const TRACKER_SOURCE = `/**
  * Sapo Fake IP & WebRTC Leak Tracker Script
@@ -758,6 +763,15 @@ function isKnownIp(ip) {
   return Boolean(value && value !== 'unknown' && value !== '0.0.0.0' && value !== '::');
 }
 
+function hasDatacenterProvider(...values) {
+  const text = values.filter(Boolean).join(' ').toLowerCase();
+  return DATACENTER_PROVIDER_WORDS.some(word => text.includes(word));
+}
+
+function effectiveRiskLevel(row) {
+  return hasDatacenterProvider(row?.isp, row?.org) ? 'HIGH_RISK' : row?.risk_level;
+}
+
 function getNextId(state) {
   return state.logs.length > 0 ? Math.max(...state.logs.map(r => Number(r.id) || 0)) + 1 : 1000;
 }
@@ -778,9 +792,7 @@ async function lookupIp(ip) {
     clearTimeout(timer);
     const data = await res.json();
     if (data && data.success !== false) {
-      const orgText = `${data.connection?.isp || ''} ${data.connection?.org || ''} ${data.connection?.domain || ''}`.toLowerCase();
-      const datacenterWords = ['gthost', 'm247', 'vultr', 'digitalocean', 'linode', 'hetzner', 'ovh', 'aws', 'amazon', 'google cloud', 'azure', 'vpn', 'proxy', 'datacenter'];
-      const isDatacenter = datacenterWords.some(word => orgText.includes(word));
+      const isDatacenter = hasDatacenterProvider(data.connection?.isp, data.connection?.org, data.connection?.domain);
       return {
         country: data.country || 'Unknown',
         countryCode: data.country_code || 'XX',
@@ -824,8 +836,7 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
   }
 
   const orgText = `${ipData.isp || ''} ${ipData.org || ''} ${ipData.as || ''}`.toLowerCase();
-  const datacenterWords = ['gthost', 'm247', 'vultr', 'digitalocean', 'linode', 'hetzner', 'ovh', 'aws', 'amazon', 'google cloud', 'azure', 'vpn', 'proxy', 'datacenter'];
-  const isDatacenter = Boolean(ipData.hosting || datacenterWords.some(word => orgText.includes(word)));
+  const isDatacenter = Boolean(ipData.hosting || hasDatacenterProvider(ipData.isp, ipData.org, ipData.as));
   const isVpn = Boolean(ipData.proxy || orgText.includes('vpn') || orgText.includes('proxy'));
 
   let webrtcMismatch = false;
@@ -865,7 +876,7 @@ function filterLogs(logs, query) {
     rows = rows.filter(row => row.store_id === storeId);
   }
   if (query.risk_level && query.risk_level !== 'ALL') {
-    rows = rows.filter(row => row.risk_level === query.risk_level);
+    rows = rows.filter(row => effectiveRiskLevel(row) === query.risk_level);
   }
   if (query.orders_only === 'true') {
     rows = rows.filter(row => hasOrderInfo(row.order_info));
@@ -908,6 +919,12 @@ function formatDuration(seconds) {
 function decorateLog(row, state) {
   const blacklisted = new Set(state.blacklist.map(item => item.ip));
   const hasOrder = hasOrderInfo(row.order_info);
+  const inferredDatacenter = hasDatacenterProvider(row.isp, row.org);
+  const storedReasons = row.risk_reasons ? safeJsonParse(row.risk_reasons, []) : [];
+  const riskReasons = inferredDatacenter && !storedReasons.includes('Datacenter/hosting IP detected')
+    ? [...storedReasons, 'Datacenter/hosting IP detected']
+    : storedReasons;
+  const riskLevel = effectiveRiskLevel(row);
   let timeToOrder = null;
   if (hasOrder && row.session_duration_sec) timeToOrder = formatDuration(Number(row.session_duration_sec));
   const effectiveWebrtc = (row.webrtc_ip && isKnownIp(row.webrtc_ip)) ? row.webrtc_ip : null;
@@ -915,11 +932,14 @@ function decorateLog(row, state) {
   return {
     ...row,
     webrtc_ip: effectiveWebrtc,
+    is_vpn: Boolean(row.is_vpn || inferredDatacenter),
+    is_datacenter: Boolean(row.is_datacenter || inferredDatacenter),
+    risk_level: riskLevel,
     webrtc_mismatch: Boolean(row.webrtc_mismatch),
     is_blacklisted: isBlacklisted,
     time_to_order: timeToOrder || (hasOrder ? 'Chưa bắt được phiên' : null),
     order_info: hasOrder ? safeJsonParse(row.order_info, null) : null,
-    risk_reasons: row.risk_reasons ? safeJsonParse(row.risk_reasons, []) : []
+    risk_reasons: riskReasons
   };
 }
 
@@ -1541,12 +1561,12 @@ function handleStats(event, state, method, parts, query) {
   let logs = storeId ? state.logs.filter(log => log.store_id === storeId) : [...state.logs];
   if (method === 'GET' && parts[0] === 'overview') {
     const totalLogs = logs.length;
-    const highRiskCount = logs.filter(log => log.risk_level === 'HIGH_RISK').length;
+    const highRiskCount = logs.filter(log => effectiveRiskLevel(log) === 'HIGH_RISK').length;
     const cleanCount = totalLogs - highRiskCount;
     const today = businessDate();
-    const suspiciousOrdersToday = logs.filter(log => log.risk_level === 'HIGH_RISK' && hasOrderInfo(log.order_info) && log.created_at && businessDate(log.created_at) === today).length;
+    const suspiciousOrdersToday = logs.filter(log => effectiveRiskLevel(log) === 'HIGH_RISK' && hasOrderInfo(log.order_info) && log.created_at && businessDate(log.created_at) === today).length;
     const ispMap = {};
-    logs.filter(log => log.risk_level === 'HIGH_RISK' && log.isp && log.isp !== 'Unknown').forEach(log => { ispMap[log.isp] = (ispMap[log.isp] || 0) + 1; });
+    logs.filter(log => effectiveRiskLevel(log) === 'HIGH_RISK' && log.isp && log.isp !== 'Unknown').forEach(log => { ispMap[log.isp] = (ispMap[log.isp] || 0) + 1; });
     const topIsps = Object.keys(ispMap).map(isp => ({ isp, count: ispMap[isp] })).sort((a, b) => b.count - a.count).slice(0, 5);
     return json(200, { success: true, data: { totalLogs, highRiskCount, cleanCount, vpnRate: totalLogs ? Number(((highRiskCount / totalLogs) * 100).toFixed(1)) : 0, totalBlacklisted: state.blacklist.length, suspiciousOrdersToday, topIsps } });
   }
@@ -1558,7 +1578,7 @@ function handleStats(event, state, method, parts, query) {
       const ts = new Date(log.created_at).getTime();
       if (!Number.isFinite(ts) || now - ts > 24 * 60 * 60 * 1000 || ts > now) return;
       const hour = Number(formatter.format(new Date(ts)));
-      if (log.risk_level === 'HIGH_RISK') buckets[hour].high_risk += 1;
+      if (effectiveRiskLevel(log) === 'HIGH_RISK') buckets[hour].high_risk += 1;
       else buckets[hour].clean += 1;
     });
     return json(200, { success: true, data: buckets });
