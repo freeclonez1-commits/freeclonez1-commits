@@ -651,16 +651,28 @@ async function lookupIp(ip) {
   if (!isKnownIp(ip)) return {};
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 250);
-    const res = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,city,isp,org,as,proxy,hosting`, {
+    const timer = setTimeout(() => controller.abort(), 1200);
+    const res = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, {
       signal: controller.signal
     });
     clearTimeout(timer);
     const data = await res.json();
-    return data.status === 'success' ? data : { country: 'Vietnam', countryCode: 'VN', city: 'Hanoi', isp: 'Viettel Group', org: 'Viettel Network' };
-  } catch (_) {
-    return { country: 'Vietnam', countryCode: 'VN', city: 'Hanoi', isp: 'Viettel Group', org: 'Viettel Network' };
-  }
+    if (data && data.success !== false) {
+      const orgText = `${data.connection?.isp || ''} ${data.connection?.org || ''} ${data.connection?.domain || ''}`.toLowerCase();
+      const datacenterWords = ['gthost', 'hosting', 'host', 'vpn', 'proxy', 'cloud', 'cloudflare', 'warp', 'amazon', 'aws', 'google', 'digitalocean', 'linode', 'ovh', 'hetzner', 'm247', 'datacenter'];
+      const isDatacenter = datacenterWords.some(word => orgText.includes(word));
+      return {
+        country: data.country || 'Unknown',
+        countryCode: data.country_code || 'XX',
+        city: data.city || 'Unknown',
+        isp: data.connection?.isp || data.connection?.org || 'Unknown',
+        org: data.connection?.org || data.connection?.isp || 'Unknown',
+        hosting: isDatacenter,
+        proxy: isDatacenter
+      };
+    }
+  } catch (_) {}
+  return {};
 }
 
 async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
