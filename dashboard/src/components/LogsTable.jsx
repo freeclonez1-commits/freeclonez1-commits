@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Search, AlertTriangle, ShieldCheck, ShieldAlert, Ban, Eye, X, Globe, Calendar, ShoppingCart, Wifi, Clock, CheckCircle2, Unlock, Monitor, Smartphone, Tablet, MousePointer2, CircleOff, ChevronLeft, ChevronRight } from 'lucide-react';
 import { businessDate, businessDateDaysAgo } from '../utils/dates';
 
-export default function LogsTable({ logs, isLoading = false, pagination, filters, setFilters, onAddToBlacklist, onRemoveFromBlacklist, onDeleteLog, onDatePresetChange }) {
+export default function LogsTable({ logs, isLoading = false, error = '', onRetry, pagination, filters, setFilters, onAddToBlacklist, onRemoveFromBlacklist, onDeleteLog, onDatePresetChange }) {
   const [selectedLog, setSelectedLog] = useState(null);
   const ordersOnlyFilter = filters.orders_only !== false;
   const isKnownIp = (ip) => {
@@ -428,11 +428,11 @@ export default function LogsTable({ logs, isLoading = false, pagination, filters
                   <td colSpan="6" className="py-12 text-center text-[#86868B] text-xs font-medium">
                     <div className="max-w-md mx-auto space-y-3">
                       <p className="font-bold text-[#1D1D1F] text-sm">
-                        {isLoading
+                        {error || (isLoading
                           ? 'Đang tải dữ liệu đơn hàng...'
                           : isTodayDefault
                           ? `Chưa có đơn hàng trong ngày hôm nay (${new Date().toLocaleDateString('vi-VN')})`
-                          : 'Không tìm thấy đơn hàng phù hợp với bộ lọc'}
+                          : 'Không tìm thấy đơn hàng phù hợp với bộ lọc')}
                       </p>
                       <p className="text-xs text-[#86868B]">
                         {isLoading
@@ -444,6 +444,14 @@ export default function LogsTable({ logs, isLoading = false, pagination, filters
                           : 'Thử đổi khoảng thời gian hoặc bấm Đồng bộ đơn Sapo.'}
                       </p>
                       <div className="flex items-center justify-center gap-2 pt-2">
+                        {error && (
+                          <button
+                            onClick={onRetry}
+                            className="px-4 py-2 bg-[#FF3B30] hover:bg-[#E03126] text-white rounded-full text-xs font-bold transition-all shadow-sm cursor-pointer"
+                          >
+                            Thử lại
+                          </button>
+                        )}
                         <button
                           onClick={() => handleDatePreset('ALL')}
                           className="px-4 py-2 bg-[#0071E3] hover:bg-[#0077ED] text-white rounded-full text-xs font-bold transition-all shadow-sm cursor-pointer"

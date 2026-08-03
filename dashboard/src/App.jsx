@@ -62,6 +62,7 @@ export default function App() {
   const [chartData, setChartData] = useState([]);
   const [logs, setLogs] = useState([]);
   const [isLogsLoading, setIsLogsLoading] = useState(true);
+  const [logsError, setLogsError] = useState('');
   const [pagination, setPagination] = useState({ page: 1, limit: 20, total: 0, totalPages: 1 });
   const [blacklist, setBlacklist] = useState([]);
 
@@ -156,6 +157,7 @@ export default function App() {
     if (!adminKey || logsRefreshInFlightRef.current) return;
     logsRefreshInFlightRef.current = true;
     setIsLogsLoading(true);
+    setLogsError('');
     try {
       const activeFilters = overrideFilters || filters;
       const logsResult = await getLogs(buildQueryFilters(activeFilters));
@@ -168,6 +170,8 @@ export default function App() {
         sessionStorage.removeItem('sapo_admin_api_key');
         setAdminKey('');
         setAuthError('Khóa quản trị không đúng hoặc đã hết hiệu lực.');
+      } else {
+        setLogsError(err.response?.data?.message || 'Không thể tải dữ liệu đơn hàng.');
       }
     } finally {
       logsRefreshInFlightRef.current = false;
@@ -482,6 +486,8 @@ export default function App() {
             <LogsTable
               logs={logs}
               isLoading={isLogsLoading}
+              error={logsError}
+              onRetry={() => refreshLogsOnly()}
               pagination={pagination}
               filters={filters}
               setFilters={setFilters}

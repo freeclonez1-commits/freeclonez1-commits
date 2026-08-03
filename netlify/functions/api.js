@@ -446,29 +446,10 @@ function assertAdmin(event) {
 
 function stateTemplate() {
   return {
-    stores: [
-      {
-        id: 3,
-        store_name: "Stussy",
-        mysapo_domain: "stussy-vietnam.mysapo.net",
-        api_key: "e8685cda41d44c1d8f0547b2cec7de02",
-        api_secret_encrypted: "v1.m7IfSYk3hLJa5HaQ.Zn7mWZl2Yj+CQRVtlLamYg==.+V1zLLvByK2YycLiUYCF19IHXz1FFp7G1IvgwsXNlJo=",
-        is_active: 1,
-        created_at: "2026-08-01T03:13:09.047Z"
-      },
-      {
-        id: 2,
-        store_name: "TEST VUA ĐỒ FAKE",
-        mysapo_domain: "vua-do-hieu.mysapo.net",
-        api_key: "19f31439d2e24491b17c3c7ec574f81d",
-        api_secret_encrypted: "v1.tJj0ELtWHf4zfrro.bO2iT54IP58bpHQVnDj7gA==.AoV+HQWD1soFD6InnST/8r2CFUq9R+l5ilLGDxUiVVQ=",
-        is_active: 1,
-        created_at: "2026-07-31T02:13:31.070Z"
-      }
-    ],
+    stores: [],
     logs: [],
     blacklist: [],
-    autoStoreId: 4,
+    autoStoreId: 1,
     autoLogId: 1000,
     autoBlacklistId: 10
   };
@@ -513,8 +494,7 @@ async function supabaseFetch(path, options = {}) {
 
 async function loadState({ includeLogs = true, includeStores = true, includeBlacklist = true } = {}) {
   if (!hasSupabaseConfig()) {
-    if (!inMemoryState) inMemoryState = stateTemplate();
-    return inMemoryState;
+    throw new Error('Persistent storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');
   }
   try {
     const keys = [];
@@ -568,21 +548,18 @@ async function loadState({ includeLogs = true, includeStores = true, includeBlac
     }
     return state;
   } catch (e) {
-    if (!inMemoryState) inMemoryState = stateTemplate();
-    return inMemoryState;
+    throw new Error(`Persistent storage is unavailable: ${e.message}`);
   }
 }
 
 async function saveStateValue(key, value) {
-  if (!hasSupabaseConfig()) return;
-  try {
-    const payload = { key, value, updated_at: new Date().toISOString() };
-    await supabaseFetch('/app_state?on_conflict=key', {
-      method: 'POST',
-      headers: { Prefer: 'resolution=merge-duplicates' },
-      body: JSON.stringify(payload)
-    });
-  } catch (e) {}
+  if (!hasSupabaseConfig()) throw new Error('Persistent storage is not configured.');
+  const payload = { key, value, updated_at: new Date().toISOString() };
+  await supabaseFetch('/app_state?on_conflict=key', {
+    method: 'POST',
+    headers: { Prefer: 'resolution=merge-duplicates' },
+    body: JSON.stringify(payload)
+  });
 }
 
 async function saveState(state) {
@@ -766,6 +743,16 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
   if (!ipData) {
     ipData = await lookupIp(clientIp);
     if (ipCache) ipCache.set(clientIp, ipData);
+  }
+  if (!ipData || Object.keys(ipData).length === 0) {
+    return {
+      ipData: {},
+      isVpn: false,
+      isDatacenter: false,
+      webrtcMismatch: false,
+      riskLevel: 'UNKNOWN',
+      riskReasons: ['IP intelligence is temporarily unavailable']
+    };
   }
 
   const orgText = `${ipData.isp || ''} ${ipData.org || ''} ${ipData.as || ''}`.toLowerCase();
@@ -1063,7 +1050,17 @@ function sapoAuthHeaders(store, secret) {
 
 async function sapoFetchJson(store, secret, path) {
   const url = `https://${store.mysapo_domain}${path}`;
-  const res = await fetch(url, { headers: sapoAuthHeaders(store, secret) });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  let res;
+  try {
+    res = await fetch(url, { headers: sapoAuthHeaders(store, secret), signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('Sapo API timed out after 8 seconds.');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
   let data = null;
   try {
     data = await res.json();
@@ -1226,8 +1223,8 @@ async function syncSapoOrders(state, store, datePreset) {
           is_vpn: false,
           is_datacenter: false,
           webrtc_mismatch: false,
-          risk_level: 'CLEAN',
-          risk_reasons: '[]',
+          risk_level: 'UNKNOWN',
+          risk_reasons: '["IP analysis pending"]',
           trigger_event: 'sapo_sync',
           session_id: null,
           session_start_at: null,
