@@ -438,6 +438,14 @@ function stateTemplate() {
   };
 }
 
+let inMemoryState = null;
+
+function hasSupabaseConfig() {
+  const url = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '';
+  return Boolean(url && key);
+}
+
 function supabaseConfig() {
   const url = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '';
@@ -468,32 +476,44 @@ async function supabaseFetch(path, options = {}) {
 }
 
 async function loadState() {
-  const keys = [DEFAULT_STATE_KEY, 'stores'];
-  const rows = await supabaseFetch(`/app_state?key=in.(${keys.map(encodeURIComponent).join(',')})&select=key,value`);
-  const defaultRow = Array.isArray(rows) ? rows.find(row => row.key === DEFAULT_STATE_KEY) : null;
-  if (!defaultRow?.value) {
-    const initial = stateTemplate();
-    await saveState(initial);
-    await saveStoresState(initial);
-    return initial;
+  if (!hasSupabaseConfig()) {
+    if (!inMemoryState) inMemoryState = stateTemplate();
+    return inMemoryState;
   }
+  try {
+    const keys = [DEFAULT_STATE_KEY, 'stores'];
+    const rows = await supabaseFetch(`/app_state?key=in.(${keys.map(encodeURIComponent).join(',')})&select=key,value`);
+    const defaultRow = Array.isArray(rows) ? rows.find(row => row.key === DEFAULT_STATE_KEY) : null;
+    if (!defaultRow?.value) {
+      const initial = stateTemplate();
+      await saveState(initial);
+      await saveStoresState(initial);
+      return initial;
+    }
 
-  const state = { ...stateTemplate(), ...defaultRow.value };
-  const storesRow = rows.find(row => row.key === 'stores');
-  if (storesRow?.value) {
-    state.stores = Array.isArray(storesRow.value.stores) ? storesRow.value.stores : state.stores;
-    state.autoStoreId = Number(storesRow.value.autoStoreId || state.autoStoreId);
+    const state = { ...stateTemplate(), ...defaultRow.value };
+    const storesRow = rows.find(row => row.key === 'stores');
+    if (storesRow?.value) {
+      state.stores = Array.isArray(storesRow.value.stores) ? storesRow.value.stores : state.stores;
+      state.autoStoreId = Number(storesRow.value.autoStoreId || state.autoStoreId);
+    }
+    return state;
+  } catch (e) {
+    if (!inMemoryState) inMemoryState = stateTemplate();
+    return inMemoryState;
   }
-  return state;
 }
 
 async function saveStateValue(key, value) {
-  const payload = { key, value, updated_at: new Date().toISOString() };
-  await supabaseFetch('/app_state?on_conflict=key', {
-    method: 'POST',
-    headers: { Prefer: 'resolution=merge-duplicates' },
-    body: JSON.stringify(payload)
-  });
+  if (!hasSupabaseConfig()) return;
+  try {
+    const payload = { key, value, updated_at: new Date().toISOString() };
+    await supabaseFetch('/app_state?on_conflict=key', {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates' },
+      body: JSON.stringify(payload)
+    });
+  } catch (e) {}
 }
 
 async function saveState(state) {
