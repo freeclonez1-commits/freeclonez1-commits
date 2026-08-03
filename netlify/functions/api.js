@@ -883,9 +883,9 @@ function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt, ord
 
   // Filter candidate browsing logs from tracker (not sapo_sync) within 24h prior to order creation
   const candidates = state.logs.filter(log => {
-    if (log.store_id !== storeId || log.trigger_event === 'sapo_sync') return false;
+    if (log.trigger_event === 'sapo_sync') return false;
     const logTime = new Date(log.created_at).getTime();
-    if (!Number.isFinite(logTime) || logTime > orderTime + 5 * 60 * 1000 || orderTime - logTime > 24 * 60 * 60 * 1000) return false;
+    if (!Number.isFinite(logTime) || logTime > orderTime + 10 * 60 * 1000 || Math.abs(orderTime - logTime) > 24 * 60 * 60 * 1000) return false;
     return true;
   });
 
@@ -910,7 +910,7 @@ function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt, ord
   // Priority 3: Match by recent session log in the store within 2 hours
   const recentMatch = candidates.find(log => {
     const logTime = new Date(log.created_at).getTime();
-    return orderTime - logTime <= 2 * 60 * 60 * 1000;
+    return Math.abs(orderTime - logTime) <= 2 * 60 * 60 * 1000;
   });
   if (recentMatch) return recentMatch;
 
