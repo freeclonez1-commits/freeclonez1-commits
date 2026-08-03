@@ -4,11 +4,14 @@ const normalizeApiBase = (value) => (value || '').trim().replace(/\/+$/, '');
 const runtimeApiBase = normalizeApiBase(globalThis.SAPO_GUARD_CONFIG?.API_BASE_URL);
 const API_BASE = runtimeApiBase || normalizeApiBase(import.meta.env.VITE_API_BASE_URL) || '/api/v1';
 
-const DEFAULT_ADMIN_KEY = 'd621f8ea480f914ab7c3d5e61f2098a4bc75e0d3f8a902c4de167fb5902ac83e';
-
 const adminConfig = () => ({
-  headers: { 'X-Sapo-Admin-Key': sessionStorage.getItem('sapo_admin_api_key') || DEFAULT_ADMIN_KEY }
+  headers: { 'X-Sapo-Admin-Key': sessionStorage.getItem('sapo_dashboard_password_v2') || '' }
 });
+
+export const verifyAdminPassword = async () => {
+  const res = await axios.post(`${API_BASE}/auth/verify`, {}, adminConfig());
+  return res.data;
+};
 
 export const getStores = async () => {
   const res = await axios.get(`${API_BASE}/stores`, adminConfig());

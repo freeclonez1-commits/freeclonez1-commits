@@ -18,7 +18,8 @@ import {
   getBlacklist,
   addToBlacklist,
   removeFromBlacklist,
-  deleteLog
+  deleteLog,
+  verifyAdminPassword
 } from './api/client';
 
 const Overview = lazy(() => import('./components/Overview'));
@@ -37,8 +38,7 @@ export default function App() {
   const refreshInFlightRef = useRef(false);
   const logsRefreshInFlightRef = useRef(false);
   const syncInFlightRef = useRef(false);
-  const DEFAULT_ADMIN_KEY = 'd621f8ea480f914ab7c3d5e61f2098a4bc75e0d3f8a902c4de167fb5902ac83e';
-  const [adminKey, setAdminKey] = useState(() => sessionStorage.getItem('sapo_admin_api_key') || DEFAULT_ADMIN_KEY);
+  const [adminKey, setAdminKey] = useState(() => sessionStorage.getItem('sapo_dashboard_password_v2') || '');
   const [notice, setNotice] = useState(null);
   const [authError, setAuthError] = useState('');
   const [isCheckingKey, setIsCheckingKey] = useState(false);
@@ -110,12 +110,12 @@ export default function App() {
     } catch (err) {
       console.error('Error fetching stores:', err);
       if (err.response?.status === 401) {
-        sessionStorage.removeItem('sapo_admin_api_key');
+        sessionStorage.removeItem('sapo_dashboard_password_v2');
         setAdminKey('');
-        setAuthError('Khóa quản trị không đúng hoặc đã hết hiệu lực.');
+        setAuthError('Mật khẩu không đúng hoặc đã hết hiệu lực.');
         return;
       }
-      setNotice({ type: 'error', message: 'Không thể tải danh sách cửa hàng. Kiểm tra khóa quản trị hoặc kết nối server.' });
+      setNotice({ type: 'error', message: 'Không thể tải danh sách cửa hàng. Kiểm tra mật khẩu hoặc kết nối server.' });
     }
   }, [adminKey]);
 
@@ -133,9 +133,9 @@ export default function App() {
 
       const authenticationFailed = [overviewResult, chartResult].some(result => result.status === 'rejected' && result.reason?.response?.status === 401);
       if (authenticationFailed) {
-        sessionStorage.removeItem('sapo_admin_api_key');
+        sessionStorage.removeItem('sapo_dashboard_password_v2');
         setAdminKey('');
-        setAuthError('Khóa quản trị không đúng hoặc đã hết hiệu lực.');
+        setAuthError('Mật khẩu không đúng hoặc đã hết hiệu lực.');
         return;
       }
       if (overviewResult.status === 'fulfilled' && overviewResult.value.success) setStats(overviewResult.value.data);
@@ -167,9 +167,9 @@ export default function App() {
       }
     } catch (err) {
       if (err.response?.status === 401) {
-        sessionStorage.removeItem('sapo_admin_api_key');
+        sessionStorage.removeItem('sapo_dashboard_password_v2');
         setAdminKey('');
-        setAuthError('Khóa quản trị không đúng hoặc đã hết hiệu lực.');
+        setAuthError('Mật khẩu không đúng hoặc đã hết hiệu lực.');
       } else {
         setLogsError(err.response?.data?.message || 'Không thể tải dữ liệu đơn hàng.');
       }
@@ -186,9 +186,9 @@ export default function App() {
       if (result.success) setBlacklist(result.data);
     } catch (err) {
       if (err.response?.status === 401) {
-        sessionStorage.removeItem('sapo_admin_api_key');
+        sessionStorage.removeItem('sapo_dashboard_password_v2');
         setAdminKey('');
-        setAuthError('Khóa quản trị không đúng hoặc đã hết hiệu lực.');
+        setAuthError('Mật khẩu không đúng hoặc đã hết hiệu lực.');
       }
     }
   }, [adminKey]);
@@ -431,14 +431,14 @@ export default function App() {
   const handleUnlock = async (key) => {
     setIsCheckingKey(true);
     setAuthError('');
-    sessionStorage.setItem('sapo_admin_api_key', key);
+    sessionStorage.setItem('sapo_dashboard_password_v2', key);
     try {
-      const response = await getStores();
-      if (!response.success) throw new Error('Invalid admin key');
+      const response = await verifyAdminPassword();
+      if (!response.success) throw new Error('Invalid dashboard password');
       setAdminKey(key);
     } catch (error) {
-      sessionStorage.removeItem('sapo_admin_api_key');
-      setAuthError(error.response?.status === 401 ? 'Khóa quản trị không đúng.' : 'Không thể xác minh khóa. Kiểm tra server rồi thử lại.');
+      sessionStorage.removeItem('sapo_dashboard_password_v2');
+      setAuthError(error.response?.status === 401 ? 'Mật khẩu không đúng.' : 'Không thể xác minh mật khẩu. Kiểm tra server rồi thử lại.');
     } finally {
       setIsCheckingKey(false);
     }
@@ -455,7 +455,7 @@ export default function App() {
         onSyncOrders={handleSyncOrders}
         isSyncing={isSyncing}
         onLock={() => {
-          sessionStorage.removeItem('sapo_admin_api_key');
+          sessionStorage.removeItem('sapo_dashboard_password_v2');
           setAdminKey('');
         }}
       />

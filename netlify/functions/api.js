@@ -12,6 +12,7 @@ const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
 const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
 const IP_INTELLIGENCE_VERSION = 2;
 const IP_INTELLIGENCE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const BOOTSTRAP_DASHBOARD_PASSWORD_HASH = '5614f8701b76755fca46a29799ae4122ca791e6339afb80e45e9da52c4ea6474';
 const DATACENTER_PROVIDER_WORDS = [
   'gthost', 'm247', 'vultr', 'digitalocean', 'linode', 'hetzner', 'ovh',
   'aws', 'amazon', 'google cloud', 'azure', 'vpn', 'proxy', 'datacenter',
@@ -483,15 +484,36 @@ function response(statusCode, body, headers = {}) {
 }
 
 function json(statusCode, body) {
-  return response(statusCode, body, { 'Content-Type': 'application/json; charset=utf-8' });
+  return response(statusCode, body, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store'
+  });
 }
 
-function unauthorized(message = 'Admin key is invalid.') {
+function unauthorized(message = 'Dashboard password is invalid.') {
   return json(401, { success: false, message });
 }
 
+function sha256(value) {
+  return crypto.createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
+}
+
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left || ''), 'utf8');
+  const rightBuffer = Buffer.from(String(right || ''), 'utf8');
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
 function assertAdmin(event) {
-  return true;
+  const headers = event.headers || {};
+  const authorization = headers.authorization || headers.Authorization || '';
+  const suppliedPassword = headers['x-sapo-admin-key'] || headers['X-Sapo-Admin-Key'] || String(authorization).replace(/^Bearer\s+/i, '');
+  if (!suppliedPassword) return false;
+
+  const configuredHash = process.env.DASHBOARD_PASSWORD_HASH || '';
+  const configuredPassword = process.env.DASHBOARD_PASSWORD || '';
+  const expectedHash = configuredHash || (configuredPassword ? sha256(configuredPassword) : BOOTSTRAP_DASHBOARD_PASSWORD_HASH);
+  return safeEqual(sha256(suppliedPassword), expectedHash.toLowerCase());
 }
 
 function stateTemplate() {
@@ -1716,6 +1738,14 @@ exports.handler = async (event) => {
     const body = event.body ? JSON.parse(event.body) : {};
     const query = event.queryStringParameters || {};
     const method = event.httpMethod;
+    const isPublicCollection = resource === 'logs' && method === 'POST' && parts[0] === 'collect';
+    const isPublicBlacklistCheck = resource === 'blacklist' && method === 'GET' && parts[0] === 'check';
+
+    // Reject protected API requests before loading any persistent state.
+    if (!isPublicCollection && !isPublicBlacklistCheck && !assertAdmin(event)) return unauthorized();
+    if (resource === 'auth' && method === 'POST' && parts[0] === 'verify') {
+      return json(200, { success: true });
+    }
 
     if (resource === 'stores') {
       const isSync = method === 'POST' && parts[1] === 'sync';
