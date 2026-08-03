@@ -98,6 +98,7 @@ export default function App() {
 
   // Fetch all dashboard data
   const fetchData = useCallback(async (overrideFilters = null) => {
+    if (!adminKey) return;
     setIsRefreshing(true);
     setDataError('');
     try {
@@ -108,22 +109,22 @@ export default function App() {
         orders_only: activeFilters.orders_only !== false
       };
 
-      let [overviewResult, chartResult, logsResult, blacklistResult] = await Promise.allSettled([
+      let [overviewResult, chartResult, logsResult, blacklistResult, storesResult] = await Promise.allSettled([
         getOverviewStats({ store_id: selectedStoreId }),
         getChartStats({ store_id: selectedStoreId }),
         getLogs(queryFilters),
-        getBlacklist()
+        getBlacklist(),
+        getStores()
       ]);
 
-
-
-      const authenticationFailed = [overviewResult, chartResult, logsResult, blacklistResult].some(result => result.status === 'rejected' && result.reason?.response?.status === 401);
+      const authenticationFailed = [overviewResult, chartResult, logsResult, blacklistResult, storesResult].some(result => result.status === 'rejected' && result.reason?.response?.status === 401);
       if (authenticationFailed) {
         sessionStorage.removeItem('sapo_admin_api_key');
         setAdminKey('');
         setAuthError('Khóa quản trị không đúng hoặc đã hết hiệu lực.');
         return;
       }
+      if (storesResult.status === 'fulfilled' && storesResult.value?.success) setStores(storesResult.value.data);
       if (overviewResult.status === 'fulfilled' && overviewResult.value.success) setStats(overviewResult.value.data);
       if (chartResult.status === 'fulfilled' && chartResult.value.success) setChartData(chartResult.value.data);
       if (logsResult.status === 'fulfilled' && logsResult.value.success) {
