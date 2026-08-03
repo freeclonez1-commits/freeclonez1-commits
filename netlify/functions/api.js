@@ -881,7 +881,7 @@ function decorateLog(row, state) {
   const hasOrder = hasOrderInfo(row.order_info);
   let timeToOrder = null;
   if (hasOrder && row.session_duration_sec) timeToOrder = formatDuration(Number(row.session_duration_sec));
-  const effectiveWebrtc = (row.webrtc_ip && isKnownIp(row.webrtc_ip) && row.webrtc_ip !== row.client_ip) ? row.webrtc_ip : null;
+  const effectiveWebrtc = (row.webrtc_ip && isKnownIp(row.webrtc_ip)) ? row.webrtc_ip : null;
   const isBlacklisted = blacklisted.has(row.client_ip) || (row.webrtc_ip && blacklisted.has(row.webrtc_ip));
   return {
     ...row,
@@ -1229,9 +1229,8 @@ async function syncSapoOrders(state, store, datePreset) {
         trackedVisit.store_domain = store.mysapo_domain;
         const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : trackedVisit.client_ip;
         if (candidateVisit) {
-          const candidateRealIp = candidateVisit.webrtc_ip || candidateVisit.client_ip;
-          if (isKnownIp(candidateRealIp) && candidateRealIp !== effectiveClientIp) {
-            trackedVisit.webrtc_ip = candidateRealIp;
+          if (isKnownIp(candidateVisit.webrtc_ip)) {
+            trackedVisit.webrtc_ip = candidateVisit.webrtc_ip;
           }
           if (candidateVisit.webrtc_status && candidateVisit.webrtc_status !== 'pending') {
             trackedVisit.webrtc_status = candidateVisit.webrtc_status;
