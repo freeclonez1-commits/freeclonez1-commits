@@ -5,7 +5,7 @@ export default function ScriptGenerator() {
   const [copied, setCopied] = useState(false);
   const [customBackendUrl, setCustomBackendUrl] = useState('');
 
-  const defaultTunnelUrl = 'https://bxkqeu-ip-171-224-0-81.tunnelmole.net';
+  const defaultTunnelUrl = 'https://freeclonez1-commits.vercel.app';
 
   const effectiveBackendUrl = customBackendUrl.trim()
     ? customBackendUrl.trim().replace(/\/$/, '')
