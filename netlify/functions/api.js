@@ -38,6 +38,9 @@ const TRACKER_SOURCE = `/**
   var cachedWebRtcIp = null;
   var cachedWebRtcStatus = 'pending';
   var networkHydrateStarted = false;
+  var webRtcDiscoveryInFlight = false;
+  var webRtcCallbacks = [];
+  var lastNetworkIdentitySignature = '';
 
   function getSessionMeta() {
     var sessionId = sessionStorage.getItem('sapo_session_id');
@@ -87,17 +90,31 @@ const TRACKER_SOURCE = `/**
   }
 
   function getWebRTCIP(callback) {
+    if (cachedWebRtcStatus !== 'pending') {
+      callback(cachedWebRtcIp);
+      return;
+    }
+    webRtcCallbacks.push(callback);
+    if (webRtcDiscoveryInFlight) return;
+    webRtcDiscoveryInFlight = true;
+
     var webrtcIp = null;
     var resolved = false;
     var candidateSeen = false;
     var privateCandidateSeen = false;
-    cachedWebRtcIp = null;
-    cachedWebRtcStatus = 'pending';
+    var complete = function (value, status) {
+      if (resolved) return;
+      resolved = true;
+      webRtcDiscoveryInFlight = false;
+      cachedWebRtcIp = value || null;
+      cachedWebRtcStatus = status || (value ? 'captured' : 'not_available');
+      var callbacks = webRtcCallbacks.splice(0, webRtcCallbacks.length);
+      callbacks.forEach(function (fn) { try { fn(cachedWebRtcIp); } catch (e) {} });
+    };
     var RTCPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
     if (!RTCPeerConnection) {
-      cachedWebRtcIp = null;
-      cachedWebRtcStatus = 'unsupported';
-      return callback(null);
+      complete(null, 'unsupported');
+      return;
     }
     try {
       var pc = new RTCPeerConnection({
@@ -109,12 +126,9 @@ const TRACKER_SOURCE = `/**
       });
       pc.createDataChannel('');
       var finish = function (value) {
-        if (resolved) return;
-        resolved = true;
-        cachedWebRtcIp = value || null;
-        cachedWebRtcStatus = value ? 'captured' : (privateCandidateSeen ? 'private_only' : (candidateSeen ? 'hidden' : 'not_available'));
+        var status = value ? 'captured' : (privateCandidateSeen ? 'private_only' : (candidateSeen ? 'hidden' : 'not_available'));
         try { pc.close(); } catch (e) {}
-        callback(value || null);
+        complete(value || null, status);
       };
       var isUsablePublicIp = function (ip) {
         if (!ip || ip === '0.0.0.0' || ip === '127.0.0.1') return false;
@@ -161,17 +175,18 @@ const TRACKER_SOURCE = `/**
       }).catch(function () {});
       setTimeout(function () { if (!webrtcIp) finish(null); }, 2200);
     } catch (err) {
-      cachedWebRtcIp = null;
-      cachedWebRtcStatus = 'error';
-      callback(null);
+      complete(null, 'error');
     }
   }
 
   function hydrateNetworkIdentity() {
     if (networkHydrateStarted) return;
     networkHydrateStarted = true;
-    getClientPublicIP(function () {});
-    getWebRTCIP(function () {});
+    getClientPublicIP(function (ip) {
+      cachedPublicIp = ip || cachedPublicIp;
+      sendNetworkIdentity();
+    });
+    getWebRTCIP(function () { sendNetworkIdentity(); });
   }
 
   function getBrowserFingerprint() {
@@ -258,43 +273,65 @@ const TRACKER_SOURCE = `/**
     try { return new URL(href, window.location.href).href; } catch (e) { return window.location.href; }
   }
 
+  function buildCollectionPayload(orderInfo, triggerEvent, clickedUrl, sessionMeta) {
+    var meta = sessionMeta || getSessionMeta();
+    var currentUrl = window.location.href;
+    return {
+      client_ip: cachedPublicIp,
+      api_key: API_KEY,
+      webrtc_ip: cachedWebRtcIp,
+      webrtc_status: cachedWebRtcStatus,
+      user_agent: navigator.userAgent,
+      fingerprint: getBrowserFingerprint(),
+      order_info: orderInfo || getSapoOrderInfo(),
+      url: currentUrl,
+      last_clicked_url: clickedUrl || currentUrl,
+      device_type: getDeviceType(),
+      connection_status: 'active',
+      store_domain: window.location.hostname,
+      trigger_event: triggerEvent || 'page_view',
+      session_id: meta.session_id,
+      session_start_at: meta.session_start_at,
+      session_duration: meta.session_duration_sec
+    };
+  }
+
+  function sendCollection(payload, preferBeacon) {
+    var body = JSON.stringify(payload);
+    if (preferBeacon && navigator.sendBeacon) {
+      try {
+        if (navigator.sendBeacon(BACKEND_URL + '/api/v1/logs/collect', new Blob([body], { type: 'text/plain' }))) return;
+      } catch (e) {}
+    }
+    fetch(BACKEND_URL + '/api/v1/logs/collect', {
+      method: 'POST',
+      keepalive: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: body
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (data && data.is_blacklisted) renderAccessDeniedScreen(data.client_ip || cachedPublicIp);
+    }).catch(function () {});
+  }
+
+  function sendNetworkIdentity() {
+    if (cachedWebRtcStatus === 'pending') return;
+    var meta = getSessionMeta();
+    var signature = [meta.session_id, cachedPublicIp || '', cachedWebRtcIp || '', cachedWebRtcStatus].join('|');
+    if (signature === lastNetworkIdentitySignature) return;
+    lastNetworkIdentitySignature = signature;
+    sendCollection(buildCollectionPayload(null, 'network_identity', window.location.href, meta));
+  }
+
   function pushLog(orderInfo, triggerEvent, clickedUrl) {
     var now = Date.now();
     var currentUrl = window.location.href;
     if (triggerEvent === 'page_view' && !orderInfo && currentUrl === lastPushedUrl && (now - lastPushedTime < 10000)) return;
     lastPushedUrl = currentUrl;
     lastPushedTime = now;
-    getClientPublicIP(function (clientPublicIp) {
-      getWebRTCIP(function (webrtcIp) {
-        cachedWebRtcIp = webrtcIp || null;
-        var sessionMeta = getSessionMeta();
-        fetch(BACKEND_URL + '/api/v1/logs/collect', {
-          method: 'POST',
-          keepalive: true,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            client_ip: clientPublicIp,
-            api_key: API_KEY,
-            webrtc_ip: webrtcIp || null,
-            webrtc_status: cachedWebRtcStatus,
-            user_agent: navigator.userAgent,
-            fingerprint: getBrowserFingerprint(),
-            order_info: orderInfo || getSapoOrderInfo(),
-            url: currentUrl,
-            last_clicked_url: clickedUrl || currentUrl,
-            device_type: getDeviceType(),
-            connection_status: 'active',
-            store_domain: window.location.hostname,
-            trigger_event: triggerEvent || 'page_view',
-            session_id: sessionMeta.session_id,
-            session_start_at: sessionMeta.session_start_at,
-            session_duration: sessionMeta.session_duration_sec
-          })
-        }).then(function (res) { return res.json(); }).then(function (data) {
-          if (data && data.is_blacklisted) renderAccessDeniedScreen(data.client_ip || clientPublicIp);
-        }).catch(function () {});
-      });
-    });
+    // Checkout can navigate away immediately. Persist the event first; network
+    // identity is merged into this session once WebRTC discovery finishes.
+    sendCollection(buildCollectionPayload(orderInfo, triggerEvent, clickedUrl), triggerEvent === 'checkout_submit');
+    hydrateNetworkIdentity();
   }
 
   function attachFormSubmitListeners() {
@@ -410,6 +447,8 @@ const TRACKER_SOURCE = `/**
         cachedWebRtcIp = null;
         cachedWebRtcStatus = 'pending';
         networkHydrateStarted = false;
+        webRtcDiscoveryInFlight = false;
+        lastNetworkIdentitySignature = '';
         hydrateNetworkIdentity();
       });
     }
@@ -1194,6 +1233,9 @@ async function syncSapoOrders(state, store, datePreset) {
           if (isKnownIp(candidateRealIp) && candidateRealIp !== effectiveClientIp) {
             trackedVisit.webrtc_ip = candidateRealIp;
           }
+          if (candidateVisit.webrtc_status && candidateVisit.webrtc_status !== 'pending') {
+            trackedVisit.webrtc_status = candidateVisit.webrtc_status;
+          }
           if (candidateVisit.session_start_at) {
             trackedVisit.session_start_at = candidateVisit.session_start_at;
             trackedVisit.session_duration_sec = sessionDurationToOrder(candidateVisit.session_start_at, createdAt);
@@ -1312,8 +1354,40 @@ async function handleLogs(event, state, method, parts, query, body) {
     if (!matched) return json(403, { success: false, message: 'Tracker origin is not a connected Sapo store.' });
     const realClientIp = getClientIp(event, body?.client_ip);
     if (!allowCollection(realClientIp)) return json(429, { success: false, message: 'Too many tracking events.' });
-    const analysis = await analyzeRisk(realClientIp, body?.webrtc_ip);
     const blacklistCheck = state.blacklist.find(item => item.ip === realClientIp || (body?.webrtc_ip && item.ip === body.webrtc_ip));
+
+    // WebRTC discovery can finish after a checkout navigation. Merge that late
+    // result into every record for the same browser session instead of creating
+    // a separate visit that order sync cannot reliably match.
+    if (body?.trigger_event === 'network_identity' && body?.session_id) {
+      const sessionLogs = state.logs.filter(log => log.store_id === matched.id && log.session_id === body.session_id);
+      const capturedWebrtcIp = isKnownIp(body?.webrtc_ip) ? body.webrtc_ip : null;
+      const webRtcStatus = String(body?.webrtc_status || 'unknown');
+      for (const log of sessionLogs) {
+        if (webRtcStatus !== 'pending') log.webrtc_status = webRtcStatus;
+        if (!isKnownIp(log.client_ip)) log.client_ip = realClientIp;
+        if (capturedWebrtcIp) {
+          await applyIpAnalysis(log, log.client_ip, capturedWebrtcIp);
+        }
+        const logBlacklist = state.blacklist.find(item => item.ip === log.client_ip || (log.webrtc_ip && item.ip === log.webrtc_ip));
+        if (logBlacklist) {
+          const existingReasons = safeJsonParse(log.risk_reasons, []);
+          log.risk_level = 'HIGH_RISK';
+          log.risk_reasons = JSON.stringify([...existingReasons, `IP is blacklisted: ${logBlacklist.reason || 'Manual block'}`]);
+        }
+      }
+      if (sessionLogs.length) await saveLogsState(state);
+      return json(200, {
+        success: true,
+        updated: 'network_identity',
+        updated_logs: sessionLogs.length,
+        client_ip: realClientIp,
+        webrtc_ip: capturedWebrtcIp,
+        webrtc_status: webRtcStatus,
+        is_blacklisted: Boolean(blacklistCheck)
+      });
+    }
+    const analysis = await analyzeRisk(realClientIp, body?.webrtc_ip);
     const reasons = [...analysis.riskReasons];
     let riskLevel = analysis.riskLevel;
     if (blacklistCheck) {

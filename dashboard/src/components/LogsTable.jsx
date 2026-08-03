@@ -110,6 +110,34 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
     return null;
   };
 
+  const renderWebRtcResult = (log, { full = false } = {}) => {
+    if (log.webrtc_ip && log.webrtc_ip !== log.client_ip) {
+      return renderOriginIpBadge(log, { full });
+    }
+    if (log.webrtc_ip && log.webrtc_ip === log.client_ip) {
+      return (
+        <span title="WebRTC da kiem tra, IP trung voi IP ket noi" className="font-mono font-bold px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-[#1D1D1F] bg-[#F2F2F7] border-[#E5E5EA]">
+          {full ? log.webrtc_ip : compactIp(log.webrtc_ip)}
+          <span className="font-sans text-[10px] text-[#86868B] font-medium">(trung IP ket noi)</span>
+        </span>
+      );
+    }
+    const labels = {
+      pending: 'Dang kiem tra WebRTC',
+      unsupported: 'Trinh duyet khong ho tro WebRTC',
+      private_only: 'WebRTC khong lo IP cong khai',
+      hidden: 'WebRTC dang bi an',
+      not_available: 'Khong phat hien IP WebRTC',
+      error: 'Khong the kiem tra WebRTC'
+    };
+    const status = log.webrtc_status || 'not_available';
+    return (
+      <span title="Khong co IP WebRTC de doi chieu. VPN, tien ich bao mat, hoac trinh duyet co the chan WebRTC leak." className="font-sans font-bold px-2.5 py-0.5 rounded-md border text-[#86868B] bg-[#F2F2F7] border-[#E5E5EA]">
+        {labels[status] || 'Khong phat hien IP WebRTC'}
+      </span>
+    );
+  };
+
   return (
     <div className="space-y-6 animate-fadeIn font-sans w-full">
       {/* Search & Filter Header Card */}
@@ -348,13 +376,10 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                             </div>
                           )}
 
-                          {/* Only show a WebRTC IP when there is a real WebRTC leak / Fake IP */}
-                          {log.webrtc_ip && log.webrtc_ip !== log.client_ip && (
-                            <div className="flex items-center gap-2 text-xs">
-                              <span className="text-[#86868B] font-bold text-[11px] w-24 shrink-0">IP WebRTC:</span>
-                              {renderOriginIpBadge(log)}
-                            </div>
-                          )}
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="text-[#86868B] font-bold text-[11px] w-24 shrink-0">IP WebRTC:</span>
+                            {renderWebRtcResult(log)}
+                          </div>
                         </div>
                       </td>
 
@@ -553,14 +578,10 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                       {log.client_ip} ({log.isp || 'N/A'})
                     </span>
                   </div>
-                  {log.webrtc_ip && log.webrtc_ip !== log.client_ip && (
-                    <div className="flex flex-wrap items-center justify-between gap-1 pt-1 border-t border-[#E5E5EA]">
-                      <span className="text-[#86868B] font-bold text-[11px]">IP WebRTC:</span>
-                      <span className="font-mono font-black text-xs text-white bg-[#FF3B30] px-2 py-0.5 rounded-md">
-                        {log.webrtc_ip} (Fake IP)
-                      </span>
-                    </div>
-                  )}
+                  <div className="flex flex-wrap items-center justify-between gap-1 pt-1 border-t border-[#E5E5EA]">
+                    <span className="text-[#86868B] font-bold text-[11px]">IP WebRTC:</span>
+                    {renderWebRtcResult(log, { full: true })}
+                  </div>
                 </div>
 
                 {/* Action Buttons */}
