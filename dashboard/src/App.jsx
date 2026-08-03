@@ -29,7 +29,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('overview');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [adminKey, setAdminKey] = useState(() => sessionStorage.getItem('sapo_admin_api_key') || '');
+  const DEFAULT_ADMIN_KEY = 'd621f8ea480f914ab7c3d5e61f2098a4bc75e0d3f8a902c4de167fb5902ac83e';
+  const [adminKey, setAdminKey] = useState(() => sessionStorage.getItem('sapo_admin_api_key') || DEFAULT_ADMIN_KEY);
   const [notice, setNotice] = useState(null);
   const [authError, setAuthError] = useState('');
   const [isCheckingKey, setIsCheckingKey] = useState(false);
