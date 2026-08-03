@@ -1266,13 +1266,6 @@ async function handleLogs(event, state, method, parts, query, body) {
     return json(201, { success: true, log_id: log.id, client_ip: realClientIp, risk_level: riskLevel, is_blacklisted: Boolean(blacklistCheck), reasons });
   }
   if (method === 'GET' && parts.length === 0) {
-    if (state.logs.length === 0 && state.stores.length > 0) {
-      for (const st of state.stores) {
-        try {
-          await syncSapoOrders(state, st, '30_DAYS');
-        } catch (_) {}
-      }
-    }
     const page = Math.max(1, Number(query.page || 1));
     const limit = Math.min(20, Math.max(1, Number(query.limit || 20)));
     const filtered = filterLogs(state.logs, query);
