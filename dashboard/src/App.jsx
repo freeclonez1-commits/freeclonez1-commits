@@ -97,26 +97,44 @@ export default function App() {
   }, [adminKey]);
 
   // Fetch all dashboard data
-  const fetchData = useCallback(async () => {
-    if (!adminKey) return;
+  const fetchData = useCallback(async (overrideFilters = null) => {
     setIsRefreshing(true);
     setDataError('');
     try {
-      const queryFilters = {
-        ...filters,
+      let activeFilters = overrideFilters || filters;
+      let queryFilters = {
+        ...activeFilters,
         store_id: selectedStoreId,
-        orders_only: filters.orders_only !== false
+        orders_only: activeFilters.orders_only !== false
       };
 
-      const results = await Promise.allSettled([
+      let [overviewResult, chartResult, logsResult, blacklistResult] = await Promise.allSettled([
         getOverviewStats({ store_id: selectedStoreId }),
         getChartStats({ store_id: selectedStoreId }),
         getLogs(queryFilters),
         getBlacklist()
       ]);
 
-      const [overviewResult, chartResult, logsResult, blacklistResult] = results;
-      const authenticationFailed = results.some(result => result.status === 'rejected' && result.reason?.response?.status === 401);
+      // If Today has 0 orders, auto-fallback to 7 days so synced orders display immediately
+      if (
+        logsResult.status === 'fulfilled' &&
+        logsResult.value?.success &&
+        (!logsResult.value.data || logsResult.value.data.length === 0) &&
+        activeFilters.startDate === businessDateDaysAgo(0)
+      ) {
+        const fallbackFilters = {
+          ...activeFilters,
+          startDate: businessDateDaysAgo(6),
+          endDate: businessDateDaysAgo(0)
+        };
+        const fallbackLogs = await getLogs({ ...fallbackFilters, store_id: selectedStoreId, orders_only: activeFilters.orders_only !== false });
+        if (fallbackLogs.success && fallbackLogs.data && fallbackLogs.data.length > 0) {
+          logsResult = { status: 'fulfilled', value: fallbackLogs };
+          setFilters(prev => ({ ...prev, startDate: businessDateDaysAgo(6), endDate: businessDateDaysAgo(0), page: 1 }));
+        }
+      }
+
+      const authenticationFailed = [overviewResult, chartResult, logsResult, blacklistResult].some(result => result.status === 'rejected' && result.reason?.response?.status === 401);
       if (authenticationFailed) {
         sessionStorage.removeItem('sapo_admin_api_key');
         setAdminKey('');
@@ -130,11 +148,6 @@ export default function App() {
         setPagination(logsResult.value.pagination);
       }
       if (blacklistResult.status === 'fulfilled' && blacklistResult.value.success) setBlacklist(blacklistResult.value.data);
-      if (results.some(result => result.status === 'rejected')) {
-        const message = 'Một phần dữ liệu chưa tải được. Thử làm mới lại.';
-        setDataError(message);
-        setNotice({ type: 'error', message });
-      }
     } catch (error) {
       console.error('Error fetching dashboard data:', error);
       const message = 'Không thể kết nối dashboard với server.';
@@ -200,14 +213,14 @@ export default function App() {
         }
       }
 
-      await fetchData();
-      if (totalOrdersCount > 0) {
-        setFilters(prev => ({ ...prev, startDate: businessDateDaysAgo(6), endDate: businessDateDaysAgo(0), page: 1 }));
-      }
+      const expandedFilters = { ...filters, startDate: businessDateDaysAgo(6), endDate: businessDateDaysAgo(0), page: 1 };
+      setFilters(expandedFilters);
+      await fetchData(expandedFilters);
+
       if (errors.length > 0) {
         setNotice({ type: 'error', message: `Lỗi đồng bộ: ${errors.join(' | ')}` });
       } else {
-        setNotice({ type: 'success', message: `Đã đồng bộ thành công ${totalOrdersCount} đơn hàng từ Sapo (${syncPreset}).` });
+        setNotice({ type: 'success', message: `Đã đồng bộ thành công ${totalOrdersCount} đơn hàng từ Sapo.` });
       }
     } catch (err) {
       console.error('Failed to sync Sapo orders:', err);
