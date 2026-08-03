@@ -689,20 +689,7 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
 
   let ipData = ipCache ? ipCache.get(clientIp) : null;
   if (!ipData) {
-    const existing = stateLogs?.find(l => l.client_ip === clientIp && l.isp && l.isp !== 'Unknown' && l.country !== 'Vietnam');
-    if (existing) {
-      ipData = {
-        country: existing.country,
-        countryCode: existing.country_code,
-        city: existing.city,
-        isp: existing.isp,
-        org: existing.org,
-        hosting: existing.is_datacenter,
-        proxy: existing.is_vpn
-      };
-    } else {
-      ipData = await lookupIp(clientIp);
-    }
+    ipData = await lookupIp(clientIp);
     if (ipCache) ipCache.set(clientIp, ipData);
   }
 
