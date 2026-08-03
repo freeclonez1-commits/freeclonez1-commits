@@ -615,7 +615,9 @@ function businessDayBounds(day) {
 }
 
 function hasOrderInfo(value) {
-  return !!(value && value !== 'null' && value !== '');
+  if (!value || value === 'null' || value === '') return false;
+  const parsed = typeof value === 'string' ? safeJsonParse(value, null) : value;
+  return Boolean(parsed && parsed.order_id);
 }
 
 function safeJsonParse(value, fallback) {

@@ -71,7 +71,7 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
   // Backend filters orders before pagination; render full log dataset received
   const displayedLogs = logs ? logs.filter(log => {
     if (ordersOnlyFilter) {
-      return log.order_info !== null;
+      return Boolean(log.order_info && log.order_info.order_id);
     }
     return true;
   }) : [];
@@ -84,6 +84,17 @@ export default function LogsTable({ logs, pagination, filters, setFilters, onAdd
 
   const renderOriginIpBadge = (log, { full = false } = {}) => {
     if (log.webrtc_ip && log.webrtc_ip !== log.client_ip && log.webrtc_status !== 'stale') {
+      const isRealFakeIp = log.webrtc_mismatch || log.risk_level === 'HIGH_RISK';
+      if (!isRealFakeIp) {
+        return (
+          <span title={log.webrtc_ip} className="font-mono font-bold px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-[#1D1D1F] bg-[#F2F2F7] border-[#E5E5EA]">
+            {full ? log.webrtc_ip : compactIp(log.webrtc_ip)}
+            <span className="font-sans text-[10px] text-[#86868B] font-medium">
+              (IP WebRTC)
+            </span>
+          </span>
+        );
+      }
       return (
         <span title={log.webrtc_ip} className="font-mono font-black px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-white bg-[#FF3B30] border-[#FF3B30] shadow-sm">
           {full ? log.webrtc_ip : compactIp(log.webrtc_ip)}
