@@ -1154,6 +1154,7 @@ async function syncSapoOrders(state, store, datePreset) {
     }
   }
 
+  await saveState(state);
   return { success: true, total_orders: total, synced_new: synced };
 }
 
