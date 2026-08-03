@@ -560,7 +560,7 @@ function publicStore(store) {
 }
 
 function encryptionKey() {
-  return crypto.createHash('sha256').update(process.env.DATA_ENCRYPTION_KEY || '5a7f9b2c4e6d8a1f3b5c7d9e2f4a6b8c0d2e4f6a8b1c3d5e7f9a2b4c6d8e0f2a').digest();
+  return crypto.createHash('sha256').update(process.env.DATA_ENCRYPTION_KEY || '847bade69ce34d7d84f28a15ff6c3179f2a0d596db943e3eb8ca47e20ad91f77').digest();
 }
 
 function encryptSecret(value) {
