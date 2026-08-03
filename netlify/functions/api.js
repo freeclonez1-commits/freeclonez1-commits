@@ -1064,14 +1064,17 @@ async function syncSapoOrders(state, store, datePreset) {
 
       if (trackedVisit) {
         applySyncedOrder(trackedVisit, orderInfo, createdAt);
-        if (candidateVisit && candidateVisit.webrtc_ip) {
-          trackedVisit.webrtc_ip = candidateVisit.webrtc_ip;
-        }
-        if (candidateVisit && candidateVisit.session_start_at) {
-          trackedVisit.session_start_at = candidateVisit.session_start_at;
-          trackedVisit.session_duration_sec = sessionDurationToOrder(candidateVisit.session_start_at, createdAt);
-        }
         const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : trackedVisit.client_ip;
+        if (candidateVisit) {
+          const candidateRealIp = candidateVisit.webrtc_ip || candidateVisit.client_ip;
+          if (isKnownIp(candidateRealIp) && candidateRealIp !== effectiveClientIp) {
+            trackedVisit.webrtc_ip = candidateRealIp;
+          }
+          if (candidateVisit.session_start_at) {
+            trackedVisit.session_start_at = candidateVisit.session_start_at;
+            trackedVisit.session_duration_sec = sessionDurationToOrder(candidateVisit.session_start_at, createdAt);
+          }
+        }
         const analysis = await analyzeRisk(effectiveClientIp, trackedVisit.webrtc_ip, ipCache, state.logs);
         trackedVisit.client_ip = effectiveClientIp;
         trackedVisit.country = analysis.ipData.country || 'Unknown';
