@@ -764,8 +764,10 @@ function decorateLog(row, state) {
   const hasOrder = hasOrderInfo(row.order_info);
   let timeToOrder = null;
   if (hasOrder && row.session_duration_sec) timeToOrder = formatDuration(Number(row.session_duration_sec));
+  const effectiveWebrtc = (row.webrtc_ip && isKnownIp(row.webrtc_ip) && row.webrtc_ip !== row.client_ip) ? row.webrtc_ip : null;
   return {
     ...row,
+    webrtc_ip: effectiveWebrtc,
     is_blacklisted: blacklisted.has(row.client_ip) || blacklisted.has(row.webrtc_ip),
     time_to_order: timeToOrder || (hasOrder ? 'Chưa bắt được phiên' : null),
     order_info: hasOrder ? safeJsonParse(row.order_info, null) : null,
