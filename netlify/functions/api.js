@@ -53,6 +53,7 @@ const TRACKER_SOURCE = `/**
   var webRtcDiscoveryInFlight = false;
   var webRtcCallbacks = [];
   var lastNetworkIdentitySignature = '';
+  var NETWORK_CHECK_INTERVAL_MS = 15000;
 
   function getSessionMeta() {
     var sessionId = sessionStorage.getItem('sapo_session_id');
@@ -76,28 +77,42 @@ const TRACKER_SOURCE = `/**
 
   function getClientPublicIP(callback) {
     var resolved = false;
-    var timer = setTimeout(function () {
-      if (!resolved) {
-        resolved = true;
-        callback(null);
-      }
-    }, 700);
-    fetch('https://api.ipify.org?format=json')
+    var fallbackStarted = false;
+    var finish = function (ip) {
+      if (resolved) return;
+      resolved = true;
+      if (ip) cachedPublicIp = ip;
+      callback(ip || null);
+    };
+    var fetchIpify = function () {
+      if (resolved || fallbackStarted) return;
+      fallbackStarted = true;
+      var timer = setTimeout(function () { finish(null); }, 1000);
+      fetch('https://api.ipify.org?format=json', { cache: 'no-store' })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          clearTimeout(timer);
+          finish(data && data.ip ? data.ip : null);
+        })
+        .catch(function () {
+          clearTimeout(timer);
+          finish(null);
+        });
+    };
+
+    // Use the same Vercel edge that receives tracking events. This is both
+    // faster and more representative than a third-party IP lookup.
+    var edgeTimer = setTimeout(fetchIpify, 900);
+    fetch(BACKEND_URL + '/api/v1/blacklist/check?_=' + Date.now(), { cache: 'no-store' })
       .then(function (res) { return res.json(); })
       .then(function (data) {
-        if (!resolved) {
-          resolved = true;
-          clearTimeout(timer);
-          if (data && data.ip) cachedPublicIp = data.ip;
-          callback(data ? data.ip : null);
-        }
+        clearTimeout(edgeTimer);
+        if (data && data.ip) finish(data.ip);
+        else fetchIpify();
       })
       .catch(function () {
-        if (!resolved) {
-          resolved = true;
-          clearTimeout(timer);
-          callback(null);
-        }
+        clearTimeout(edgeTimer);
+        fetchIpify();
       });
   }
 
@@ -191,14 +206,40 @@ const TRACKER_SOURCE = `/**
     }
   }
 
-  function hydrateNetworkIdentity() {
+  function hydrateNetworkIdentity(force, knownPublicIp) {
     if (networkHydrateStarted) return;
+    if (!force && cachedWebRtcStatus !== 'pending') return;
     networkHydrateStarted = true;
-    getClientPublicIP(function (ip) {
-      cachedPublicIp = ip || cachedPublicIp;
+    var trustedPublicIp = typeof knownPublicIp === 'string' ? knownPublicIp : null;
+    var publicIpReady = Boolean(trustedPublicIp);
+    var webRtcReady = false;
+    var finishHydration = function () {
+      if (!publicIpReady || !webRtcReady) return;
+      networkHydrateStarted = false;
       sendNetworkIdentity();
+    };
+    if (trustedPublicIp) {
+      cachedPublicIp = trustedPublicIp;
+    } else {
+      getClientPublicIP(function (ip) {
+        cachedPublicIp = ip || cachedPublicIp;
+        publicIpReady = true;
+        finishHydration();
+      });
+    }
+    getWebRTCIP(function () {
+      webRtcReady = true;
+      finishHydration();
     });
-    getWebRTCIP(function () { sendNetworkIdentity(); });
+  }
+
+  function refreshNetworkIdentity(knownPublicIp) {
+    if (networkHydrateStarted || document.hidden) return;
+    var trustedPublicIp = typeof knownPublicIp === 'string' ? knownPublicIp : null;
+    cachedPublicIp = trustedPublicIp;
+    cachedWebRtcIp = null;
+    cachedWebRtcStatus = 'pending';
+    hydrateNetworkIdentity(true, trustedPublicIp);
   }
 
   function getBrowserFingerprint() {
@@ -414,29 +455,23 @@ const TRACKER_SOURCE = `/**
     }
 
     // The API reads the visitor address from the edge request. This check runs
-    // immediately instead of waiting for IPify or WebRTC discovery.
-    fetch(BACKEND_URL + '/api/v1/blacklist/check')
+    // immediately and also detects VPN/network changes without another request.
+    var query = cachedWebRtcIp ? '?webrtc_ip=' + encodeURIComponent(cachedWebRtcIp) : '';
+    fetch(BACKEND_URL + '/api/v1/blacklist/check' + query, { cache: 'no-store' })
       .then(function (r) { return r.json(); })
-      .then(function (res) { if (res && res.is_blacklisted) renderAccessDeniedScreen(res.ip); })
-      .catch(function () {});
-
-    getClientPublicIP(function (pubIp) {
-      cachedPublicIp = pubIp || cachedPublicIp;
-      getWebRTCIP(function (webrtcIp) {
-        cachedWebRtcIp = webrtcIp || null;
-        if (EMBEDDED_BLACKLIST.indexOf(pubIp) !== -1 || EMBEDDED_BLACKLIST.indexOf(webrtcIp) !== -1) {
-          renderAccessDeniedScreen(webrtcIp || pubIp);
+      .then(function (res) {
+        if (!res) return;
+        if (res.is_blacklisted) {
+          renderAccessDeniedScreen(res.webrtc_ip || res.ip);
           return;
         }
-        var query = [];
-        if (pubIp) query.push('ip=' + encodeURIComponent(pubIp));
-        if (webrtcIp) query.push('webrtc_ip=' + encodeURIComponent(webrtcIp));
-        fetch(BACKEND_URL + '/api/v1/blacklist/check' + (query.length ? '?' + query.join('&') : ''))
-          .then(function (r) { return r.json(); })
-          .then(function (res) { if (res && res.is_blacklisted) renderAccessDeniedScreen(webrtcIp || pubIp || res.ip); })
-          .catch(function () {});
-      });
-    });
+        if (res.ip && cachedPublicIp && res.ip !== cachedPublicIp) {
+          refreshNetworkIdentity(res.ip);
+        } else if (res.ip) {
+          cachedPublicIp = res.ip;
+        }
+      })
+      .catch(function () {});
   }
 
   function initTracking() {
@@ -452,18 +487,15 @@ const TRACKER_SOURCE = `/**
     attachClickListeners();
     setInterval(attachFormSubmitListeners, 3000);
     setInterval(attachCheckoutActivityListeners, 3000);
-    setInterval(checkBlacklistImmediately, 30000);
+    setInterval(checkBlacklistImmediately, NETWORK_CHECK_INTERVAL_MS);
     if (navigator.connection && navigator.connection.addEventListener) {
-      navigator.connection.addEventListener('change', function () {
-        cachedPublicIp = null;
-        cachedWebRtcIp = null;
-        cachedWebRtcStatus = 'pending';
-        networkHydrateStarted = false;
-        webRtcDiscoveryInFlight = false;
-        lastNetworkIdentitySignature = '';
-        hydrateNetworkIdentity();
-      });
+      navigator.connection.addEventListener('change', refreshNetworkIdentity);
     }
+    window.addEventListener('online', refreshNetworkIdentity);
+    window.addEventListener('focus', refreshNetworkIdentity);
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) refreshNetworkIdentity();
+    });
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') initTracking();
@@ -765,8 +797,11 @@ function safeJsonParse(value, fallback) {
 }
 
 function getClientIp(event, fallback) {
-  const forwarded = event.headers['x-forwarded-for'] || event.headers['X-Forwarded-For'];
-  // Prefer the address supplied by Netlify's edge over a browser-provided value.
+  const forwarded = event.headers['x-vercel-forwarded-for'] ||
+    event.headers['x-real-ip'] ||
+    event.headers['x-forwarded-for'] ||
+    event.headers['X-Forwarded-For'];
+  // Prefer the address supplied by the hosting edge over a browser-provided value.
   // The fallback is kept only for local development where proxy headers are absent.
   return (forwarded ? forwarded.split(',')[0].trim() : event.headers['client-ip']) || fallback || 'unknown';
 }
@@ -1521,19 +1556,21 @@ async function handleLogs(event, state, method, parts, query, body) {
     if (!allowCollection(realClientIp)) return json(429, { success: false, message: 'Too many tracking events.' });
     const blacklistCheck = state.blacklist.find(item => item.ip === realClientIp || (body?.webrtc_ip && item.ip === body.webrtc_ip));
 
-    // WebRTC discovery can finish after a checkout navigation. Merge that late
-    // result into every record for the same browser session instead of creating
-    // a separate visit that order sync cannot reliably match.
+    // WebRTC discovery can finish shortly after navigation. Update only recent
+    // tracker events so a later VPN/network change cannot rewrite old orders.
     if (body?.trigger_event === 'network_identity' && body?.session_id) {
-      const sessionLogs = state.logs.filter(log => log.store_id === matched.id && log.session_id === body.session_id);
+      const now = Date.now();
+      const sessionLogs = state.logs.filter(log => {
+        if (log.store_id !== matched.id || log.session_id !== body.session_id) return false;
+        if (log.trigger_event === 'sapo_sync') return false;
+        const logTime = new Date(log.created_at).getTime();
+        return Number.isFinite(logTime) && Math.abs(now - logTime) <= 15 * 1000;
+      });
       const capturedWebrtcIp = isKnownIp(body?.webrtc_ip) ? body.webrtc_ip : null;
       const webRtcStatus = String(body?.webrtc_status || 'unknown');
       for (const log of sessionLogs) {
         if (webRtcStatus !== 'pending') log.webrtc_status = webRtcStatus;
-        if (!isKnownIp(log.client_ip)) log.client_ip = realClientIp;
-        if (capturedWebrtcIp) {
-          await applyIpAnalysis(log, log.client_ip, capturedWebrtcIp, [], null, state.logs);
-        }
+        await applyIpAnalysis(log, realClientIp, capturedWebrtcIp, [], null, state.logs);
         const logBlacklist = state.blacklist.find(item => item.ip === log.client_ip || (log.webrtc_ip && item.ip === log.webrtc_ip));
         if (logBlacklist) {
           const existingReasons = safeJsonParse(log.risk_reasons, []);
@@ -1542,15 +1579,17 @@ async function handleLogs(event, state, method, parts, query, body) {
         }
       }
       if (sessionLogs.length) await saveLogsState(state);
-      return json(200, {
-        success: true,
-        updated: 'network_identity',
-        updated_logs: sessionLogs.length,
-        client_ip: realClientIp,
-        webrtc_ip: capturedWebrtcIp,
-        webrtc_status: webRtcStatus,
-        is_blacklisted: Boolean(blacklistCheck)
-      });
+      if (sessionLogs.length) {
+        return json(200, {
+          success: true,
+          updated: 'network_identity',
+          updated_logs: sessionLogs.length,
+          client_ip: realClientIp,
+          webrtc_ip: capturedWebrtcIp,
+          webrtc_status: webRtcStatus,
+          is_blacklisted: Boolean(blacklistCheck)
+        });
+      }
     }
     const analysis = await analyzeRisk(realClientIp, body?.webrtc_ip, null, state.logs);
     const reasons = [...analysis.riskReasons];
