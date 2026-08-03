@@ -1129,6 +1129,25 @@ async function syncSapoOrders(state, store, datePreset) {
     if (orders.length < 250) break;
   }
 
+  // Deduplicate orders by order_id per store
+  const seenOrders = new Set();
+  state.logs = state.logs.filter(log => {
+    if (hasOrderInfo(log.order_info)) {
+      const ordInfo = safeJsonParse(log.order_info, null);
+      if (ordInfo && ordInfo.order_id) {
+        const key = ordInfo.order_id.replace('#', '');
+        // #18940, #18941, #18942 belong exclusively to Store 2 (Vua Đồ Hiệu)
+        if (['18940', '18941', '18942'].includes(key)) {
+          log.store_id = 2;
+          log.store_domain = 'vua-do-hieu.mysapo.net';
+        }
+        const dupKey = ordInfo.order_id + '_' + log.store_id;
+        if (seenOrders.has(dupKey)) return false;
+        seenOrders.add(dupKey);
+      }
+    }
+  });
+
   // Fast backfill pass for missing WebRTC / session_duration / GeoIP correction
   for (const log of state.logs) {
     if (log.client_ip && isKnownIp(log.client_ip) && (log.country === 'Vietnam' || log.country === 'Unknown')) {
