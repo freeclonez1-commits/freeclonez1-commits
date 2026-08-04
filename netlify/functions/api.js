@@ -572,6 +572,7 @@ function stateTemplate() {
   return {
     stores: [],
     logs: [],
+    orders: [],
     blacklist: [],
     syncState: { byStore: {}, runs: [] },
     autoStoreId: 1,
@@ -646,7 +647,7 @@ async function loadState({ includeLogs = true, includeStores = true, includeBlac
   }
   try {
     const keys = [];
-    if (includeLogs) keys.push('logs');
+    if (includeLogs) keys.push('logs', 'sapo_orders');
     if (includeStores) keys.push('stores');
     if (includeBlacklist) keys.push('blacklist');
     if (includeSyncState) keys.push('sync_state');
@@ -667,6 +668,7 @@ async function loadState({ includeLogs = true, includeStores = true, includeBlac
       await saveState(initial);
       await saveStoresState(initial);
       await saveLogsState(initial);
+      await saveOrdersState(initial);
       await saveBlacklistState(initial);
       await saveSyncState(initial);
       return initial;
@@ -691,6 +693,19 @@ async function loadState({ includeLogs = true, includeStores = true, includeBlac
     } else if (includeLogs && defaultRow?.value) {
       // Migrate existing installations once, then keep order-log reads lightweight.
       await saveLogsState(state);
+    }
+
+    const ordersRow = rows.find(row => row.key === 'sapo_orders');
+    if (includeLogs && ordersRow?.value) {
+      const orderValue = unpackLogsValue(ordersRow.value);
+      state.orders = Array.isArray(orderValue?.orders) ? orderValue.orders : [];
+    } else if (includeLogs) {
+      // Migrate legacy order rows once. Tracker events stay in `logs`, while
+      // Sapo's canonical order snapshot gets its own storage key so concurrent
+      // visitor tracking can never overwrite an order reconciliation.
+      state.orders = state.logs.filter(log => hasOrderInfo(log.order_info));
+      state.logs = state.logs.filter(log => !hasOrderInfo(log.order_info));
+      await Promise.all([saveLogsState(state), saveOrdersState(state)]);
     }
 
     const storesRow = rows.find(row => row.key === 'stores');
@@ -739,6 +754,14 @@ async function saveStoresState(state) {
 
 async function saveLogsState(state) {
   await saveStateValue('logs', packLogsValue(state.logs, state.autoLogId));
+}
+
+async function saveOrdersState(state) {
+  await saveStateValue('sapo_orders', packLogsValue(state.orders || [], state.autoLogId));
+}
+
+function allLogs(state) {
+  return [...(state.orders || []), ...(state.logs || [])];
 }
 
 async function saveBlacklistState(state) {
@@ -1501,12 +1524,12 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
   let synced = 0;
   let updated = 0;
   let removed = 0;
-  let logsChanged = false;
+  let ordersChanged = false;
   let completedRange = false;
   let queryParam = 'created_at_min';
   const syncedOrderIds = new Set();
   const knownOrders = new Map();
-  state.logs.forEach(log => {
+  (state.orders || []).forEach(log => {
     if (log.store_id !== store.id || !hasOrderInfo(log.order_info)) return;
     const order = safeJsonParse(log.order_info, null);
     if (order?.order_id) knownOrders.set(String(order.order_id), log);
@@ -1564,73 +1587,65 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
       total++;
       const orderClientIp = sapoOrderClientIp(order);
       const existing = knownOrders.get(orderKey);
-      const candidateVisit = findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
+      const candidateVisit = existing ? null : findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
       const trackedVisit = existing || candidateVisit;
-
-      if (trackedVisit) {
-        const before = JSON.stringify(trackedVisit);
-        applySyncedOrder(trackedVisit, orderInfo, createdAt);
-        trackedVisit.store_id = store.id;
-        trackedVisit.store_domain = store.mysapo_domain;
-        const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : trackedVisit.client_ip;
-        if (candidateVisit) {
-          if (isKnownIp(candidateVisit.webrtc_ip)) {
-            trackedVisit.webrtc_ip = candidateVisit.webrtc_ip;
-          }
-          if (candidateVisit.webrtc_status && candidateVisit.webrtc_status !== 'pending') {
-            trackedVisit.webrtc_status = candidateVisit.webrtc_status;
-          }
-          if (candidateVisit.session_start_at) {
-            trackedVisit.session_start_at = candidateVisit.session_start_at;
-            trackedVisit.session_duration_sec = sessionDurationToOrder(candidateVisit.session_start_at, createdAt);
-          }
-        }
-        trackedVisit.client_ip = effectiveClientIp;
-        const lastCheckedMs = new Date(trackedVisit.ip_intelligence_checked_at || 0).getTime();
-        const shouldAnalyze = !Number.isFinite(lastCheckedMs) || Date.now() - lastCheckedMs > IP_INTELLIGENCE_CACHE_TTL_MS || trackedVisit.ip_intelligence_version !== IP_INTELLIGENCE_VERSION || !existing;
-        if (shouldAnalyze && ((Date.now() - syncStartTime) < 9500 || ipCache.has(effectiveClientIp))) {
-          await applyIpAnalysis(trackedVisit, effectiveClientIp, trackedVisit.webrtc_ip, [], ipCache, state.logs);
-        }
-        if (JSON.stringify(trackedVisit) !== before) {
-          logsChanged = true;
+      const before = existing ? JSON.stringify(existing) : '';
+      const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : (trackedVisit?.client_ip || 'unknown');
+      const orderLog = existing || {
+        id: `sapo:${store.id}:${orderKey}`,
+        store_id: store.id,
+        store_domain: store.mysapo_domain,
+        client_ip: effectiveClientIp,
+        webrtc_ip: isKnownIp(candidateVisit?.webrtc_ip) ? candidateVisit.webrtc_ip : null,
+        webrtc_status: candidateVisit?.webrtc_status || 'not_available',
+        user_agent: candidateVisit?.user_agent || 'Sapo API Sync',
+        fingerprint: candidateVisit?.fingerprint || 'FP-SAPO-SYNCED',
+        country: candidateVisit?.country || 'Unknown',
+        country_code: candidateVisit?.country_code || 'XX',
+        city: candidateVisit?.city || 'Unknown',
+        isp: candidateVisit?.isp || 'Unknown',
+        org: candidateVisit?.org || 'Unknown',
+        asn: candidateVisit?.asn || null,
+        is_vpn: Boolean(candidateVisit?.is_vpn),
+        is_datacenter: Boolean(candidateVisit?.is_datacenter),
+        is_proxy: Boolean(candidateVisit?.is_proxy),
+        is_tor: Boolean(candidateVisit?.is_tor),
+        is_abuser: Boolean(candidateVisit?.is_abuser),
+        webrtc_mismatch: Boolean(candidateVisit?.webrtc_mismatch),
+        risk_level: candidateVisit?.risk_level || 'UNKNOWN',
+        risk_reasons: candidateVisit?.risk_reasons || '["IP analysis pending"]',
+        trigger_event: 'sapo_sync',
+        session_id: candidateVisit?.session_id || null,
+        session_start_at: candidateVisit?.session_start_at || null,
+        session_duration_sec: null,
+        created_at: new Date(createdAt).toISOString()
+      };
+      applySyncedOrder(orderLog, orderInfo, createdAt);
+      orderLog.store_id = store.id;
+      orderLog.store_domain = store.mysapo_domain;
+      orderLog.client_ip = effectiveClientIp;
+      if (candidateVisit && isKnownIp(candidateVisit.webrtc_ip)) orderLog.webrtc_ip = candidateVisit.webrtc_ip;
+      if (candidateVisit?.webrtc_status && candidateVisit.webrtc_status !== 'pending') orderLog.webrtc_status = candidateVisit.webrtc_status;
+      if (candidateVisit?.session_start_at) {
+        orderLog.session_start_at = candidateVisit.session_start_at;
+        orderLog.session_duration_sec = sessionDurationToOrder(candidateVisit.session_start_at, createdAt);
+      }
+      const lastCheckedMs = new Date(orderLog.ip_intelligence_checked_at || 0).getTime();
+      const shouldAnalyze = !Number.isFinite(lastCheckedMs) || Date.now() - lastCheckedMs > IP_INTELLIGENCE_CACHE_TTL_MS || orderLog.ip_intelligence_version !== IP_INTELLIGENCE_VERSION || !existing;
+      if (shouldAnalyze && ((Date.now() - syncStartTime) < 9500 || ipCache.has(effectiveClientIp))) {
+        await applyIpAnalysis(orderLog, effectiveClientIp, orderLog.webrtc_ip, [], ipCache, allLogs(state));
+      }
+      if (existing) {
+        if (JSON.stringify(orderLog) !== before) {
+          ordersChanged = true;
           updated++;
         }
-        knownOrders.set(orderKey, trackedVisit);
       } else {
-        const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : 'unknown';
-        const newLog = {
-          id: getNextId(state),
-          store_id: store.id,
-          store_domain: store.mysapo_domain,
-          client_ip: effectiveClientIp,
-          webrtc_ip: null,
-          user_agent: 'Sapo API Sync',
-          fingerprint: 'FP-SAPO-SYNCED',
-          order_info: JSON.stringify(orderInfo),
-          country: 'Viet Nam',
-          country_code: 'VN',
-          city: 'Unknown',
-          isp: 'Unknown',
-          org: 'Unknown',
-          is_vpn: false,
-          is_datacenter: false,
-          webrtc_mismatch: false,
-          risk_level: 'UNKNOWN',
-          risk_reasons: '["IP analysis pending"]',
-          trigger_event: 'sapo_sync',
-          session_id: null,
-          session_start_at: null,
-          session_duration_sec: null,
-          created_at: new Date(createdAt).toISOString()
-        };
-        if ((Date.now() - syncStartTime) < 9500 || ipCache.has(effectiveClientIp)) {
-          await applyIpAnalysis(newLog, effectiveClientIp, null, [], ipCache, state.logs);
-        }
-        state.logs.unshift(newLog);
-        knownOrders.set(orderKey, newLog);
-        logsChanged = true;
+        state.orders.unshift(orderLog);
         synced++;
+        ordersChanged = true;
       }
+      knownOrders.set(orderKey, orderLog);
     }
     // Sapo occasionally ignores created_at_min. Orders are newest first, so do
     // not fetch another page once the response has crossed the selected range.
@@ -1643,20 +1658,20 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
   // A delta response cannot prove an order was deleted. Only a complete full-day
   // reconciliation may remove dashboard orders that no longer exist in Sapo.
   if (syncWindow.mode === 'full' && datePreset === 'TODAY' && completedRange) {
-    state.logs = state.logs.filter(log => {
+    state.orders = state.orders.filter(log => {
       if (log.store_id !== store.id || !hasOrderInfo(log.order_info) || !isSapoOrderInDatePreset(log.created_at, datePreset)) return true;
       const orderInfo = safeJsonParse(log.order_info, null);
       if (!orderInfo?.order_id || syncedOrderIds.has(String(orderInfo.order_id))) return true;
       removed++;
       return false;
     });
-    if (removed > 0) logsChanged = true;
+    if (removed > 0) ordersChanged = true;
   }
 
-  // Deduplicate orders by order_id per store.
+  // Deduplicate the canonical Sapo snapshot by order_id per store.
   const seenOrders = new Set();
-  const logsBeforeDeduplication = state.logs.length;
-  state.logs = state.logs.filter(log => {
+  const ordersBeforeDeduplication = state.orders.length;
+  state.orders = state.orders.filter(log => {
     if (hasOrderInfo(log.order_info)) {
       const ordInfo = safeJsonParse(log.order_info, null);
       if (ordInfo && ordInfo.order_id) {
@@ -1668,10 +1683,10 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
     }
     return true;
   });
-  if (state.logs.length !== logsBeforeDeduplication) logsChanged = true;
+  if (state.orders.length !== ordersBeforeDeduplication) ordersChanged = true;
 
-  // Fast backfill pass for missing WebRTC / session_duration
-  for (const log of state.logs) {
+  // Backfill canonical orders from recent tracker visits without mutating those visits.
+  for (const log of state.orders) {
     if (log.store_id === store.id && hasOrderInfo(log.order_info)) {
       const originalWebRtcIp = log.webrtc_ip;
       const originalWebRtcMismatch = log.webrtc_mismatch;
@@ -1694,12 +1709,12 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
         log.session_duration_sec = sessionDurationToOrder(log.session_start_at, log.created_at);
       }
       if (log.webrtc_ip !== originalWebRtcIp || log.webrtc_mismatch !== originalWebRtcMismatch || log.session_start_at !== originalSessionStart || log.session_duration_sec !== originalSessionDuration) {
-        logsChanged = true;
+        ordersChanged = true;
       }
     }
   }
 
-  if (logsChanged) await saveLogsState(state);
+  if (ordersChanged) await saveOrdersState(state);
   const syncStatus = recordSyncRun(state, {
     store_id: store.id,
     status: 'success',
@@ -1836,9 +1851,10 @@ async function handleLogs(event, state, method, parts, query, body) {
   if (method === 'GET' && parts.length === 0) {
     const page = Math.max(1, Number(query.page || 1));
     const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
-    const filtered = filterLogs(state.logs, query);
-    const orderTotal = filterLogs(state.logs, { ...query, orders_only: 'true' }, { sort: false }).length;
-    const allTotal = filterLogs(state.logs, { ...query, orders_only: 'false' }, { sort: false }).length;
+    const records = allLogs(state);
+    const filtered = filterLogs(records, query);
+    const orderTotal = filterLogs(records, { ...query, orders_only: 'true' }, { sort: false }).length;
+    const allTotal = filterLogs(records, { ...query, orders_only: 'false' }, { sort: false }).length;
     const rows = filtered.slice((page - 1) * limit, page * limit).map(row => decorateLog(row, state));
     return json(200, {
       success: true,
@@ -1854,11 +1870,18 @@ async function handleLogs(event, state, method, parts, query, body) {
     });
   }
   if (method === 'DELETE' && parts[0]) {
-    const id = Number(parts[0]);
-    const before = state.logs.length;
-    state.logs = state.logs.filter(row => row.id !== id);
-    await saveLogsState(state);
-    return before === state.logs.length ? json(404, { success: false, message: 'Log not found' }) : json(200, { success: true, message: 'Log deleted' });
+    const id = String(parts[0]);
+    const beforeTrackerLogs = state.logs.length;
+    const beforeOrders = state.orders.length;
+    state.logs = state.logs.filter(row => String(row.id) !== id);
+    state.orders = state.orders.filter(row => String(row.id) !== id);
+    const trackerChanged = state.logs.length !== beforeTrackerLogs;
+    const ordersChanged = state.orders.length !== beforeOrders;
+    if (trackerChanged) await saveLogsState(state);
+    if (ordersChanged) await saveOrdersState(state);
+    return !trackerChanged && !ordersChanged
+      ? json(404, { success: false, message: 'Log not found' })
+      : json(200, { success: true, message: 'Log deleted' });
   }
   return json(404, { success: false, message: 'Not found' });
 }
@@ -1906,7 +1929,8 @@ async function handleBlacklist(event, state, method, parts, query, body) {
 function handleStats(event, state, method, parts, query) {
   if (!assertAdmin(event)) return unauthorized();
   const storeId = query.store_id && query.store_id !== 'ALL' ? Number(query.store_id) : null;
-  let logs = storeId ? state.logs.filter(log => log.store_id === storeId) : [...state.logs];
+  const records = allLogs(state);
+  let logs = storeId ? records.filter(log => log.store_id === storeId) : records;
   if (method === 'GET' && parts[0] === 'overview') {
     const totalLogs = logs.length;
     const highRiskCount = logs.filter(log => effectiveRiskLevel(log) === 'HIGH_RISK').length;
