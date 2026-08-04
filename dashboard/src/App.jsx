@@ -219,6 +219,7 @@ export default function App() {
     try {
       let totalSyncedNew = 0;
       let totalOrdersCount = 0;
+      let totalRemovedOrders = 0;
       let syncStillRunning = false;
       const errors = [];
 
@@ -235,6 +236,7 @@ export default function App() {
           }
           totalSyncedNew += result.value.res.synced_new || 0;
           totalOrdersCount += result.value.res.total_orders || 0;
+          totalRemovedOrders += result.value.res.removed_orders || 0;
           if (result.value.res.sync_status) syncStatuses.set(String(result.value.store.id), result.value.res.sync_status);
         } else {
           const st = result.status === 'fulfilled' ? result.value.store : null;
@@ -263,15 +265,16 @@ export default function App() {
         } else {
           const newText = totalSyncedNew > 0 ? `, có ${totalSyncedNew} đơn mới` : '';
           const knownOrders = Math.max(0, totalOrdersCount - totalSyncedNew);
+          const removedText = totalRemovedOrders > 0 ? `, đã xóa ${totalRemovedOrders} đơn không còn trên Sapo` : '';
           const storeLabel = targetStores.length === 1 ? targetStores[0].store_name : 'Tất cả cửa hàng';
           const periodLabel = preset === 'TODAY' ? `hôm nay (${todayISO})` : (preset === '7_DAYS' ? 'trong 7 ngày qua' : 'trong 30 ngày qua');
           const message = totalOrdersCount === 0
-            ? `${storeLabel}: không có đơn Sapo ${periodLabel}.`
-            : `${storeLabel}: đã đối soát ${totalOrdersCount} đơn ${periodLabel}${newText}${knownOrders > 0 ? `, ${knownOrders} đơn đã có trong danh sách` : ''}.`;
+            ? `${storeLabel}: không có đơn Sapo ${periodLabel}${removedText}.`
+            : `${storeLabel}: đã đối soát ${totalOrdersCount} đơn ${periodLabel}${newText}${knownOrders > 0 ? `, ${knownOrders} đơn đã có trong danh sách` : ''}${removedText}.`;
           setNotice({ type: 'success', message });
         }
       }
-      return { success: errors.length === 0, totalSyncedNew, totalOrdersCount, syncing: syncStillRunning, stale: !isStillSelected };
+      return { success: errors.length === 0, totalSyncedNew, totalOrdersCount, totalRemovedOrders, syncing: syncStillRunning, stale: !isStillSelected };
     } finally {
       syncInFlightRef.current = false;
       setIsSyncing(false);

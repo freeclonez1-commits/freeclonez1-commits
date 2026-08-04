@@ -4,8 +4,9 @@ export default function Header({ stores, selectedStoreId, onSelectStore, onSyncO
   const activeStore = selectedStoreId !== 'ALL' ? stores.find(store => String(store.id) === String(selectedStoreId)) : null;
   const syncStatus = activeStore?.sync_status || null;
   const knownOrders = Math.max(0, Number(syncStatus?.total_orders || 0) - Number(syncStatus?.synced_new || 0));
+  const removedOrders = Number(syncStatus?.removed_orders || 0);
   const syncLabel = syncStatus?.finished_at
-    ? `Đối soát ${new Date(syncStatus.finished_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}: ${syncStatus.total_orders || 0} Sapo · ${syncStatus.synced_new || 0} ghi mới · ${knownOrders} đã có`
+    ? `Đối soát ${new Date(syncStatus.finished_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}: ${syncStatus.total_orders || 0} Sapo · ${syncStatus.synced_new || 0} ghi mới · ${knownOrders} đã có${removedOrders > 0 ? ` · ${removedOrders} đã xóa` : ''}`
     : 'Chưa có lịch sử quét';
 
   return (

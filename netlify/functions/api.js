@@ -773,6 +773,7 @@ function recordSyncRun(state, run) {
     total_orders: Number(run.total_orders || 0),
     synced_new: Number(run.synced_new || 0),
     updated_orders: Number(run.updated_orders || 0),
+    removed_orders: Number(run.removed_orders || 0),
     message: run.message || null,
     since: run.since || null,
     last_full_at: run.mode === 'full' ? (run.finished_at || new Date().toISOString()) : (previous.last_full_at || null)
@@ -1499,8 +1500,11 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
   let total = 0;
   let synced = 0;
   let updated = 0;
+  let removed = 0;
   let logsChanged = false;
+  let completedRange = false;
   let queryParam = 'created_at_min';
+  const syncedOrderIds = new Set();
   const knownOrders = new Map();
   state.logs.forEach(log => {
     if (log.store_id !== store.id || !hasOrderInfo(log.order_info)) return;
@@ -1514,13 +1518,13 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
     if (Date.now() - syncStartTime > 13500) break;
 
     const minParam = since ? `&${queryParam}=${encodeURIComponent(since)}` : '';
-    let path = `/admin/orders.json?limit=${pageLimit}&page=${page}${minParam}`;
+    let path = `/admin/orders.json?status=any&limit=${pageLimit}&page=${page}${minParam}`;
     let { res, data } = await sapoFetchJson(store, secret, path);
 
     if (page === 1 && (!res.ok || !data?.orders?.length)) {
       const altParam = queryParam === 'created_at_min' ? 'created_on_min' : 'created_at_min';
       const altMinParam = since ? `&${altParam}=${encodeURIComponent(since)}` : '';
-      const altPath = `/admin/orders.json?limit=${pageLimit}&page=1${altMinParam}`;
+      const altPath = `/admin/orders.json?status=any&limit=${pageLimit}&page=1${altMinParam}`;
       const altResult = await sapoFetchJson(store, secret, altPath);
       if (altResult.res.ok && altResult.data?.orders?.length) {
         res = altResult.res;
@@ -1536,7 +1540,10 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
       break;
     }
     const orders = data?.orders || [];
-    if (!orders.length) break;
+    if (!orders.length) {
+      completedRange = true;
+      break;
+    }
     let reachedOlderOrder = false;
 
     for (const order of orders) {
@@ -1548,9 +1555,12 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
       }
       const orderInfo = parseSapoOrder(order);
       if (!orderInfo.order_id) continue;
+      const orderKey = String(orderInfo.order_id);
+      if (syncedOrderIds.has(orderKey)) continue;
+      syncedOrderIds.add(orderKey);
       total++;
       const orderClientIp = sapoOrderClientIp(order);
-      const existing = knownOrders.get(String(orderInfo.order_id));
+      const existing = knownOrders.get(orderKey);
       const candidateVisit = findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
       const trackedVisit = existing || candidateVisit;
 
@@ -1582,7 +1592,7 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
           logsChanged = true;
           updated++;
         }
-        knownOrders.set(String(orderInfo.order_id), trackedVisit);
+        knownOrders.set(orderKey, trackedVisit);
       } else {
         const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : 'unknown';
         const newLog = {
@@ -1614,14 +1624,30 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
           await applyIpAnalysis(newLog, effectiveClientIp, null, [], ipCache, state.logs);
         }
         state.logs.unshift(newLog);
-        knownOrders.set(String(orderInfo.order_id), newLog);
+        knownOrders.set(orderKey, newLog);
         logsChanged = true;
         synced++;
       }
     }
     // Sapo occasionally ignores created_at_min. Orders are newest first, so do
     // not fetch another page once the response has crossed the selected range.
-    if (reachedOlderOrder || orders.length < pageLimit) break;
+    if (reachedOlderOrder || orders.length < pageLimit) {
+      completedRange = true;
+      break;
+    }
+  }
+
+  // A delta response cannot prove an order was deleted. Only a complete full-day
+  // reconciliation may remove dashboard orders that no longer exist in Sapo.
+  if (syncWindow.mode === 'full' && datePreset === 'TODAY' && completedRange) {
+    state.logs = state.logs.filter(log => {
+      if (log.store_id !== store.id || !hasOrderInfo(log.order_info) || !isSapoOrderInDatePreset(log.created_at, datePreset)) return true;
+      const orderInfo = safeJsonParse(log.order_info, null);
+      if (!orderInfo?.order_id || syncedOrderIds.has(String(orderInfo.order_id))) return true;
+      removed++;
+      return false;
+    });
+    if (removed > 0) logsChanged = true;
   }
 
   // Deduplicate orders by order_id per store.
@@ -1680,10 +1706,11 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
     total_orders: total,
     synced_new: synced,
     updated_orders: updated,
+    removed_orders: removed,
     since
   });
   await saveSyncState(state);
-  return { success: true, total_orders: total, synced_new: synced, updated_orders: updated, sync_status: syncStatus };
+  return { success: true, total_orders: total, synced_new: synced, updated_orders: updated, removed_orders: removed, sync_status: syncStatus };
 }
 
 async function handleLogs(event, state, method, parts, query, body) {
