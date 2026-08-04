@@ -53,8 +53,8 @@ export const getChartStats = async (params = {}) => {
   return res.data;
 };
 
-export const getLogs = async (params = {}) => {
-  const res = await axios.get(`${API_BASE}/logs`, { ...adminConfig(), params });
+export const getLogs = async (params = {}, options = {}) => {
+  const res = await axios.get(`${API_BASE}/logs`, { ...adminConfig(), params, signal: options.signal });
   return res.data;
 };
 

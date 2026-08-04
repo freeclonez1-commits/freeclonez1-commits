@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Search, AlertTriangle, ShieldCheck, ShieldAlert, Ban, Eye, X, Globe, Calendar, ShoppingCart, Wifi, Clock, CheckCircle2, Unlock, Monitor, Smartphone, Tablet, MousePointer2, CircleOff, ChevronLeft, ChevronRight } from 'lucide-react';
 import { businessDate, businessDateDaysAgo } from '../utils/dates';
 
 export default function LogsTable({ logs, isLoading = false, error = '', onRetry, pagination, filters, setFilters, onAddToBlacklist, onRemoveFromBlacklist, onDeleteLog, onDatePresetChange }) {
   const [selectedLog, setSelectedLog] = useState(null);
+  const [searchInput, setSearchInput] = useState(filters.search || '');
   const ordersOnlyFilter = filters.orders_only !== false;
   const isKnownIp = (ip) => {
     const value = String(ip || '').trim().toLowerCase();
@@ -22,9 +23,18 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
   const is30Days = filters.startDate === businessDateDaysAgo(29) && filters.endDate === todayStr;
   const isAll = !filters.startDate && !filters.endDate;
 
-  const handleSearchChange = (e) => {
-    setFilters(prev => ({ ...prev, search: e.target.value, page: 1 }));
-  };
+  useEffect(() => {
+    setSearchInput(filters.search || '');
+  }, [filters.search]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (searchInput !== filters.search) {
+        setFilters(prev => ({ ...prev, search: searchInput, page: 1 }));
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchInput, filters.search, setFilters]);
 
   const handleRiskFilter = (risk) => {
     setFilters(prev => ({ ...prev, risk_level: risk, page: 1 }));
@@ -35,16 +45,19 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
   };
 
   const handleDatePreset = (preset) => {
+    let nextFilters;
     if (preset === 'ALL') {
-      setFilters(prev => ({ ...prev, startDate: '', endDate: '', page: 1, limit: 100 }));
+      nextFilters = { ...filters, startDate: '', endDate: '', page: 1, limit: 100 };
     } else if (preset === 'TODAY') {
-      setFilters(prev => ({ ...prev, startDate: todayStr, endDate: todayStr, page: 1, limit: 20 }));
+      nextFilters = { ...filters, startDate: todayStr, endDate: todayStr, page: 1, limit: 20 };
     } else if (preset === '7_DAYS') {
-      setFilters(prev => ({ ...prev, startDate: businessDateDaysAgo(6), endDate: todayStr, page: 1, limit: 50 }));
+      nextFilters = { ...filters, startDate: businessDateDaysAgo(6), endDate: todayStr, page: 1, limit: 50 };
     } else if (preset === '30_DAYS') {
-      setFilters(prev => ({ ...prev, startDate: businessDateDaysAgo(29), endDate: todayStr, page: 1, limit: 50 }));
+      nextFilters = { ...filters, startDate: businessDateDaysAgo(29), endDate: todayStr, page: 1, limit: 50 };
     }
-    if (preset !== 'ALL') onDatePresetChange?.(preset);
+    if (!nextFilters) return;
+    if (onDatePresetChange) onDatePresetChange(preset, nextFilters);
+    else setFilters(nextFilters);
   };
 
   const handleBlockIp = async (log) => {
@@ -172,9 +185,9 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
     }
     if (log.webrtc_ip && log.webrtc_ip === log.client_ip) {
       return (
-        <span className="font-mono font-bold px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-[#1D1D1F] bg-[#F2F2F7] border-[#E5E5EA]">
+        <span title="VPN/trinh duyet khong lam lo IP goc qua WebRTC" className="font-mono font-bold px-2.5 py-0.5 rounded-md flex items-center gap-1 border break-all text-[#1D1D1F] bg-[#F2F2F7] border-[#E5E5EA]">
           {full ? log.webrtc_ip : compactIp(log.webrtc_ip)}
-          <span className="font-sans text-[10px] text-[#86868B] font-medium">(trung IP ket noi)</span>
+          <span className="font-sans text-[10px] text-[#86868B] font-medium">(trung IP ket noi, khong lo IP goc)</span>
         </span>
       );
     }
@@ -204,8 +217,8 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
             <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-[#86868B]" />
             <input
               type="text"
-              value={filters.search}
-              onChange={handleSearchChange}
+              value={searchInput}
+              onChange={(event) => setSearchInput(event.target.value)}
               placeholder="Tìm theo IP, Tên, Mã đơn, Phone..."
               className="w-full pl-10 pr-4 py-2.5 bg-[#F2F2F7] rounded-full text-xs font-medium text-[#1D1D1F] placeholder-[#86868B] border border-transparent focus:border-[#0071E3] focus:bg-white focus:outline-none transition-all"
             />

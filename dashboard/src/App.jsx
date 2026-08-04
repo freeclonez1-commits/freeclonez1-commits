@@ -36,7 +36,10 @@ export default function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const refreshInFlightRef = useRef(false);
-  const logsRefreshInFlightRef = useRef(false);
+  const logsAbortControllerRef = useRef(null);
+  const logsRequestIdRef = useRef(0);
+  const hasLoadedLogsRef = useRef(false);
+  const skipNextLogsRefreshRef = useRef(false);
   const syncInFlightRef = useRef(false);
   const [adminKey, setAdminKey] = useState(() => sessionStorage.getItem('sapo_dashboard_password_v2') || '');
   const [notice, setNotice] = useState(null);
@@ -48,8 +51,10 @@ export default function App() {
   const [selectedStoreId, setSelectedStoreId] = useState(() => {
     return localStorage.getItem('sapo_selected_store_id') || 'ALL';
   });
+  const selectedStoreIdRef = useRef(selectedStoreId);
 
   const handleSelectStore = (id) => {
+    selectedStoreIdRef.current = id;
     setSelectedStoreId(id);
     localStorage.setItem('sapo_selected_store_id', id);
   };
@@ -153,19 +158,27 @@ export default function App() {
     }
   }, [adminKey, selectedStoreId]);
 
-  const refreshLogsOnly = useCallback(async (overrideFilters = null) => {
-    if (!adminKey || logsRefreshInFlightRef.current) return;
-    logsRefreshInFlightRef.current = true;
-    setIsLogsLoading(true);
+  const refreshLogsOnly = useCallback(async (overrideFilters = null, options = {}) => {
+    if (!adminKey) return;
+    const requestId = logsRequestIdRef.current + 1;
+    logsRequestIdRef.current = requestId;
+    logsAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    logsAbortControllerRef.current = controller;
+    const shouldShowLoading = !options.background && !hasLoadedLogsRef.current;
+    if (shouldShowLoading) setIsLogsLoading(true);
     setLogsError('');
     try {
       const activeFilters = overrideFilters || filters;
-      const logsResult = await getLogs(buildQueryFilters(activeFilters));
+      const logsResult = await getLogs(buildQueryFilters(activeFilters), { signal: controller.signal });
+      if (requestId !== logsRequestIdRef.current) return;
       if (logsResult.success) {
         setLogs(logsResult.data);
         setPagination(logsResult.pagination);
+        hasLoadedLogsRef.current = true;
       }
     } catch (err) {
+      if (err.code === 'ERR_CANCELED' || requestId !== logsRequestIdRef.current) return;
       if (err.response?.status === 401) {
         sessionStorage.removeItem('sapo_dashboard_password_v2');
         setAdminKey('');
@@ -174,8 +187,7 @@ export default function App() {
         setLogsError(err.response?.data?.message || 'Không thể tải dữ liệu đơn hàng.');
       }
     } finally {
-      logsRefreshInFlightRef.current = false;
-      setIsLogsLoading(false);
+      if (requestId === logsRequestIdRef.current && shouldShowLoading) setIsLogsLoading(false);
     }
   }, [adminKey, filters, buildQueryFilters]);
 
@@ -195,6 +207,7 @@ export default function App() {
 
   const runOrderSync = useCallback(async (preset = 'TODAY', options = {}) => {
     if (!adminKey || syncInFlightRef.current || preset === 'ALL') return { success: false, skipped: true };
+    const syncStoreId = selectedStoreId;
     const targetStores = selectedStoreId !== 'ALL'
       ? stores.filter(s => String(s.id) === String(selectedStoreId))
       : stores;
@@ -224,28 +237,40 @@ export default function App() {
         }
       });
 
-      await refreshLogsOnly();
+      const isStillSelected = String(selectedStoreIdRef.current) === String(syncStoreId);
+      if (options.refresh !== false && isStillSelected) {
+        await refreshLogsOnly(null, { background: options.backgroundRefresh === true });
+      }
 
-      if (!options.quiet) {
+      if (!options.quiet && isStillSelected) {
         if (errors.length > 0) {
           setNotice({ type: 'error', message: `Lỗi đồng bộ: ${errors.join(' | ')}` });
         } else {
           const newText = totalSyncedNew > 0 ? `, có ${totalSyncedNew} đơn mới` : '';
-          setNotice({ type: 'success', message: `Đã quét ${totalOrdersCount} đơn Sapo${newText}.` });
+          const storeLabel = targetStores.length === 1 ? targetStores[0].store_name : 'Tất cả cửa hàng';
+          const periodLabel = preset === 'TODAY' ? `hôm nay (${todayISO})` : (preset === '7_DAYS' ? 'trong 7 ngày qua' : 'trong 30 ngày qua');
+          const message = totalOrdersCount === 0
+            ? `${storeLabel}: không có đơn Sapo ${periodLabel}.`
+            : `${storeLabel}: đã quét ${totalOrdersCount} đơn ${periodLabel}${newText}.`;
+          setNotice({ type: 'success', message });
         }
       }
-      return { success: errors.length === 0, totalSyncedNew, totalOrdersCount };
+      return { success: errors.length === 0, totalSyncedNew, totalOrdersCount, stale: !isStillSelected };
     } finally {
       syncInFlightRef.current = false;
       setIsSyncing(false);
     }
-  }, [adminKey, selectedStoreId, stores, refreshLogsOnly]);
+  }, [adminKey, selectedStoreId, stores, refreshLogsOnly, todayISO]);
 
   useEffect(() => {
     fetchStores();
   }, [fetchStores]);
 
   useEffect(() => {
+    if (skipNextLogsRefreshRef.current) {
+      skipNextLogsRefreshRef.current = false;
+      return;
+    }
     refreshLogsOnly();
   }, [refreshLogsOnly]);
 
@@ -254,19 +279,22 @@ export default function App() {
     if (activeTab === 'blacklist') refreshBlacklist();
   }, [activeTab, fetchData, refreshBlacklist]);
 
-  // Refresh the visible table frequently, but keep heavy stats/stores calls out of this loop.
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (activeTab === 'logs') refreshLogsOnly();
-    }, 8000);
-    return () => clearInterval(interval);
-  }, [activeTab, refreshLogsOnly]);
-
-  // Background Sapo sync: new orders appear without F5 or manual sync.
+  // Refresh silently so the visible table does not flicker while data is unchanged.
   useEffect(() => {
     const interval = setInterval(() => {
       if (activeTab === 'logs' && document.visibilityState === 'visible') {
-        runOrderSync(syncPresetFromFilters(filters), { quiet: true });
+        refreshLogsOnly(null, { background: true });
+      }
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [activeTab, refreshLogsOnly]);
+
+  // Only Today needs live Sapo sync. Historical ranges are refreshed on demand.
+  useEffect(() => {
+    if (syncPresetFromFilters(filters) !== 'TODAY') return undefined;
+    const interval = setInterval(() => {
+      if (activeTab === 'logs' && document.visibilityState === 'visible') {
+        runOrderSync('TODAY', { quiet: true, backgroundRefresh: true });
       }
     }, 30000);
     return () => clearInterval(interval);
@@ -284,16 +312,14 @@ export default function App() {
     }
   };
 
-  const handleDatePresetSync = useCallback((preset) => {
-    const presetFilters = {
-      ...filters,
-      page: 1,
-      limit: preset === 'TODAY' ? 20 : 50,
-      startDate: preset === 'TODAY' ? todayISO : (preset === '7_DAYS' ? businessDateDaysAgo(6) : businessDateDaysAgo(29)),
-      endDate: todayISO
-    };
-    runOrderSync(preset, { quiet: true }).then(() => refreshLogsOnly(presetFilters));
-  }, [filters, todayISO, runOrderSync, refreshLogsOnly]);
+  const handleDatePresetSync = useCallback(async (preset, presetFilters) => {
+    skipNextLogsRefreshRef.current = true;
+    setFilters(presetFilters);
+    if (preset !== 'ALL') {
+      await runOrderSync(preset, { quiet: true, refresh: false });
+    }
+    await refreshLogsOnly(presetFilters);
+  }, [runOrderSync, refreshLogsOnly]);
 
   const handleTestStoreConnection = async (id) => {
     try {

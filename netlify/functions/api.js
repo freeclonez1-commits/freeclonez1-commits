@@ -1030,7 +1030,7 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
   };
 }
 
-function filterLogs(logs, query) {
+function filterLogs(logs, query, { sort = true } = {}) {
   let rows = [...logs];
   if (query.store_id && query.store_id !== 'ALL') {
     const storeId = Number(query.store_id);
@@ -1058,7 +1058,7 @@ function filterLogs(logs, query) {
   const endBounds = businessDayBounds(query.endDate);
   if (startBounds) rows = rows.filter(row => row.created_at && row.created_at >= startBounds.start);
   if (endBounds) rows = rows.filter(row => row.created_at && row.created_at <= endBounds.end);
-  return rows.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+  return sort ? rows.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)) : rows;
 }
 
 function formatDuration(seconds) {
@@ -1509,18 +1509,12 @@ async function syncSapoOrders(state, store, datePreset) {
     if (reachedOlderOrder || orders.length < pageLimit) break;
   }
 
-  // Deduplicate orders by order_id per store
+  // Deduplicate orders by order_id per store.
   const seenOrders = new Set();
   state.logs = state.logs.filter(log => {
     if (hasOrderInfo(log.order_info)) {
       const ordInfo = safeJsonParse(log.order_info, null);
       if (ordInfo && ordInfo.order_id) {
-        const key = ordInfo.order_id.replace('#', '');
-        // #18940, #18941, #18942 belong exclusively to Store 2 (Vua Đồ Hiệu)
-        if (['18940', '18941', '18942'].includes(key)) {
-          log.store_id = 2;
-          log.store_domain = 'vua-do-hieu.mysapo.net';
-        }
         const dupKey = ordInfo.order_id + '_' + log.store_id;
         if (seenOrders.has(dupKey)) return false;
         seenOrders.add(dupKey);
@@ -1677,8 +1671,8 @@ async function handleLogs(event, state, method, parts, query, body) {
     const page = Math.max(1, Number(query.page || 1));
     const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
     const filtered = filterLogs(state.logs, query);
-    const orderTotal = filterLogs(state.logs, { ...query, orders_only: 'true' }).length;
-    const allTotal = filterLogs(state.logs, { ...query, orders_only: 'false' }).length;
+    const orderTotal = filterLogs(state.logs, { ...query, orders_only: 'true' }, { sort: false }).length;
+    const allTotal = filterLogs(state.logs, { ...query, orders_only: 'false' }, { sort: false }).length;
     const rows = filtered.slice((page - 1) * limit, page * limit).map(row => decorateLog(row, state));
     return json(200, {
       success: true,
