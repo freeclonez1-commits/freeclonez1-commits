@@ -181,9 +181,9 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
     const labels = {
       pending: 'Dang kiem tra WebRTC',
       unsupported: 'Trinh duyet khong ho tro WebRTC',
-      private_only: 'WebRTC khong lo IP cong khai',
+      private_only: 'WebRTC chi tra IP noi bo',
       hidden: 'WebRTC dang bi an',
-      not_available: 'Khong phat hien IP WebRTC',
+      not_available: full ? 'WebRTC khong kha dung (VPN/trinh duyet chan)' : 'WebRTC khong kha dung',
       error: 'Khong the kiem tra WebRTC'
     };
     const status = log.webrtc_status || 'not_available';

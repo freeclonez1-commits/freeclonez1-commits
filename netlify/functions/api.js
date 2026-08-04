@@ -55,6 +55,7 @@ const TRACKER_SOURCE = `/**
   var lastNetworkIdentitySignature = '';
   var forceNetworkIdentityPush = false;
   var NETWORK_CHECK_INTERVAL_MS = 15000;
+  var WEBRTC_DISCOVERY_TIMEOUT_MS = 5000;
 
   function getSessionMeta() {
     var sessionId = sessionStorage.getItem('sapo_session_id');
@@ -159,8 +160,22 @@ const TRACKER_SOURCE = `/**
         complete(value || null, status);
       };
       var isUsablePublicIp = function (ip) {
-        if (!ip || ip === '0.0.0.0' || ip === '127.0.0.1') return false;
-        var p = ip.split('.').map(function (n) { return parseInt(n, 10); });
+        var value = String(ip || '').trim().replace(/^\\[|\\]$/g, '').split('%')[0].toLowerCase();
+        if (!value || value === '0.0.0.0' || value === '127.0.0.1') return false;
+
+        // WebRTC can expose a global IPv6 server-reflexive address. The older
+        // IPv4-only parser silently discarded it, leaving valid checks empty.
+        if (value.indexOf(':') >= 0) {
+          if (!/^[0-9a-f:.]+$/.test(value)) return false;
+          if (value.indexOf('::ffff:') === 0) return isUsablePublicIp(value.slice(7));
+          if (value === '::' || value === '::1' || /^fe[89ab]/.test(value) || /^f[cd]/.test(value) || /^ff/.test(value)) {
+            privateCandidateSeen = true;
+            return false;
+          }
+          return (value.match(/:/g) || []).length >= 2;
+        }
+
+        var p = value.split('.').map(function (n) { return parseInt(n, 10); });
         if (p.length !== 4 || p.some(function (n) { return !Number.isFinite(n) || n < 0 || n > 255; })) return false;
         if (p[0] === 10 || p[0] === 127 || p[0] === 0) { privateCandidateSeen = true; return false; }
         if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) { privateCandidateSeen = true; return false; }
@@ -201,7 +216,7 @@ const TRACKER_SOURCE = `/**
       }).then(function () {
         setTimeout(function () { inspectCandidate(pc.localDescription && pc.localDescription.sdp); }, 350);
       }).catch(function () {});
-      setTimeout(function () { if (!webrtcIp) finish(null); }, 2200);
+      setTimeout(function () { if (!webrtcIp) finish(null); }, WEBRTC_DISCOVERY_TIMEOUT_MS);
     } catch (err) {
       complete(null, 'error');
     }
