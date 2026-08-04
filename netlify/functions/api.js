@@ -698,7 +698,11 @@ async function loadState({ includeLogs = true, includeStores = true, includeBlac
     const ordersRow = rows.find(row => row.key === 'sapo_orders');
     if (includeLogs && ordersRow?.value) {
       const orderValue = unpackLogsValue(ordersRow.value);
-      state.orders = Array.isArray(orderValue?.orders) ? orderValue.orders : [];
+      // sapo_orders uses the same compressed envelope as logs, whose payload
+      // field is named `logs`. Accept `orders` as well for forward compatibility.
+      state.orders = Array.isArray(orderValue?.orders)
+        ? orderValue.orders
+        : (Array.isArray(orderValue?.logs) ? orderValue.logs : []);
     } else if (includeLogs) {
       // Migrate legacy order rows once. Tracker events stay in `logs`, while
       // Sapo's canonical order snapshot gets its own storage key so concurrent
