@@ -219,16 +219,23 @@ export default function App() {
     try {
       let totalSyncedNew = 0;
       let totalOrdersCount = 0;
+      let syncStillRunning = false;
       const errors = [];
 
       const results = await Promise.allSettled(
-        targetStores.map(st => syncStoreOrders(st.id, preset).then(res => ({ store: st, res })))
+        targetStores.map(st => syncStoreOrders(st.id, preset, { incremental: options.incremental === true }).then(res => ({ store: st, res })))
       );
 
+      const syncStatuses = new Map();
       results.forEach(result => {
         if (result.status === 'fulfilled' && result.value.res?.success) {
+          if (result.value.res.syncing) {
+            syncStillRunning = true;
+            return;
+          }
           totalSyncedNew += result.value.res.synced_new || 0;
           totalOrdersCount += result.value.res.total_orders || 0;
+          if (result.value.res.sync_status) syncStatuses.set(String(result.value.store.id), result.value.res.sync_status);
         } else {
           const st = result.status === 'fulfilled' ? result.value.store : null;
           const err = result.reason;
@@ -236,6 +243,12 @@ export default function App() {
           errors.push(`${st ? `[${st.store_name}]: ` : ''}${errMsg}`);
         }
       });
+      if (syncStatuses.size > 0) {
+        setStores(previous => previous.map(store => {
+          const syncStatus = syncStatuses.get(String(store.id));
+          return syncStatus ? { ...store, sync_status: syncStatus } : store;
+        }));
+      }
 
       const isStillSelected = String(selectedStoreIdRef.current) === String(syncStoreId);
       if (options.refresh !== false && isStillSelected) {
@@ -245,6 +258,8 @@ export default function App() {
       if (!options.quiet && isStillSelected) {
         if (errors.length > 0) {
           setNotice({ type: 'error', message: `Lỗi đồng bộ: ${errors.join(' | ')}` });
+        } else if (syncStillRunning) {
+          setNotice({ type: 'success', message: 'Đồng bộ đang chạy trên server. Danh sách sẽ tự cập nhật khi hoàn tất.' });
         } else {
           const newText = totalSyncedNew > 0 ? `, có ${totalSyncedNew} đơn mới` : '';
           const storeLabel = targetStores.length === 1 ? targetStores[0].store_name : 'Tất cả cửa hàng';
@@ -255,7 +270,7 @@ export default function App() {
           setNotice({ type: 'success', message });
         }
       }
-      return { success: errors.length === 0, totalSyncedNew, totalOrdersCount, stale: !isStillSelected };
+      return { success: errors.length === 0, totalSyncedNew, totalOrdersCount, syncing: syncStillRunning, stale: !isStillSelected };
     } finally {
       syncInFlightRef.current = false;
       setIsSyncing(false);
@@ -294,7 +309,7 @@ export default function App() {
     if (syncPresetFromFilters(filters) !== 'TODAY') return undefined;
     const interval = setInterval(() => {
       if (activeTab === 'logs' && document.visibilityState === 'visible') {
-        runOrderSync('TODAY', { quiet: true, backgroundRefresh: true });
+        runOrderSync('TODAY', { quiet: true, backgroundRefresh: true, incremental: true });
       }
     }, 30000);
     return () => clearInterval(interval);

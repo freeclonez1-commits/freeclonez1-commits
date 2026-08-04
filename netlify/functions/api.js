@@ -12,6 +12,9 @@ const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
 const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
 const IP_INTELLIGENCE_VERSION = 2;
 const IP_INTELLIGENCE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const SYNC_LOOKBACK_MS = 5 * 60 * 1000;
+const SYNC_HISTORY_LIMIT = 40;
+const FULL_SYNC_RECONCILIATION_MS = 10 * 60 * 1000;
 const BOOTSTRAP_DASHBOARD_PASSWORD_HASH = '5614f8701b76755fca46a29799ae4122ca791e6339afb80e45e9da52c4ea6474';
 const DATACENTER_PROVIDER_WORDS = [
   'gthost', 'm247', 'vultr', 'digitalocean', 'linode', 'hetzner', 'ovh',
@@ -570,6 +573,7 @@ function stateTemplate() {
     stores: [],
     logs: [],
     blacklist: [],
+    syncState: { byStore: {}, runs: [] },
     autoStoreId: 1,
     autoLogId: 1000,
     autoBlacklistId: 10
@@ -636,7 +640,7 @@ function isCompressedLogsValue(value) {
   return Boolean(value && value.encoding === COMPRESSED_LOGS_ENCODING && value.data);
 }
 
-async function loadState({ includeLogs = true, includeStores = true, includeBlacklist = true } = {}) {
+async function loadState({ includeLogs = true, includeStores = true, includeBlacklist = true, includeSyncState = true } = {}) {
   if (!hasSupabaseConfig()) {
     throw new Error('Persistent storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');
   }
@@ -645,6 +649,7 @@ async function loadState({ includeLogs = true, includeStores = true, includeBlac
     if (includeLogs) keys.push('logs');
     if (includeStores) keys.push('stores');
     if (includeBlacklist) keys.push('blacklist');
+    if (includeSyncState) keys.push('sync_state');
     let rows = await supabaseFetch(`/app_state?key=in.(${keys.map(encodeURIComponent).join(',')})&select=key,value`);
     let logsRow = rows.find(row => row.key === 'logs');
     let defaultRow = null;
@@ -663,6 +668,7 @@ async function loadState({ includeLogs = true, includeStores = true, includeBlac
       await saveStoresState(initial);
       await saveLogsState(initial);
       await saveBlacklistState(initial);
+      await saveSyncState(initial);
       return initial;
     }
 
@@ -670,6 +676,7 @@ async function loadState({ includeLogs = true, includeStores = true, includeBlac
     if (!includeLogs) state.logs = [];
     if (!includeStores) state.stores = [];
     if (!includeBlacklist) state.blacklist = [];
+    if (!includeSyncState) state.syncState = { byStore: {}, runs: [] };
 
     logsRow = rows.find(row => row.key === 'logs');
     if (includeLogs && logsRow?.value) {
@@ -695,6 +702,13 @@ async function loadState({ includeLogs = true, includeStores = true, includeBlac
     if (includeBlacklist && blacklistRow?.value && Array.isArray(blacklistRow.value.blacklist)) {
       state.blacklist = blacklistRow.value.blacklist;
       state.autoBlacklistId = Number(blacklistRow.value.autoBlacklistId || state.autoBlacklistId);
+    }
+    const syncStateRow = rows.find(row => row.key === 'sync_state');
+    if (includeSyncState && syncStateRow?.value) {
+      state.syncState = {
+        byStore: syncStateRow.value.byStore && typeof syncStateRow.value.byStore === 'object' ? syncStateRow.value.byStore : {},
+        runs: Array.isArray(syncStateRow.value.runs) ? syncStateRow.value.runs : []
+      };
     }
     return state;
   } catch (e) {
@@ -734,16 +748,52 @@ async function saveBlacklistState(state) {
   });
 }
 
+async function saveSyncState(state) {
+  const syncState = state.syncState || { byStore: {}, runs: [] };
+  await saveStateValue('sync_state', {
+    byStore: syncState.byStore || {},
+    runs: Array.isArray(syncState.runs) ? syncState.runs.slice(0, SYNC_HISTORY_LIMIT) : []
+  });
+}
+
+function recordSyncRun(state, run) {
+  if (!state.syncState || typeof state.syncState !== 'object') {
+    state.syncState = { byStore: {}, runs: [] };
+  }
+  if (!state.syncState.byStore || typeof state.syncState.byStore !== 'object') state.syncState.byStore = {};
+  if (!Array.isArray(state.syncState.runs)) state.syncState.runs = [];
+
+  const previous = state.syncState.byStore[String(run.store_id)] || {};
+  const summary = {
+    store_id: Number(run.store_id),
+    status: run.status || 'success',
+    mode: run.mode || 'full',
+    started_at: run.started_at || new Date().toISOString(),
+    finished_at: run.finished_at || new Date().toISOString(),
+    total_orders: Number(run.total_orders || 0),
+    synced_new: Number(run.synced_new || 0),
+    updated_orders: Number(run.updated_orders || 0),
+    message: run.message || null,
+    since: run.since || null,
+    last_full_at: run.mode === 'full' ? (run.finished_at || new Date().toISOString()) : (previous.last_full_at || null)
+  };
+  state.syncState.byStore[String(summary.store_id)] = summary;
+  state.syncState.runs.unshift(summary);
+  state.syncState.runs = state.syncState.runs.slice(0, SYNC_HISTORY_LIMIT);
+  return summary;
+}
+
 function cleanDomain(domain) {
   return String(domain || '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
 }
 
-function publicStore(store) {
+function publicStore(store, syncState = null) {
   const { api_secret, api_secret_encrypted, ...safe } = store;
   return {
     ...safe,
     has_api_secret: Boolean(api_secret || api_secret_encrypted),
-    credentials_saved_at: store.credentials_saved_at || store.created_at || null
+    credentials_saved_at: store.credentials_saved_at || store.created_at || null,
+    sync_status: syncState?.byStore?.[String(store.id)] || null
   };
 }
 
@@ -1113,7 +1163,7 @@ function decorateLog(row, state) {
 async function handleStores(event, state, method, parts, body) {
   if (!assertAdmin(event)) return unauthorized();
   if (method === 'GET' && parts.length === 0) {
-    return json(200, { success: true, data: state.stores.map(publicStore) });
+    return json(200, { success: true, data: state.stores.map(store => publicStore(store, state.syncState)) });
   }
   if (method === 'POST' && parts.length === 0) {
     const { store_name, mysapo_domain, api_key, api_secret } = body || {};
@@ -1168,15 +1218,25 @@ async function handleStores(event, state, method, parts, body) {
   }
   if (method === 'POST' && parts[1] === 'sync') {
     const preset = body?.datePreset || 'TODAY';
+    const incremental = body?.incremental === true && preset === 'TODAY';
     const lockKey = `${store.id}:${preset}`;
     if (syncLocks.has(lockKey)) {
       return json(202, { success: true, syncing: true, total_orders: 0, synced_new: 0, message: 'Sync dang chay, dashboard se tu cap nhat ngay khi co du lieu moi.' });
     }
-    const syncPromise = syncSapoOrders(state, store, preset);
+    const syncPromise = syncSapoOrders(state, store, preset, { incremental });
     syncLocks.set(lockKey, syncPromise);
     try {
       const result = await syncPromise;
       return json(200, result);
+    } catch (error) {
+      recordSyncRun(state, {
+        store_id: store.id,
+        status: 'error',
+        mode: incremental ? 'delta' : 'full',
+        message: error.message || 'Sync failed'
+      });
+      await saveSyncState(state);
+      throw error;
     } finally {
       syncLocks.delete(lockKey);
     }
@@ -1357,6 +1417,21 @@ function sapoCreatedOnMin(datePreset) {
   return new Date(vnStartUtcMs).toISOString();
 }
 
+function getSyncWindow(state, store, datePreset, incremental) {
+  const fullSince = sapoCreatedOnMin(datePreset);
+  if (!incremental || !fullSince) return { since: fullSince, mode: 'full' };
+
+  const previous = state.syncState?.byStore?.[String(store.id)];
+  const lastSuccessMs = new Date(previous?.finished_at || 0).getTime();
+  const lastFullMs = new Date(previous?.last_full_at || 0).getTime();
+  if (!Number.isFinite(lastSuccessMs) || !Number.isFinite(lastFullMs) || Date.now() - lastFullMs >= FULL_SYNC_RECONCILIATION_MS) {
+    return { since: fullSince, mode: 'full' };
+  }
+
+  const deltaSinceMs = Math.max(new Date(fullSince).getTime(), lastSuccessMs - SYNC_LOOKBACK_MS);
+  return { since: new Date(deltaSinceMs).toISOString(), mode: 'delta' };
+}
+
 function isSapoOrderInDatePreset(createdAt, datePreset) {
   if (datePreset === 'ALL') return true;
   if (!createdAt) return false;
@@ -1391,16 +1466,25 @@ async function testSapoConnection(store) {
   return { success: true, message: `Ket noi Sapo thanh cong. API doc duoc don hang (${count} don).`, order_count: count };
 }
 
-async function syncSapoOrders(state, store, datePreset) {
+async function syncSapoOrders(state, store, datePreset, { incremental = false } = {}) {
   const syncStartTime = Date.now();
+  const startedAt = new Date(syncStartTime).toISOString();
   const secret = decryptSecret(store.api_secret_encrypted);
   if (!secret) throw new Error('Missing Sapo API secret.');
-  const since = sapoCreatedOnMin(datePreset);
+  const syncWindow = getSyncWindow(state, store, datePreset, incremental);
+  const since = syncWindow.since;
   const ipCache = new Map();
   let total = 0;
   let synced = 0;
   let updated = 0;
+  let logsChanged = false;
   let queryParam = 'created_at_min';
+  const knownOrders = new Map();
+  state.logs.forEach(log => {
+    if (log.store_id !== store.id || !hasOrderInfo(log.order_info)) return;
+    const order = safeJsonParse(log.order_info, null);
+    if (order?.order_id) knownOrders.set(String(order.order_id), log);
+  });
 
   const pageLimit = datePreset === 'TODAY' ? 100 : 250;
   const maxPages = datePreset === 'TODAY' ? 2 : (datePreset === '7_DAYS' ? 4 : 8);
@@ -1444,11 +1528,12 @@ async function syncSapoOrders(state, store, datePreset) {
       if (!orderInfo.order_id) continue;
       total++;
       const orderClientIp = sapoOrderClientIp(order);
-      const existing = state.logs.find(log => log.store_id === store.id && isSameOrder(log, orderInfo));
+      const existing = knownOrders.get(String(orderInfo.order_id));
       const candidateVisit = findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
       const trackedVisit = existing || candidateVisit;
 
       if (trackedVisit) {
+        const before = JSON.stringify(trackedVisit);
         applySyncedOrder(trackedVisit, orderInfo, createdAt);
         trackedVisit.store_id = store.id;
         trackedVisit.store_domain = store.mysapo_domain;
@@ -1466,10 +1551,16 @@ async function syncSapoOrders(state, store, datePreset) {
           }
         }
         trackedVisit.client_ip = effectiveClientIp;
-        if ((Date.now() - syncStartTime) < 9500 || ipCache.has(effectiveClientIp)) {
+        const lastCheckedMs = new Date(trackedVisit.ip_intelligence_checked_at || 0).getTime();
+        const shouldAnalyze = !Number.isFinite(lastCheckedMs) || Date.now() - lastCheckedMs > IP_INTELLIGENCE_CACHE_TTL_MS || !existing;
+        if (shouldAnalyze && ((Date.now() - syncStartTime) < 9500 || ipCache.has(effectiveClientIp))) {
           await applyIpAnalysis(trackedVisit, effectiveClientIp, trackedVisit.webrtc_ip, [], ipCache, state.logs);
         }
-        updated++;
+        if (JSON.stringify(trackedVisit) !== before) {
+          logsChanged = true;
+          updated++;
+        }
+        knownOrders.set(String(orderInfo.order_id), trackedVisit);
       } else {
         const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : 'unknown';
         const newLog = {
@@ -1501,6 +1592,8 @@ async function syncSapoOrders(state, store, datePreset) {
           await applyIpAnalysis(newLog, effectiveClientIp, null, [], ipCache, state.logs);
         }
         state.logs.unshift(newLog);
+        knownOrders.set(String(orderInfo.order_id), newLog);
+        logsChanged = true;
         synced++;
       }
     }
@@ -1511,6 +1604,7 @@ async function syncSapoOrders(state, store, datePreset) {
 
   // Deduplicate orders by order_id per store.
   const seenOrders = new Set();
+  const logsBeforeDeduplication = state.logs.length;
   state.logs = state.logs.filter(log => {
     if (hasOrderInfo(log.order_info)) {
       const ordInfo = safeJsonParse(log.order_info, null);
@@ -1523,10 +1617,15 @@ async function syncSapoOrders(state, store, datePreset) {
     }
     return true;
   });
+  if (state.logs.length !== logsBeforeDeduplication) logsChanged = true;
 
   // Fast backfill pass for missing WebRTC / session_duration
   for (const log of state.logs) {
     if (log.store_id === store.id && hasOrderInfo(log.order_info)) {
+      const originalWebRtcIp = log.webrtc_ip;
+      const originalWebRtcMismatch = log.webrtc_mismatch;
+      const originalSessionStart = log.session_start_at;
+      const originalSessionDuration = log.session_duration_sec;
       const ordInfo = safeJsonParse(log.order_info, null);
       if (!ordInfo) continue;
       if (!isKnownIp(log.webrtc_ip)) {
@@ -1543,11 +1642,26 @@ async function syncSapoOrders(state, store, datePreset) {
       if (log.session_duration_sec === null && log.session_start_at) {
         log.session_duration_sec = sessionDurationToOrder(log.session_start_at, log.created_at);
       }
+      if (log.webrtc_ip !== originalWebRtcIp || log.webrtc_mismatch !== originalWebRtcMismatch || log.session_start_at !== originalSessionStart || log.session_duration_sec !== originalSessionDuration) {
+        logsChanged = true;
+      }
     }
   }
 
-  await saveLogsState(state);
-  return { success: true, total_orders: total, synced_new: synced, updated_orders: updated };
+  if (logsChanged) await saveLogsState(state);
+  const syncStatus = recordSyncRun(state, {
+    store_id: store.id,
+    status: 'success',
+    mode: syncWindow.mode,
+    started_at: startedAt,
+    finished_at: new Date().toISOString(),
+    total_orders: total,
+    synced_new: synced,
+    updated_orders: updated,
+    since
+  });
+  await saveSyncState(state);
+  return { success: true, total_orders: total, synced_new: synced, updated_orders: updated, sync_status: syncStatus };
 }
 
 async function handleLogs(event, state, method, parts, query, body) {

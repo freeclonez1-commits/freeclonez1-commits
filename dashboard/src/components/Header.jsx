@@ -1,13 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { ShieldCheck, Store, DownloadCloud, LockKeyhole } from 'lucide-react';
+import { ShieldCheck, Store, DownloadCloud, LockKeyhole, Clock3 } from 'lucide-react';
 
 export default function Header({ stores, selectedStoreId, onSelectStore, onSyncOrders, isSyncing, onLock }) {
-  const [time, setTime] = useState(new Date().toLocaleTimeString('vi-VN'));
-
-  useEffect(() => {
-    const timer = setInterval(() => setTime(new Date().toLocaleTimeString('vi-VN')), 1000);
-    return () => clearInterval(timer);
-  }, []);
+  const activeStore = selectedStoreId !== 'ALL' ? stores.find(store => String(store.id) === String(selectedStoreId)) : null;
+  const syncStatus = activeStore?.sync_status || null;
+  const syncLabel = syncStatus?.finished_at
+    ? `Quét ${new Date(syncStatus.finished_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}: ${syncStatus.total_orders || 0} nhận · ${syncStatus.synced_new || 0} mới`
+    : 'Chưa có lịch sử quét';
 
   return (
     <header className="sticky top-0 z-30 apple-glass px-3 md:px-6 py-3 flex flex-wrap items-center justify-between gap-3 shadow-sm">
@@ -27,6 +25,12 @@ export default function Header({ stores, selectedStoreId, onSelectStore, onSyncO
       </div>
 
       <div className="w-full md:w-auto flex items-center justify-end gap-2 overflow-x-auto">
+        {activeStore && (
+          <span title={syncStatus?.message || syncLabel} className={`hidden xl:inline-flex shrink-0 items-center gap-1.5 px-3 py-1.5 rounded-full border text-[11px] font-bold ${syncStatus?.status === 'error' ? 'bg-[#FFEBEA] border-[#FF3B30]/30 text-[#B42318]' : 'bg-[#E9F8EF] border-[#34C759]/30 text-[#147A3D]'}`}>
+            <Clock3 className="w-3.5 h-3.5" />
+            {syncStatus?.status === 'error' ? 'Lỗi đồng bộ' : syncLabel}
+          </span>
+        )}
         {/* Multi-Store Dropdown Switcher */}
         <div className="min-w-0 flex items-center gap-2 px-3 py-1.5 rounded-full bg-white border border-[#E5E5EA] text-xs font-bold text-[#1D1D1F] shadow-sm">
           <Store className="w-4 h-4 text-[#0071E3]" />

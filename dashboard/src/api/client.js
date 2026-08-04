@@ -33,8 +33,8 @@ export const deleteStore = async (id) => {
   return res.data;
 };
 
-export const syncStoreOrders = async (id, datePreset = 'TODAY') => {
-  const res = await axios.post(`${API_BASE}/stores/${id}/sync`, { datePreset }, adminConfig());
+export const syncStoreOrders = async (id, datePreset = 'TODAY', options = {}) => {
+  const res = await axios.post(`${API_BASE}/stores/${id}/sync`, { datePreset, incremental: options.incremental === true }, adminConfig());
   return res.data;
 };
 
