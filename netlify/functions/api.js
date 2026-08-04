@@ -1518,13 +1518,16 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
     if (Date.now() - syncStartTime > 13500) break;
 
     const minParam = since ? `&${queryParam}=${encodeURIComponent(since)}` : '';
-    let path = `/admin/orders.json?status=any&limit=${pageLimit}&page=${page}${minParam}`;
+    // Sapo's order-list endpoint for this store returns an empty array when
+    // status=any is supplied, even though orders exist. Keep the proven list
+    // query and use completion of that response as the reconciliation source.
+    let path = `/admin/orders.json?limit=${pageLimit}&page=${page}${minParam}`;
     let { res, data } = await sapoFetchJson(store, secret, path);
 
     if (page === 1 && (!res.ok || !data?.orders?.length)) {
       const altParam = queryParam === 'created_at_min' ? 'created_on_min' : 'created_at_min';
       const altMinParam = since ? `&${altParam}=${encodeURIComponent(since)}` : '';
-      const altPath = `/admin/orders.json?status=any&limit=${pageLimit}&page=1${altMinParam}`;
+      const altPath = `/admin/orders.json?limit=${pageLimit}&page=1${altMinParam}`;
       const altResult = await sapoFetchJson(store, secret, altPath);
       if (altResult.res.ok && altResult.data?.orders?.length) {
         res = altResult.res;
