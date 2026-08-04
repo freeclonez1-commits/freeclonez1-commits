@@ -10,7 +10,7 @@ const syncLocks = new Map();
 const ipIntelligenceCache = new Map();
 const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
 const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
-const IP_INTELLIGENCE_VERSION = 2;
+const IP_INTELLIGENCE_VERSION = 3;
 const IP_INTELLIGENCE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const SYNC_LOOKBACK_MS = 5 * 60 * 1000;
 const SYNC_HISTORY_LIMIT = 40;
@@ -959,6 +959,7 @@ async function lookupIp(ip) {
   if (cached && cached.expiresAt > Date.now()) return cached.data;
   if (cached) ipIntelligenceCache.delete(ip);
 
+  let primaryData = null;
   try {
     const ipApiKey = process.env.IPAPI_IS_KEY || '';
     const keyParam = ipApiKey ? `&key=${encodeURIComponent(ipApiKey)}` : '';
@@ -967,7 +968,7 @@ async function lookupIp(ip) {
       const company = data.company || {};
       const asn = data.asn || {};
       const location = data.location || {};
-      return rememberIpData(ip, {
+      primaryData = {
         country: location.country || 'Unknown',
         countryCode: location.country_code || 'XX',
         city: location.city || location.state || 'Unknown',
@@ -982,7 +983,7 @@ async function lookupIp(ip) {
         vpnService: data.vpn?.service || null,
         source: 'ipapi.is',
         intelligenceVersion: IP_INTELLIGENCE_VERSION
-      });
+      };
     }
   } catch (_) {}
 
@@ -990,7 +991,7 @@ async function lookupIp(ip) {
     const data = await fetchJsonWithTimeout(`https://ipwho.is/${encodeURIComponent(ip)}`, 900);
     if (data && data.success !== false) {
       const isDatacenter = hasDatacenterProvider(data.connection?.isp, data.connection?.org, data.connection?.domain);
-      return rememberIpData(ip, {
+      const secondaryData = {
         country: data.country || 'Unknown',
         countryCode: data.country_code || 'XX',
         city: data.city || 'Unknown',
@@ -1004,11 +1005,32 @@ async function lookupIp(ip) {
         abuser: false,
         vpnService: null,
         source: 'ipwho.is',
-        intelligenceVersion: 1
-      }, 5 * 60 * 1000);
+        intelligenceVersion: IP_INTELLIGENCE_VERSION
+      };
+
+      if (primaryData) {
+        const primaryIdentity = `${primaryData.countryCode}|${primaryData.isp}|${primaryData.org}`.toLowerCase();
+        const secondaryIdentity = `${secondaryData.countryCode}|${secondaryData.isp}|${secondaryData.org}`.toLowerCase();
+        const identityConflict = primaryIdentity !== secondaryIdentity;
+        const primaryHighRisk = primaryData.hosting || primaryData.abuser || primaryData.vpn || primaryData.proxy;
+
+        // A high-risk label must not survive when an independent source says
+        // the address belongs to a normal ISP in another network/country.
+        if (primaryHighRisk && !secondaryData.hosting && identityConflict) {
+          return rememberIpData(ip, {
+            ...secondaryData,
+            source: 'ipapi.is+ipwho.is:conflict',
+            intelligenceVersion: IP_INTELLIGENCE_VERSION,
+            intelligenceConflict: true
+          }, 15 * 60 * 1000);
+        }
+        return rememberIpData(ip, primaryData);
+      }
+
+      return rememberIpData(ip, secondaryData, 5 * 60 * 1000);
     }
   } catch (_) {}
-  return {};
+  return primaryData ? rememberIpData(ip, primaryData) : {};
 }
 
 async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
@@ -1552,7 +1574,7 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
         }
         trackedVisit.client_ip = effectiveClientIp;
         const lastCheckedMs = new Date(trackedVisit.ip_intelligence_checked_at || 0).getTime();
-        const shouldAnalyze = !Number.isFinite(lastCheckedMs) || Date.now() - lastCheckedMs > IP_INTELLIGENCE_CACHE_TTL_MS || !existing;
+        const shouldAnalyze = !Number.isFinite(lastCheckedMs) || Date.now() - lastCheckedMs > IP_INTELLIGENCE_CACHE_TTL_MS || trackedVisit.ip_intelligence_version !== IP_INTELLIGENCE_VERSION || !existing;
         if (shouldAnalyze && ((Date.now() - syncStartTime) < 9500 || ipCache.has(effectiveClientIp))) {
           await applyIpAnalysis(trackedVisit, effectiveClientIp, trackedVisit.webrtc_ip, [], ipCache, state.logs);
         }
