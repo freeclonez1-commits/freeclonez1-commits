@@ -3,8 +3,9 @@ import { ShieldCheck, Store, DownloadCloud, LockKeyhole, Clock3 } from 'lucide-r
 export default function Header({ stores, selectedStoreId, onSelectStore, onSyncOrders, isSyncing, onLock }) {
   const activeStore = selectedStoreId !== 'ALL' ? stores.find(store => String(store.id) === String(selectedStoreId)) : null;
   const syncStatus = activeStore?.sync_status || null;
+  const knownOrders = Math.max(0, Number(syncStatus?.total_orders || 0) - Number(syncStatus?.synced_new || 0));
   const syncLabel = syncStatus?.finished_at
-    ? `Quét ${new Date(syncStatus.finished_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}: ${syncStatus.total_orders || 0} nhận · ${syncStatus.synced_new || 0} mới`
+    ? `Đối soát ${new Date(syncStatus.finished_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}: ${syncStatus.total_orders || 0} Sapo · ${syncStatus.synced_new || 0} ghi mới · ${knownOrders} đã có`
     : 'Chưa có lịch sử quét';
 
   return (

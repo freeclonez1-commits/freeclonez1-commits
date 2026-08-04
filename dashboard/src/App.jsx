@@ -262,11 +262,12 @@ export default function App() {
           setNotice({ type: 'success', message: 'Đồng bộ đang chạy trên server. Danh sách sẽ tự cập nhật khi hoàn tất.' });
         } else {
           const newText = totalSyncedNew > 0 ? `, có ${totalSyncedNew} đơn mới` : '';
+          const knownOrders = Math.max(0, totalOrdersCount - totalSyncedNew);
           const storeLabel = targetStores.length === 1 ? targetStores[0].store_name : 'Tất cả cửa hàng';
           const periodLabel = preset === 'TODAY' ? `hôm nay (${todayISO})` : (preset === '7_DAYS' ? 'trong 7 ngày qua' : 'trong 30 ngày qua');
           const message = totalOrdersCount === 0
             ? `${storeLabel}: không có đơn Sapo ${periodLabel}.`
-            : `${storeLabel}: đã quét ${totalOrdersCount} đơn ${periodLabel}${newText}.`;
+            : `${storeLabel}: đã đối soát ${totalOrdersCount} đơn ${periodLabel}${newText}${knownOrders > 0 ? `, ${knownOrders} đơn đã có trong danh sách` : ''}.`;
           setNotice({ type: 'success', message });
         }
       }
@@ -297,7 +298,7 @@ export default function App() {
   // Refresh silently so the visible table does not flicker while data is unchanged.
   useEffect(() => {
     const interval = setInterval(() => {
-      if (activeTab === 'logs' && document.visibilityState === 'visible') {
+      if (activeTab === 'logs' && document.visibilityState === 'visible' && !syncInFlightRef.current) {
         refreshLogsOnly(null, { background: true });
       }
     }, 15000);
