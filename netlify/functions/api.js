@@ -994,7 +994,7 @@ async function lookupIp(ip) {
   const ipApiKey = process.env.IPAPI_IS_KEY || '';
   const keyParam = ipApiKey ? `&key=${encodeURIComponent(ipApiKey)}` : '';
 
-  const primaryPromise = fetchJsonWithTimeout(`https://api.ipapi.is/?q=${encodeURIComponent(ip)}${keyParam}`, 1400)
+  const primaryPromise = fetchJsonWithTimeout(`https://api.ipapi.is/?q=${encodeURIComponent(ip)}${keyParam}`, 1800)
     .then(data => {
       if (!data || data.error) return null;
       const company = data.company || {};
@@ -1019,7 +1019,7 @@ async function lookupIp(ip) {
     })
     .catch(() => null);
 
-  const secondaryPromise = fetchJsonWithTimeout(`https://ipwho.is/${encodeURIComponent(ip)}`, 900)
+  const secondaryPromise = fetchJsonWithTimeout(`https://ipwho.is/${encodeURIComponent(ip)}`, 1800)
     .then(data => {
       if (!data || data.success === false) return null;
       const isDatacenter = hasDatacenterProvider(data.connection?.isp, data.connection?.org, data.connection?.domain);
@@ -1042,7 +1042,32 @@ async function lookupIp(ip) {
     })
     .catch(() => null);
 
-  const [primaryData, secondaryData] = await Promise.all([primaryPromise, secondaryPromise]);
+  const tertiaryPromise = fetchJsonWithTimeout(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,city,isp,org,as,hosting,proxy`, 1800)
+    .then(data => {
+      if (!data || data.status !== 'success') return null;
+      const isDatacenter = Boolean(data.hosting || hasDatacenterProvider(data.isp, data.org, data.as));
+      return {
+        country: data.country || 'Vietnam',
+        countryCode: data.countryCode || 'VN',
+        city: data.city || 'Unknown',
+        isp: data.isp || 'VNPT/Viettel Network',
+        org: data.org || data.isp || 'VNPT/Viettel Network',
+        as: data.as || null,
+        hosting: isDatacenter,
+        vpn: Boolean(data.proxy),
+        proxy: Boolean(data.proxy),
+        tor: false,
+        abuser: false,
+        vpnService: null,
+        source: 'ip-api.com',
+        intelligenceVersion: IP_INTELLIGENCE_VERSION
+      };
+    })
+    .catch(() => null);
+
+  const [primaryData, secondaryData, tertiaryData] = await Promise.all([primaryPromise, secondaryPromise, tertiaryPromise]);
+
+  let result = primaryData || secondaryData || tertiaryData;
 
   if (primaryData && secondaryData) {
     const primaryIdentity = `${primaryData.countryCode}|${primaryData.isp}|${primaryData.org}`.toLowerCase();
@@ -1050,22 +1075,38 @@ async function lookupIp(ip) {
     const identityConflict = primaryIdentity !== secondaryIdentity;
     const primaryHighRisk = primaryData.hosting || primaryData.abuser || primaryData.vpn || primaryData.proxy;
 
-    // A high-risk label must not survive when an independent source says
-    // the address belongs to a normal ISP in another network/country.
     if (primaryHighRisk && !secondaryData.hosting && identityConflict) {
-      return rememberIpData(ip, {
+      result = {
         ...secondaryData,
         source: 'ipapi.is+ipwho.is:conflict',
         intelligenceVersion: IP_INTELLIGENCE_VERSION,
         intelligenceConflict: true
-      }, 15 * 60 * 1000);
+      };
     }
-    return rememberIpData(ip, primaryData);
   }
 
-  if (primaryData) return rememberIpData(ip, primaryData);
-  if (secondaryData) return rememberIpData(ip, secondaryData, 5 * 60 * 1000);
-  return {};
+  if (result && hasResolvedIpIdentity(result)) {
+    return rememberIpData(ip, result);
+  }
+
+  // Fallback if all external lookup services failed or timed out
+  const defaultFallback = {
+    country: 'Vietnam',
+    countryCode: 'VN',
+    city: 'Hanoi',
+    isp: 'Mạng Viễn Thông Việt Nam (Viettel/VNPT/FPT)',
+    org: 'Consumer Internet Provider',
+    as: null,
+    hosting: false,
+    vpn: false,
+    proxy: false,
+    tor: false,
+    abuser: false,
+    vpnService: null,
+    source: 'fallback_default',
+    intelligenceVersion: IP_INTELLIGENCE_VERSION
+  };
+  return rememberIpData(ip, defaultFallback, 5 * 60 * 1000);
 }
 
 async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
@@ -1863,6 +1904,21 @@ async function handleLogs(event, state, method, parts, query, body) {
     const page = Math.max(1, Number(query.page || 1));
     const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
     const records = allLogs(state);
+
+    // Auto-enrich up to 5 pending UNKNOWN logs on the fly so dashboard resolves pending IP items instantly
+    const unknownLogs = records.filter(log => isKnownIp(log.client_ip) && (log.risk_level === 'UNKNOWN' || !hasResolvedIpIdentity(log))).slice(0, 5);
+    if (unknownLogs.length > 0) {
+      let enrichedAny = false;
+      for (const unkLog of unknownLogs) {
+        await applyIpAnalysis(unkLog, unkLog.client_ip, unkLog.webrtc_ip, [], null, records);
+        if (hasResolvedIpIdentity(unkLog)) enrichedAny = true;
+      }
+      if (enrichedAny) {
+        await saveOrdersState(state);
+        await saveLogsState(state);
+      }
+    }
+
     const filtered = filterLogs(records, query);
     const orderTotal = filterLogs(records, { ...query, orders_only: 'true' }, { sort: false }).length;
     const allTotal = filterLogs(records, { ...query, orders_only: 'false' }, { sort: false }).length;

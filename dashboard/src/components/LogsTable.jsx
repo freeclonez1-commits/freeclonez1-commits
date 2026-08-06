@@ -210,17 +210,17 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
       );
     }
     const labels = {
-      pending: 'Dang kiem tra WebRTC',
-      unsupported: 'Trinh duyet khong ho tro WebRTC',
-      private_only: 'WebRTC chi tra IP noi bo',
-      hidden: 'WebRTC dang bi an',
-      not_available: full ? 'WebRTC khong kha dung (VPN/trinh duyet chan)' : 'WebRTC khong kha dung',
-      error: 'Khong the kiem tra WebRTC'
+      pending: 'Đang kiểm tra WebRTC...',
+      unsupported: 'Trình duyệt không hỗ trợ WebRTC',
+      private_only: 'WebRTC chỉ trả IP nội bộ',
+      hidden: 'WebRTC bị trình duyệt ẩn',
+      not_available: full ? 'WebRTC không khả dụng (VPN/trình duyệt chặn hoặc đơn đồng bộ Sapo)' : 'WebRTC không khả dụng',
+      error: 'Không thể kiểm tra WebRTC'
     };
     const status = log.webrtc_status || 'not_available';
     return (
-      <span className="font-sans font-bold px-2.5 py-0.5 rounded-md border text-[#86868B] bg-[#F2F2F7] border-[#E5E5EA]">
-        {labels[status] || 'Khong phat hien IP WebRTC'}
+      <span title="Nhiều VPN và trình duyệt (Chrome/Brave) tự động ẩn WebRTC leak để bảo mật, hoặc đơn hàng đồng bộ từ Sapo API chưa gắn tracker WebRTC" className="font-sans font-bold px-2.5 py-0.5 rounded-md border text-[#86868B] bg-[#F2F2F7] border-[#E5E5EA]">
+        {labels[status] || 'Không phát hiện IP WebRTC'}
       </span>
     );
   };
@@ -503,13 +503,13 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                           ) : (
                             <button
                               onClick={() => handleBlockIp(log)}
-                              disabled={isUnknown}
+                              disabled={!isKnownIp(log.client_ip)}
                               className={`flex items-center gap-1 px-3.5 py-1.5 text-xs font-bold rounded-full transition-all ${
-                                isUnknown
+                                !isKnownIp(log.client_ip)
                                   ? 'bg-[#F2F2F7] text-[#AEAEB2] cursor-not-allowed'
                                   : 'bg-[#FF3B30]/10 hover:bg-[#FF3B30] text-[#FF3B30] hover:text-white cursor-pointer'
                               }`}
-                              title={isUnknown ? 'Chưa có IP hợp lệ để chặn' : 'Chặn IP này không cho truy cập website Sapo nữa'}
+                              title={!isKnownIp(log.client_ip) ? 'Chưa có IP hợp lệ để chặn' : 'Chặn IP này không cho truy cập website Sapo nữa'}
                             >
                               <Ban className="w-3.5 h-3.5" />
                               <span>Chặn IP</span>
@@ -678,9 +678,9 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                   ) : (
                     <button
                       onClick={() => handleBlockIp(log)}
-                      disabled={isUnknown}
+                      disabled={!isKnownIp(log.client_ip)}
                       className={`flex-1 py-2 font-bold text-xs rounded-xl flex items-center justify-center gap-1 ${
-                        isUnknown
+                        !isKnownIp(log.client_ip)
                           ? 'bg-[#F2F2F7] text-[#AEAEB2] cursor-not-allowed'
                           : 'bg-[#FF3B30] text-white cursor-pointer shadow-sm'
                       }`}
@@ -856,15 +856,15 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
               ) : (
                 <button
                   onClick={() => handleBlockIp(selectedLog).then(success => success && setSelectedLog(null))}
-                  disabled={isUnknownLog(selectedLog)}
+                  disabled={!isKnownIp(selectedLog.client_ip)}
                   className={`w-full py-2.5 text-xs font-bold rounded-full transition-all shadow-sm flex items-center justify-center gap-1.5 ${
-                    isUnknownLog(selectedLog)
+                    !isKnownIp(selectedLog.client_ip)
                       ? 'bg-[#F2F2F7] text-[#AEAEB2] cursor-not-allowed'
                       : 'bg-[#FF3B30] hover:bg-[#E03126] text-white cursor-pointer'
                   }`}
                 >
                   <Ban className="w-4 h-4" />
-                  <span>{isUnknownLog(selectedLog) ? 'Chưa có IP hợp lệ để chặn' : `Chặn IP này không cho truy cập Sapo (${selectedLog.client_ip})`}</span>
+                  <span>{!isKnownIp(selectedLog.client_ip) ? 'Chưa có IP hợp lệ để chặn' : `Chặn IP này không cho truy cập Sapo (${selectedLog.client_ip})`}</span>
                 </button>
               )}
             </div>
