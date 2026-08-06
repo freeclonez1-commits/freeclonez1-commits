@@ -90,6 +90,7 @@ function webrtcLabel(order) {
   if (!order.webrtc_ip) {
     if (order.webrtc_status === 'not_supported') return 'Trinh duyet khong ho tro WebRTC';
     if (order.webrtc_status === 'error') return 'Loi kiem tra WebRTC';
+    if (order.webrtc_status === 'invalid_candidate') return 'Candidate WebRTC khong phai IP';
     return 'Khong leak IP WebRTC';
   }
   if (order.webrtc_mismatch) return 'IP WebRTC / IP goc bi lo';

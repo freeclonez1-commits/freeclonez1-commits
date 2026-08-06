@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const net = require('net');
 const zlib = require('zlib');
 
 const BUSINESS_TIME_ZONE = process.env.BUSINESS_TIME_ZONE || 'Asia/Ho_Chi_Minh';
@@ -107,9 +108,18 @@ const TRACKER_SOURCE = `(() => {
   }
 
   function publicIpCandidate(text) {
-    const value = String(text || '').trim();
+    const value = String(text || '').trim().replace(/^\\[|\\]$/g, '').toLowerCase();
     if (!value || value.endsWith('.local')) return null;
+    const isIpv4 = value.split('.').length === 4 && value.split('.').every(part => /^\\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255);
+    const isIpv6 = value.includes(':')
+      && /^[0-9a-f:]+$/i.test(value)
+      && !value.includes(':::')
+      && value.split(':').length >= 3
+      && value.split(':').length <= 8
+      && value.split(':').every(part => part === '' || /^[0-9a-f]{1,4}$/i.test(part));
+    if (!isIpv4 && !isIpv6) return null;
     if (/^(10\\.|127\\.|169\\.254\\.|172\\.(1[6-9]|2\\d|3[0-1])\\.|192\\.168\\.)/.test(value)) return null;
+    if (/^(::1|fc|fd|fe80)/i.test(value)) return null;
     return value;
   }
 
@@ -418,7 +428,11 @@ function inPreset(createdAt, preset) {
 
 function isKnownIp(ip) {
   const value = String(ip || '').trim().toLowerCase();
-  return Boolean(value && value !== 'unknown' && value !== '0.0.0.0' && value !== '::' && value !== 'null');
+  if (!value || ['unknown', 'null', 'undefined', '0.0.0.0', '::'].includes(value)) return false;
+  if (!net.isIP(value)) return false;
+  if (/^(10\.|127\.|169\.254\.|172\.(1[6-9]|2\d|3[0-1])\.|192\.168\.)/.test(value)) return false;
+  if (/^(::1|fc|fd|fe80)/i.test(value)) return false;
+  return true;
 }
 
 function sameIp(a, b) {
@@ -842,12 +856,22 @@ async function syncSapoOrders(state, store, preset = 'TODAY') {
 
 function decorateOrder(row, state) {
   const info = getOrderInfo(row);
-  const blocked = findBlacklist(state || {}, row.client_ip, row.webrtc_ip);
+  const clientIp = normalizeIpValue(row.client_ip) || 'unknown';
+  const webrtcIp = normalizeIpValue(row.webrtc_ip) || null;
+  const invalidWebrtc = Boolean(row.webrtc_ip && !webrtcIp);
+  const hasOtherRisk = Boolean(row.is_vpn || row.is_proxy || row.is_datacenter || row.is_tor || row.is_abuser);
+  const riskReasons = parseJson(row.risk_reasons, []).filter(reason => !(invalidWebrtc && /webrtc/i.test(String(reason))));
+  const blocked = findBlacklist(state || {}, clientIp, webrtcIp);
   return {
     ...row,
+    client_ip: clientIp,
+    webrtc_ip: webrtcIp,
+    webrtc_status: invalidWebrtc ? 'invalid_candidate' : row.webrtc_status,
+    webrtc_mismatch: webrtcIp ? Boolean(row.webrtc_mismatch) : false,
+    risk_level: invalidWebrtc && !hasOtherRisk ? 'UNKNOWN' : row.risk_level,
     order_info: info,
-    risk_reasons: parseJson(row.risk_reasons, []),
-    is_webrtc_available: isKnownIp(row.webrtc_ip),
+    risk_reasons: riskReasons,
+    is_webrtc_available: Boolean(webrtcIp),
     is_blacklisted: Boolean(blocked),
     blacklist_reason: blocked?.reason || null
   };
@@ -997,8 +1021,15 @@ async function handleLogs(event, state, method, parts, query, body) {
       created_at: new Date().toISOString()
     };
     row.client_ip = isKnownIp(ip) ? String(ip).trim() : 'unknown';
-    if (isKnownIp(body.webrtc_ip)) row.webrtc_ip = String(body.webrtc_ip).trim();
-    row.webrtc_status = body.webrtc_status || row.webrtc_status || (row.webrtc_ip ? 'captured' : 'pending');
+    const incomingWebrtcIp = normalizeIpValue(body.webrtc_ip);
+    if (incomingWebrtcIp) {
+      row.webrtc_ip = incomingWebrtcIp;
+      row.webrtc_status = body.webrtc_status || 'captured';
+    } else if (body.webrtc_ip && body.webrtc_status === 'captured') {
+      row.webrtc_ip = null;
+      row.webrtc_status = 'invalid_candidate';
+    }
+    row.webrtc_status = row.webrtc_status || body.webrtc_status || (row.webrtc_ip ? 'captured' : 'pending');
     row.url = body.url || row.url || null;
     row.referrer = body.referrer || row.referrer || null;
     row.user_agent = body.user_agent || row.user_agent || null;
