@@ -66,6 +66,18 @@ function ipText(value) {
   return value || '--';
 }
 
+function ipVersion(value) {
+  const text = String(value || '').trim();
+  if (!text || text === '--' || text === 'unknown') return '';
+  if (text.includes(':')) return 'IPv6';
+  if (text.includes('.')) return 'IPv4';
+  return '';
+}
+
+function samePublicIp(left, right) {
+  return Boolean(left && right && String(left).trim().toLowerCase() === String(right).trim().toLowerCase());
+}
+
 function isUnknownText(value) {
   const text = String(value || '').trim().toLowerCase();
   return !text || ['unknown', 'xx', 'n/a', 'na', 'null', 'undefined'].includes(text);
@@ -96,9 +108,13 @@ function webrtcLabel(order) {
     if (order.webrtc_status === 'not_supported') return 'Trinh duyet khong ho tro WebRTC';
     if (order.webrtc_status === 'error') return 'Loi kiem tra WebRTC';
     if (order.webrtc_status === 'invalid_candidate') return 'Candidate WebRTC khong phai IP';
+    if (order.is_vpn || order.is_proxy || order.is_datacenter) return 'VPN/trinh duyet khong leak IP goc';
     return 'Khong leak IP WebRTC';
   }
   if (order.webrtc_mismatch) return 'IP WebRTC / IP goc bi lo';
+  if (samePublicIp(order.client_ip, order.webrtc_ip) && (order.is_vpn || order.is_proxy || order.is_datacenter)) {
+    return 'WebRTC trung IP VPN, khong lo IP goc';
+  }
   return 'IP WebRTC trung IP ket noi';
 }
 
@@ -262,6 +278,8 @@ function OrderDetail({ order, onClose, onBlockOrder, onUnblockOrder }) {
   const info = order.order_info || {};
   const risk = riskInfo(order);
   const RiskIcon = risk.icon;
+  const clientIpVersion = ipVersion(order.client_ip);
+  const webrtcIpVersion = ipVersion(order.webrtc_ip);
   return (
     <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4">
       <div className="w-full max-w-3xl max-h-[90vh] overflow-y-auto bg-white rounded-lg shadow-xl border border-[#E5E5EA]">
@@ -298,8 +316,8 @@ function OrderDetail({ order, onClose, onBlockOrder, onUnblockOrder }) {
           <div className="md:col-span-2 border border-[#E5E5EA] rounded-lg p-4">
             <div className="text-xs font-bold uppercase text-[#6E6E73] mb-3">IP va WebRTC</div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Info label={connectionLabel(order)} value={ipText(order.client_ip)} mono tone={isFakeConnection(order) ? 'red' : 'gray'} />
-              <Info label={webrtcLabel(order)} value={ipText(order.webrtc_ip) + (order.webrtc_status ? ` (${order.webrtc_status})` : '')} mono tone={order.webrtc_mismatch ? 'red' : 'gray'} />
+              <Info label={`${connectionLabel(order)}${clientIpVersion ? ` - ${clientIpVersion}` : ''}`} value={ipText(order.client_ip)} mono tone={isFakeConnection(order) ? 'red' : 'gray'} />
+              <Info label={`${webrtcLabel(order)}${webrtcIpVersion ? ` - ${webrtcIpVersion}` : ''}`} value={ipText(order.webrtc_ip) + (order.webrtc_status ? ` (${order.webrtc_status})` : '')} mono tone={order.webrtc_mismatch ? 'red' : 'gray'} />
               <Info label="Nuoc / Vung / Thanh pho" value={networkText(order)} />
               <Info label="ISP / To chuc / ASN" value={ispText(order)} />
               <Info label="Nguon tra cuu" value={order.ip_intelligence_source || '--'} />
@@ -739,6 +757,8 @@ export default function App() {
                     const info = order.order_info || {};
                     const risk = riskInfo(order);
                     const RiskIcon = risk.icon;
+                    const clientIpVersion = ipVersion(order.client_ip);
+                    const webrtcIpVersion = ipVersion(order.webrtc_ip);
                     return (
                       <tr key={order.id} className={cn('border-t border-[#DADCE0] hover:bg-[#F8FAFD]', (order.risk_level === 'HIGH_RISK' || order.is_blacklisted) && 'bg-[#FCE8E6]/45 hover:bg-[#FCE8E6]/60')}>
                         <td className="p-3 font-mono font-bold whitespace-nowrap">{formatDate(order.created_at)}</td>
@@ -748,14 +768,18 @@ export default function App() {
                           <div className="text-xs text-[#5F6368]">{info.phone || '--'}</div>
                         </td>
                         <td className="p-3">
-                          <div className={cn('inline-flex items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order) ? 'bg-[#FCE8E6] text-[#D93025]' : 'bg-[#F1F3F4]')}>
+                          <div className={cn('inline-flex max-w-[260px] items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order) ? 'bg-[#FCE8E6] text-[#D93025]' : 'bg-[#F1F3F4]')}>
                             <Wifi className={cn('w-4 h-4', isFakeConnection(order) ? 'text-[#D93025]' : 'text-[#1A73E8]')} />
-                            {ipText(order.client_ip)}
+                            <span className="truncate">{ipText(order.client_ip)}</span>
+                            {clientIpVersion && <span className="shrink-0 rounded bg-white/80 px-1.5 py-0.5 text-[10px] font-extrabold">{clientIpVersion}</span>}
                           </div>
                           <div className={cn('mt-1 text-[11px] font-bold', isFakeConnection(order) ? 'text-[#D93025]' : 'text-[#5F6368]')}>{connectionLabel(order)}</div>
                         </td>
                         <td className="p-3">
-                          <div className={cn('font-mono font-extrabold', order.webrtc_mismatch && 'text-[#D93025]')}>{ipText(order.webrtc_ip)}</div>
+                          <div className="flex max-w-[240px] items-center gap-2">
+                            <span className={cn('font-mono font-extrabold truncate', order.webrtc_mismatch && 'text-[#D93025]')}>{ipText(order.webrtc_ip)}</span>
+                            {webrtcIpVersion && <span className="shrink-0 rounded bg-[#F1F3F4] px-1.5 py-0.5 text-[10px] font-extrabold text-[#5F6368]">{webrtcIpVersion}</span>}
+                          </div>
                           <div className={cn('text-xs', order.webrtc_mismatch ? 'text-[#D93025] font-bold' : 'text-[#5F6368]')}>{webrtcLabel(order)}</div>
                         </td>
                         <td className="p-3 max-w-[280px]">
