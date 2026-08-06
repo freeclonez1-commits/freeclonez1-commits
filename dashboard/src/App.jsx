@@ -12,8 +12,6 @@ import {
   deleteStore,
   syncStoreOrders,
   testStoreConnection,
-  getOverviewStats,
-  getChartStats,
   getLogs,
   getBlacklist,
   addToBlacklist,
@@ -22,7 +20,6 @@ import {
   verifyAdminPassword
 } from './api/client';
 
-const Overview = lazy(() => import('./components/Overview'));
 const BlacklistManager = lazy(() => import('./components/BlacklistManager'));
 const StoreManager = lazy(() => import('./components/StoreManager'));
 const ScriptGenerator = lazy(() => import('./components/ScriptGenerator'));
@@ -33,9 +30,7 @@ function PanelLoader() {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('logs');
-  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
-  const refreshInFlightRef = useRef(false);
   const logsAbortControllerRef = useRef(null);
   const logsRequestIdRef = useRef(0);
   const hasLoadedLogsRef = useRef(false);
@@ -45,7 +40,6 @@ export default function App() {
   const [notice, setNotice] = useState(null);
   const [authError, setAuthError] = useState('');
   const [isCheckingKey, setIsCheckingKey] = useState(false);
-  const [dataError, setDataError] = useState('');
 
   // Persist selected store in localStorage
   const [selectedStoreId, setSelectedStoreId] = useState(() => {
@@ -63,8 +57,6 @@ export default function App() {
   const [stores, setStores] = useState([]);
 
   // Data States
-  const [stats, setStats] = useState(null);
-  const [chartData, setChartData] = useState([]);
   const [logs, setLogs] = useState([]);
   const [isLogsLoading, setIsLogsLoading] = useState(true);
   const [logsError, setLogsError] = useState('');
@@ -123,40 +115,6 @@ export default function App() {
       setNotice({ type: 'error', message: 'Không thể tải danh sách cửa hàng. Kiểm tra mật khẩu hoặc kết nối server.' });
     }
   }, [adminKey]);
-
-  // Only fetch dashboard charts when the overview tab is visible.
-  const fetchData = useCallback(async (overrideFilters = null, options = {}) => {
-    if (!adminKey || refreshInFlightRef.current) return;
-    refreshInFlightRef.current = true;
-    setIsRefreshing(true);
-    if (!options.silent) setDataError('');
-    try {
-      let [overviewResult, chartResult] = await Promise.allSettled([
-        getOverviewStats({ store_id: selectedStoreId }),
-        getChartStats({ store_id: selectedStoreId })
-      ]);
-
-      const authenticationFailed = [overviewResult, chartResult].some(result => result.status === 'rejected' && result.reason?.response?.status === 401);
-      if (authenticationFailed) {
-        sessionStorage.removeItem('sapo_dashboard_password_v2');
-        setAdminKey('');
-        setAuthError('Mật khẩu không đúng hoặc đã hết hiệu lực.');
-        return;
-      }
-      if (overviewResult.status === 'fulfilled' && overviewResult.value.success) setStats(overviewResult.value.data);
-      if (chartResult.status === 'fulfilled' && chartResult.value.success) setChartData(chartResult.value.data);
-    } catch (error) {
-      console.error('Error fetching dashboard data:', error);
-      const message = 'Không thể kết nối dashboard với server.';
-      if (!options.silent) {
-        setDataError(message);
-        setNotice({ type: 'error', message });
-      }
-    } finally {
-      setTimeout(() => setIsRefreshing(false), 400);
-      refreshInFlightRef.current = false;
-    }
-  }, [adminKey, selectedStoreId]);
 
   const refreshLogsOnly = useCallback(async (overrideFilters = null, options = {}) => {
     if (!adminKey) return;
@@ -294,20 +252,14 @@ export default function App() {
   }, [refreshLogsOnly]);
 
   useEffect(() => {
-    if (activeTab === 'overview') fetchData(null, { silent: true });
     if (activeTab === 'blacklist') refreshBlacklist();
-  }, [activeTab, fetchData, refreshBlacklist]);
-
-  // Manual mode: avoid background polling/Sapo sync so Supabase/API quota is used
-  // only for explicit user actions such as opening the dashboard, changing filters,
-  // or pressing "Đồng bộ đơn Sapo".
+  }, [activeTab, refreshBlacklist]);
 
   // Sync Sapo Orders Handler
   const handleSyncOrders = async () => {
     try {
       const result = await runOrderSync(syncPresetFromFilters(filters), { quiet: false });
       if (result.skipped) setNotice({ type: 'error', message: 'Chưa có cửa hàng Sapo nào được chọn hoặc không thể đồng bộ chế độ Tất cả thời gian.' });
-      if (activeTab === 'overview') await fetchData(filters, { silent: true });
     } catch (err) {
       console.error('Failed to sync Sapo orders:', err);
       setNotice({ type: 'error', message: err.response?.data?.message || 'Đồng bộ đơn thất bại.' });
@@ -317,7 +269,6 @@ export default function App() {
   const handleDatePresetSync = useCallback(async (preset, presetFilters) => {
     skipNextLogsRefreshRef.current = true;
     setFilters(presetFilters);
-    // Date buttons only filter saved dashboard data. They no longer call Sapo.
     await refreshLogsOnly(presetFilters);
   }, [refreshLogsOnly]);
 
@@ -452,26 +403,32 @@ export default function App() {
     }
   };
 
-  const handleUnlock = async (key) => {
+  const handleUnlockAdmin = async (key) => {
     setIsCheckingKey(true);
     setAuthError('');
-    sessionStorage.setItem('sapo_dashboard_password_v2', key);
     try {
-      const response = await verifyAdminPassword();
-      if (!response.success) throw new Error('Invalid dashboard password');
-      setAdminKey(key);
-    } catch (error) {
+      sessionStorage.setItem('sapo_dashboard_password_v2', key);
+      const res = await verifyAdminPassword();
+      if (res.success) {
+        setAdminKey(key);
+        setNotice({ type: 'success', message: 'Xác thực admin thành công.' });
+      }
+    } catch (err) {
+      console.error('Password verification failed:', err);
       sessionStorage.removeItem('sapo_dashboard_password_v2');
-      setAuthError(error.response?.status === 401 ? 'Mật khẩu không đúng.' : 'Không thể xác minh mật khẩu. Kiểm tra server rồi thử lại.');
+      setAdminKey('');
+      setAuthError('Mật khẩu không đúng. Vui lòng thử lại.');
     } finally {
       setIsCheckingKey(false);
     }
   };
 
-  if (!adminKey) return <AdminAccess onUnlock={handleUnlock} error={authError} isChecking={isCheckingKey} />;
+  if (!adminKey) {
+    return <AdminAccess onUnlock={handleUnlockAdmin} error={authError} isChecking={isCheckingKey} />;
+  }
 
   return (
-    <div className="min-h-screen bg-[#F5F5F7] flex flex-col font-sans overflow-x-hidden">
+    <div className="min-h-screen bg-[#F5F5F7] flex flex-col font-sans">
       <Header
         stores={stores}
         selectedStoreId={selectedStoreId}
@@ -494,18 +451,6 @@ export default function App() {
         <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
 
         <main className="flex-1 min-w-0 p-3 md:p-6 overflow-y-auto max-w-[1750px] mx-auto w-full">
-          {activeTab === 'overview' && (
-            <Suspense fallback={<PanelLoader />}>
-              <Overview
-                stats={stats}
-                chartData={chartData}
-                onNavigateToLogs={() => setActiveTab('logs')}
-                isLoading={isRefreshing}
-                error={dataError}
-              />
-            </Suspense>
-          )}
-
           {activeTab === 'logs' && (
             <LogsTable
               logs={logs}
