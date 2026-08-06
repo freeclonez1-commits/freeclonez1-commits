@@ -2114,8 +2114,6 @@ async function handleBlacklist(event, state, method, parts, query, body) {
     });
 
     await saveBlacklistState(state);
-    await saveLogsState(state);
-    await saveOrdersState(state);
     return json(201, { success: true, message: `IP ${ip} và các IP liên quan đã bị chặn` });
   }
   if (method === 'DELETE' && parts[0]) {
@@ -2128,14 +2126,11 @@ async function handleBlacklist(event, state, method, parts, query, body) {
       if (log.client_ip === ip || log.webrtc_ip === ip) {
         if (isKnownIp(log.client_ip)) relatedIps.add(log.client_ip);
         if (isKnownIp(log.webrtc_ip)) relatedIps.add(log.webrtc_ip);
-        log.is_blacklisted = false;
       }
     });
 
     state.blacklist = state.blacklist.filter(item => !relatedIps.has(item.ip));
     await saveBlacklistState(state);
-    await saveLogsState(state);
-    await saveOrdersState(state);
     return json(200, {
       success: true,
       already_unblocked: before === state.blacklist.length,
@@ -2224,7 +2219,7 @@ exports.handler = async (event) => {
       return await handleLogs(event, state, method, parts, query, body);
     }
     if (resource === 'blacklist') {
-      const state = await loadState({ includeLogs: false, includeStores: false, includeBlacklist: true });
+      const state = await loadState({ includeLogs: true, includeStores: false, includeBlacklist: true });
       return await handleBlacklist(event, state, method, parts, query, body);
     }
     if (resource === 'stats') {
