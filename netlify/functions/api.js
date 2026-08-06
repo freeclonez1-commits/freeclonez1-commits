@@ -1047,7 +1047,7 @@ function recentIpDataFromLogs(stateLogs, ip) {
     return Number.isFinite(checkedAt) && Date.now() - checkedAt < 24 * 60 * 60 * 1000;
   });
   if (!row) return null;
-  return {
+  const cachedData = {
     country: row.country,
     countryCode: row.country_code,
     region: row.region,
@@ -1064,6 +1064,8 @@ function recentIpDataFromLogs(stateLogs, ip) {
     source: row.ip_intelligence_source || 'cache',
     intelligenceVersion: IP_INTELLIGENCE_VERSION
   };
+  if (cachedData.source === 'fallback_pending' || !hasResolvedIpIdentity(cachedData)) return null;
+  return cachedData;
 }
 
 function isResolvedIpIdentityValue(value) {
@@ -1583,7 +1585,7 @@ function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt, ord
   return null;
 }
 
-function shouldRefreshIpIntelligence(log, now = Date.now()) {
+function shouldRefreshIpIntelligence(log, now = Date.now(), { forceUnresolved = false } = {}) {
   const checkedAt = new Date(log?.ip_intelligence_checked_at || 0).getTime();
   const ageMs = Number.isFinite(checkedAt) ? now - checkedAt : Number.POSITIVE_INFINITY;
   const isResolved = hasResolvedIpIdentity({
@@ -1596,6 +1598,7 @@ function shouldRefreshIpIntelligence(log, now = Date.now()) {
   });
 
   if (!isResolved || log?.ip_intelligence_source === 'fallback_pending') {
+    if (forceUnresolved) return true;
     return ageMs >= IP_INTELLIGENCE_PENDING_RETRY_MS;
   }
   return ageMs >= IP_INTELLIGENCE_CACHE_TTL_MS || log?.ip_intelligence_version !== IP_INTELLIGENCE_VERSION;
@@ -1756,6 +1759,7 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
   const syncWindow = getSyncWindow(state, store, datePreset, incremental);
   const since = syncWindow.since;
   const ipCache = new Map();
+  const forceUnresolvedIpRefresh = !incremental;
   let total = 0;
   let synced = 0;
   let updated = 0;
@@ -1868,7 +1872,7 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
         orderLog.session_start_at = candidateVisit.session_start_at;
         orderLog.session_duration_sec = sessionDurationToOrder(candidateVisit.session_start_at, createdAt);
       }
-      const shouldAnalyze = shouldRefreshIpIntelligence(orderLog) || !existing;
+      const shouldAnalyze = shouldRefreshIpIntelligence(orderLog, Date.now(), { forceUnresolved: forceUnresolvedIpRefresh }) || !existing;
       if (shouldAnalyze && isKnownIp(effectiveClientIp)) {
         const analysisKey = `${effectiveClientIp}|${orderLog.webrtc_ip || ''}`;
         const pending = pendingIpAnalysis.get(analysisKey);
