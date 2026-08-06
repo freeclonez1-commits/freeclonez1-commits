@@ -10,7 +10,7 @@ const syncLocks = new Map();
 const ipIntelligenceCache = new Map();
 const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
 const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
-const IP_INTELLIGENCE_VERSION = 3;
+const IP_INTELLIGENCE_VERSION = 4;
 const IP_INTELLIGENCE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const SYNC_LOOKBACK_MS = 5 * 60 * 1000;
 const SYNC_HISTORY_LIMIT = 40;
@@ -950,7 +950,7 @@ async function fetchJsonWithTimeout(url, timeoutMs) {
 }
 
 function rememberIpData(ip, data, ttlMs = IP_INTELLIGENCE_CACHE_TTL_MS) {
-  if (data && Object.keys(data).length) {
+  if (data && Object.keys(data).length && hasResolvedIpIdentity(data)) {
     ipIntelligenceCache.set(ip, { data, expiresAt: Date.now() + ttlMs });
   }
   return data;
@@ -981,22 +981,39 @@ function recentIpDataFromLogs(stateLogs, ip) {
   };
 }
 
+function isResolvedIpIdentityValue(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return Boolean(normalized && !['unknown', 'xx', 'n/a', 'na', 'none', 'null', 'undefined'].includes(normalized));
+}
+
+function hasResolvedIpIdentity(ipData) {
+  if (!ipData || typeof ipData !== 'object') return false;
+  return [
+    ipData.country,
+    ipData.countryCode,
+    ipData.city,
+    ipData.isp,
+    ipData.org,
+    ipData.as
+  ].some(isResolvedIpIdentityValue);
+}
+
 async function lookupIp(ip) {
   if (!isKnownIp(ip)) return {};
   const cached = ipIntelligenceCache.get(ip);
   if (cached && cached.expiresAt > Date.now()) return cached.data;
   if (cached) ipIntelligenceCache.delete(ip);
 
-  let primaryData = null;
-  try {
-    const ipApiKey = process.env.IPAPI_IS_KEY || '';
-    const keyParam = ipApiKey ? `&key=${encodeURIComponent(ipApiKey)}` : '';
-    const data = await fetchJsonWithTimeout(`https://api.ipapi.is/?q=${encodeURIComponent(ip)}${keyParam}`, 1400);
-    if (data && !data.error) {
+  const ipApiKey = process.env.IPAPI_IS_KEY || '';
+  const keyParam = ipApiKey ? `&key=${encodeURIComponent(ipApiKey)}` : '';
+
+  const primaryPromise = fetchJsonWithTimeout(`https://api.ipapi.is/?q=${encodeURIComponent(ip)}${keyParam}`, 1400)
+    .then(data => {
+      if (!data || data.error) return null;
       const company = data.company || {};
       const asn = data.asn || {};
       const location = data.location || {};
-      primaryData = {
+      return {
         country: location.country || 'Unknown',
         countryCode: location.country_code || 'XX',
         city: location.city || location.state || 'Unknown',
@@ -1012,14 +1029,14 @@ async function lookupIp(ip) {
         source: 'ipapi.is',
         intelligenceVersion: IP_INTELLIGENCE_VERSION
       };
-    }
-  } catch (_) {}
+    })
+    .catch(() => null);
 
-  try {
-    const data = await fetchJsonWithTimeout(`https://ipwho.is/${encodeURIComponent(ip)}`, 900);
-    if (data && data.success !== false) {
+  const secondaryPromise = fetchJsonWithTimeout(`https://ipwho.is/${encodeURIComponent(ip)}`, 900)
+    .then(data => {
+      if (!data || data.success === false) return null;
       const isDatacenter = hasDatacenterProvider(data.connection?.isp, data.connection?.org, data.connection?.domain);
-      const secondaryData = {
+      return {
         country: data.country || 'Unknown',
         countryCode: data.country_code || 'XX',
         city: data.city || 'Unknown',
@@ -1035,30 +1052,33 @@ async function lookupIp(ip) {
         source: 'ipwho.is',
         intelligenceVersion: IP_INTELLIGENCE_VERSION
       };
+    })
+    .catch(() => null);
 
-      if (primaryData) {
-        const primaryIdentity = `${primaryData.countryCode}|${primaryData.isp}|${primaryData.org}`.toLowerCase();
-        const secondaryIdentity = `${secondaryData.countryCode}|${secondaryData.isp}|${secondaryData.org}`.toLowerCase();
-        const identityConflict = primaryIdentity !== secondaryIdentity;
-        const primaryHighRisk = primaryData.hosting || primaryData.abuser || primaryData.vpn || primaryData.proxy;
+  const [primaryData, secondaryData] = await Promise.all([primaryPromise, secondaryPromise]);
 
-        // A high-risk label must not survive when an independent source says
-        // the address belongs to a normal ISP in another network/country.
-        if (primaryHighRisk && !secondaryData.hosting && identityConflict) {
-          return rememberIpData(ip, {
-            ...secondaryData,
-            source: 'ipapi.is+ipwho.is:conflict',
-            intelligenceVersion: IP_INTELLIGENCE_VERSION,
-            intelligenceConflict: true
-          }, 15 * 60 * 1000);
-        }
-        return rememberIpData(ip, primaryData);
-      }
+  if (primaryData && secondaryData) {
+    const primaryIdentity = `${primaryData.countryCode}|${primaryData.isp}|${primaryData.org}`.toLowerCase();
+    const secondaryIdentity = `${secondaryData.countryCode}|${secondaryData.isp}|${secondaryData.org}`.toLowerCase();
+    const identityConflict = primaryIdentity !== secondaryIdentity;
+    const primaryHighRisk = primaryData.hosting || primaryData.abuser || primaryData.vpn || primaryData.proxy;
 
-      return rememberIpData(ip, secondaryData, 5 * 60 * 1000);
+    // A high-risk label must not survive when an independent source says
+    // the address belongs to a normal ISP in another network/country.
+    if (primaryHighRisk && !secondaryData.hosting && identityConflict) {
+      return rememberIpData(ip, {
+        ...secondaryData,
+        source: 'ipapi.is+ipwho.is:conflict',
+        intelligenceVersion: IP_INTELLIGENCE_VERSION,
+        intelligenceConflict: true
+      }, 15 * 60 * 1000);
     }
-  } catch (_) {}
-  return primaryData ? rememberIpData(ip, primaryData) : {};
+    return rememberIpData(ip, primaryData);
+  }
+
+  if (primaryData) return rememberIpData(ip, primaryData);
+  if (secondaryData) return rememberIpData(ip, secondaryData, 5 * 60 * 1000);
+  return {};
 }
 
 async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
@@ -1079,7 +1099,7 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
     ipData = await lookupIp(clientIp);
     if (ipCache) ipCache.set(clientIp, ipData);
   }
-  if (!ipData || Object.keys(ipData).length === 0) {
+  if (!ipData || Object.keys(ipData).length === 0 || !hasResolvedIpIdentity(ipData)) {
     return {
       ipData: {},
       isVpn: false,

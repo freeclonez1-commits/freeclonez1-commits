@@ -10,7 +10,19 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
     const value = String(ip || '').trim().toLowerCase();
     return Boolean(value && value !== 'unknown' && value !== '0.0.0.0' && value !== '::');
   };
-  const isUnknownLog = (log) => log?.risk_level === 'UNKNOWN' || !isKnownIp(log?.client_ip);
+  const isResolvedText = (value) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    return Boolean(normalized && !['unknown', 'xx', 'n/a', 'na', 'none', 'null', 'undefined'].includes(normalized));
+  };
+  const hasResolvedIpInfo = (log) => [
+    log?.country,
+    log?.country_code,
+    log?.city,
+    log?.isp,
+    log?.org,
+    log?.asn
+  ].some(isResolvedText);
+  const isUnknownLog = (log) => log?.risk_level === 'UNKNOWN' || !isKnownIp(log?.client_ip) || !hasResolvedIpInfo(log);
   const compactIp = (ip) => {
     const value = String(ip || 'unknown').trim();
     if (value.includes(':') && value.length > 24) return `${value.slice(0, 22)}...`;
@@ -99,6 +111,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
   };
 
   const riskPresentation = (log) => {
+    if (isUnknownLog(log)) return { label: 'ĐANG KIỂM TRA IP', mobileLabel: 'ĐANG KIỂM TRA' };
     if (log.webrtc_mismatch) return { label: 'LỆCH IP WEBRTC', mobileLabel: 'LỆCH WEBRTC' };
     if (log.is_tor) return { label: 'PHÁT HIỆN TOR', mobileLabel: 'TOR' };
     if (log.is_vpn || log.is_proxy) return { label: 'PHÁT HIỆN VPN / PROXY', mobileLabel: 'VPN / PROXY' };
@@ -134,9 +147,14 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
   const renderConnectionIp = (log) => {
     if (isUnknownLog(log)) {
       return (
-        <span className="font-mono font-extrabold text-[#86868B] bg-[#F2F2F7] px-2.5 py-0.5 rounded-md border border-[#D1D1D6]">
-          — Chưa có IP
-        </span>
+        <div className="flex flex-1 min-w-0 items-center gap-2" aria-label={`${log.client_ip || 'unknown'}, IP intelligence pending`}>
+          <span className="shrink-0 font-mono font-extrabold text-[#86868B] bg-[#F2F2F7] px-2.5 py-0.5 rounded-md border border-[#D1D1D6]">
+            {isKnownIp(log.client_ip) ? compactIp(log.client_ip) : '-- Chưa có IP'}
+          </span>
+          <span className="min-w-0 truncate text-[10px] font-sans font-medium text-[#86868B]">
+            Đang đợi tra cứu IP
+          </span>
+        </div>
       );
     }
     const isHighRisk = log.risk_level === 'HIGH_RISK';
@@ -447,7 +465,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                         ) : isUnknown ? (
                           <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold bg-[#F2F2F7] text-[#86868B] border border-[#D1D1D6]">
                             <AlertTriangle className="w-4 h-4" />
-                            <span>CHƯA CÓ IP</span>
+                            <span>ĐANG KIỂM TRA IP</span>
                           </span>
                         ) : isHighRisk ? (
                           <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-black bg-[#FF3B30]/10 text-[#FF3B30] border border-[#FF3B30]/30 shadow-sm">
@@ -582,6 +600,10 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                   {isBlocked ? (
                     <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-[#FF3B30] text-white">
                       🚫 ĐÃ CHẶN
+                    </span>
+                  ) : isUnknown ? (
+                    <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-[#F2F2F7] text-[#86868B] border border-[#D1D1D6]">
+                      ĐANG KIỂM TRA
                     </span>
                   ) : isHighRisk ? (
                     <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-[#FF3B30]/10 text-[#FF3B30] border border-[#FF3B30]/30">
@@ -767,8 +789,11 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                   <div>
                     <span className="text-[#86868B] font-bold block text-[11px]">1. IP KẾT NỐI (Sapo/Vercel ghi nhận):</span>
                     <span className={`font-mono font-extrabold text-sm break-all ${isUnknownLog(selectedLog) ? 'text-[#86868B]' : (selectedLog.risk_level === 'HIGH_RISK' ? 'text-[#FF3B30]' : 'text-[#34C759]')}`}>
-                      {isUnknownLog(selectedLog) ? 'Chưa có IP hợp lệ' : selectedLog.client_ip}
+                      {isKnownIp(selectedLog.client_ip) ? selectedLog.client_ip : 'Chưa có IP hợp lệ'}
                     </span>
+                    {isUnknownLog(selectedLog) && isKnownIp(selectedLog.client_ip) && (
+                      <span className="block text-[10px] font-bold text-[#86868B] mt-1">Đang đợi tra cứu quốc gia/ISP</span>
+                    )}
                   </div>
                   <span className="text-right text-[11px] text-[#86868B]">
                     <strong>{selectedLog.isp}</strong><br />{selectedLog.country} ({selectedLog.city})
