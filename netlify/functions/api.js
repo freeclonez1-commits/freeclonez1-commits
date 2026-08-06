@@ -19,7 +19,8 @@ const BOOTSTRAP_DASHBOARD_PASSWORD_HASH = '5614f8701b76755fca46a29799ae4122ca791
 const DATACENTER_PROVIDER_WORDS = [
   'gthost', 'm247', 'vultr', 'digitalocean', 'linode', 'hetzner', 'ovh',
   'aws', 'amazon', 'google cloud', 'azure', 'vpn', 'proxy', 'datacenter',
-  'datacamp', 'cdnext', 'cyberzone', 'cyberzon'
+  'datacamp', 'cdnext', 'cyberzone', 'cyberzon', 'cogent', 'ip transit',
+  'iptransit', 'server', 'hosting', 'host', 'cloud', 'tunnel', 'exit'
 ];
 
 const TRACKER_SOURCE = `/**
@@ -1115,16 +1116,16 @@ async function lookupIp(ip) {
     })
     .catch(() => null);
 
-  const tertiaryPromise = fetchJsonWithTimeout(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,city,isp,org,as,hosting,proxy`, 1800)
+  const tertiaryPromise = fetchJsonWithTimeout(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,city,isp,org,as,hosting,proxy`, 2500)
     .then(data => {
       if (!data || data.status !== 'success') return null;
       const isDatacenter = Boolean(data.hosting || hasDatacenterProvider(data.isp, data.org, data.as));
       return {
-        country: data.country || 'Vietnam',
-        countryCode: data.countryCode || 'VN',
+        country: data.country || 'Unknown',
+        countryCode: data.countryCode || 'XX',
         city: data.city || 'Unknown',
-        isp: data.isp || 'VNPT/Viettel Network',
-        org: data.org || data.isp || 'VNPT/Viettel Network',
+        isp: data.isp || 'Unknown',
+        org: data.org || data.isp || 'Unknown',
         as: data.as || null,
         hosting: isDatacenter,
         vpn: Boolean(data.proxy),
@@ -1162,24 +1163,26 @@ async function lookupIp(ip) {
     return rememberIpData(ip, result);
   }
 
-  // Fallback if all external lookup services failed or timed out
+  // Fallback if all external lookup services failed or timed out.
+  // DO NOT hardcode Vietnam/Viettel so unknown IPs are never falsely marked safe.
+  const isKnownDatacenterPrefix = /^38\.|^185\.|^45\.|^198\.|^104\.|^192\.241\.|^159\.65\.|^167\.99\./.test(ip);
   const defaultFallback = {
-    country: 'Vietnam',
-    countryCode: 'VN',
-    city: 'Hanoi',
-    isp: 'Mạng Viễn Thông Việt Nam (Viettel/VNPT/FPT)',
-    org: 'Consumer Internet Provider',
+    country: 'Unknown',
+    countryCode: 'XX',
+    city: 'Unknown',
+    isp: isKnownDatacenterPrefix ? 'Datacenter / Hosting IP' : 'Unknown',
+    org: 'Unknown',
     as: null,
-    hosting: false,
-    vpn: false,
-    proxy: false,
+    hosting: isKnownDatacenterPrefix,
+    vpn: isKnownDatacenterPrefix,
+    proxy: isKnownDatacenterPrefix,
     tor: false,
     abuser: false,
     vpnService: null,
-    source: 'fallback_default',
+    source: 'fallback_pending',
     intelligenceVersion: IP_INTELLIGENCE_VERSION
   };
-  return rememberIpData(ip, defaultFallback, 5 * 60 * 1000);
+  return defaultFallback;
 }
 
 async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
