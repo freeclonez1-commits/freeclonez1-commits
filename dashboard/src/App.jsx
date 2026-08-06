@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  Ban,
   Calendar,
   CheckCircle2,
   ChevronLeft,
@@ -22,8 +23,11 @@ import { businessDate, businessDateDaysAgo } from './utils/dates';
 import {
   createStore,
   deleteStore,
+  addToBlacklist,
+  getBlacklist,
   getOrders,
   getStores,
+  removeFromBlacklist,
   syncStoreOrders,
   testStoreConnection,
   updateStore,
@@ -83,12 +87,17 @@ function connectionLabel(order) {
 }
 
 function webrtcLabel(order) {
-  if (!order.webrtc_ip) return 'Khong co IP WebRTC';
+  if (!order.webrtc_ip) {
+    if (order.webrtc_status === 'not_supported') return 'Trinh duyet khong ho tro WebRTC';
+    if (order.webrtc_status === 'error') return 'Loi kiem tra WebRTC';
+    return 'Khong leak IP WebRTC';
+  }
   if (order.webrtc_mismatch) return 'IP WebRTC / IP goc bi lo';
   return 'IP WebRTC trung IP ket noi';
 }
 
 function riskInfo(order) {
+  if (order.is_blacklisted) return { tone: 'red', label: 'Da chan IP', icon: Ban };
   if (order.risk_level === 'HIGH_RISK') {
     if (order.webrtc_mismatch) return { tone: 'red', label: 'Fake IP: lech WebRTC', icon: ShieldAlert };
     if (order.is_vpn || order.is_proxy) return { tone: 'red', label: 'VPN / Proxy', icon: ShieldAlert };
@@ -230,7 +239,7 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
   );
 }
 
-function OrderDetail({ order, onClose }) {
+function OrderDetail({ order, onClose, onBlockOrder, onUnblockOrder }) {
   if (!order) return null;
   const info = order.order_info || {};
   const risk = riskInfo(order);
@@ -260,6 +269,13 @@ function OrderDetail({ order, onClose }) {
               {risk.label}
             </div>
             <div className="mt-3 text-sm text-[#6E6E73]">{(order.risk_reasons || []).join(', ') || 'Khong co canh bao.'}</div>
+            <button
+              onClick={() => order.is_blacklisted ? onUnblockOrder(order) : onBlockOrder(order)}
+              className={cn('mt-4 h-10 px-4 rounded-lg font-extrabold text-sm inline-flex items-center gap-2', order.is_blacklisted ? 'bg-[#F1F3F4] text-[#3C4043]' : 'bg-[#FCE8E6] text-[#D93025]')}
+            >
+              <Ban className="w-4 h-4" />
+              {order.is_blacklisted ? 'Bo chan IP' : 'Chan IP nay'}
+            </button>
           </div>
           <div className="md:col-span-2 border border-[#E5E5EA] rounded-lg p-4">
             <div className="text-xs font-bold uppercase text-[#6E6E73] mb-3">IP va WebRTC</div>
@@ -294,6 +310,7 @@ export default function App() {
   const [preset, setPreset] = useState('TODAY');
   const [search, setSearch] = useState('');
   const [orders, setOrders] = useState([]);
+  const [blacklist, setBlacklist] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, limit: 30, total: 0, totalPages: 1 });
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -320,6 +337,12 @@ export default function App() {
     }
   }, [adminKey, selectedStoreId]);
 
+  const loadBlacklist = useCallback(async () => {
+    if (!adminKey) return;
+    const res = await getBlacklist();
+    if (res.success) setBlacklist(res.data || []);
+  }, [adminKey]);
+
   const loadOrders = useCallback(async (page = pagination.page) => {
     if (!adminKey) return;
     setLoading(true);
@@ -334,6 +357,7 @@ export default function App() {
       });
       setOrders(res.data || []);
       setPagination(res.pagination || { page, limit: activePreset.limit, total: 0, totalPages: 1 });
+      await loadBlacklist().catch(() => {});
     } catch (err) {
       if (err.response?.status === 401) {
         sessionStorage.removeItem('sapo_dashboard_password_v2');
@@ -344,7 +368,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [adminKey, activePreset, pagination.page, search, selectedStoreId, notify]);
+  }, [adminKey, activePreset, pagination.page, search, selectedStoreId, notify, loadBlacklist]);
 
   const runSync = async () => {
     if (!selectedStore) {
@@ -363,6 +387,32 @@ export default function App() {
     }
   };
 
+  const blockOrder = async (order) => {
+    const ips = [order.client_ip, order.webrtc_ip].filter(value => value && !['unknown', '--', 'not_available'].includes(String(value).toLowerCase()));
+    if (!ips.length) {
+      notify('Don nay chua co IP hop le de chan.', 'error');
+      return;
+    }
+    try {
+      await Promise.all([...new Set(ips)].map(ip => addToBlacklist(ip, `Chan tu don ${order.order_info?.order_id || order.id}`)));
+      notify(`Da chan ${new Set(ips).size} IP. Lan truy cap tiep theo se bi chan ngay.`);
+      await Promise.all([loadBlacklist(), loadOrders(pagination.page)]);
+    } catch (err) {
+      notify(err.response?.data?.message || 'Khong chan duoc IP.', 'error');
+    }
+  };
+
+  const unblockOrder = async (order) => {
+    const ips = [order.client_ip, order.webrtc_ip].filter(value => value && !['unknown', '--', 'not_available'].includes(String(value).toLowerCase()));
+    try {
+      await Promise.all([...new Set(ips)].map(removeFromBlacklist));
+      notify('Da bo chan IP cua don nay.');
+      await Promise.all([loadBlacklist(), loadOrders(pagination.page)]);
+    } catch (err) {
+      notify(err.response?.data?.message || 'Khong bo chan duoc IP.', 'error');
+    }
+  };
+
   useEffect(() => {
     loadStores().catch(() => {});
   }, [loadStores]);
@@ -378,25 +428,26 @@ export default function App() {
   const summary = useMemo(() => {
     const high = orders.filter(order => order.risk_level === 'HIGH_RISK').length;
     const webrtc = orders.filter(order => order.webrtc_ip).length;
-    return { high, webrtc };
+    const blocked = orders.filter(order => order.is_blacklisted).length;
+    return { high, webrtc, blocked };
   }, [orders]);
 
   if (!adminKey) return <AdminGate onUnlock={setAdminKey} />;
 
   return (
-    <div className="min-h-screen bg-[#F5F5F7] text-[#1D1D1F]">
-      <header className="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-[#E5E5EA]">
+    <div className="min-h-screen bg-[#F8FAFD] text-[#202124]">
+      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-[#DADCE0]">
         <div className="max-w-[1680px] mx-auto px-4 py-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-lg bg-[#0071E3] text-white flex items-center justify-center"><ShieldCheck className="w-6 h-6" /></div>
+            <div className="w-11 h-11 rounded-lg bg-[#1A73E8] text-white flex items-center justify-center"><ShieldCheck className="w-6 h-6" /></div>
             <div>
               <h1 className="text-lg font-extrabold">Sapo IP Guard Clean</h1>
-              <p className="text-xs text-[#6E6E73]">Quet don, IP ket noi va IP WebRTC</p>
+              <p className="text-xs text-[#5F6368]">Quet don, IP ket noi va IP WebRTC</p>
             </div>
           </div>
           <button
             onClick={() => { sessionStorage.removeItem('sapo_dashboard_password_v2'); setAdminKey(''); }}
-            className="h-9 px-3 rounded-lg bg-[#F2F2F7] text-sm font-bold"
+            className="h-9 px-3 rounded-lg bg-[#F1F3F4] text-sm font-bold"
           >
             Khoa
           </button>
@@ -422,21 +473,23 @@ export default function App() {
             <Info label="Don dang hien" value={String(pagination.total || 0)} />
             <Info label="Canh bao" value={String(summary.high)} />
             <Info label="Co WebRTC" value={String(summary.webrtc)} />
+            <Info label="Da chan trong bang" value={String(summary.blocked)} />
+            <Info label="Blacklist" value={String(blacklist.length)} />
             <Info label="Preset" value={DATE_PRESETS[preset].label} />
           </section>
         </aside>
 
-        <section className="bg-white border border-[#E5E5EA] rounded-lg overflow-hidden">
-          <div className="p-4 border-b border-[#E5E5EA] space-y-3">
+        <section className="bg-white border border-[#DADCE0] rounded-lg overflow-hidden">
+          <div className="p-4 border-b border-[#DADCE0] space-y-3">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
               <div>
                 <h2 className="text-xl font-extrabold">Danh sach don hang</h2>
-                <p className="text-sm text-[#6E6E73]">Data chi cap nhat khi bam nut quet don.</p>
+                <p className="text-sm text-[#5F6368]">Data chi cap nhat khi bam nut quet don.</p>
               </div>
               <button
                 onClick={runSync}
                 disabled={syncing}
-                className="h-11 px-4 rounded-lg bg-[#34C759] text-white font-extrabold flex items-center justify-center gap-2"
+                className="h-11 px-4 rounded-lg bg-[#188038] text-white font-extrabold flex items-center justify-center gap-2"
               >
                 {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                 Quet don Sapo
@@ -448,7 +501,7 @@ export default function App() {
                   <button
                     key={key}
                     onClick={() => setPreset(key)}
-                    className={cn('h-10 px-4 rounded-lg text-sm font-extrabold', preset === key ? 'bg-[#0071E3] text-white' : 'bg-[#F2F2F7] text-[#1D1D1F]')}
+                    className={cn('h-10 px-4 rounded-lg text-sm font-extrabold', preset === key ? 'bg-[#1A73E8] text-white' : 'bg-[#F1F3F4] text-[#202124]')}
                   >
                     <Calendar className="w-4 h-4 inline mr-1" />
                     {item.label}
@@ -456,22 +509,22 @@ export default function App() {
                 ))}
               </div>
               <div className="relative flex-1">
-                <Search className="w-4 h-4 absolute left-3 top-3 text-[#86868B]" />
+                <Search className="w-4 h-4 absolute left-3 top-3 text-[#5F6368]" />
                 <input
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
                   onKeyDown={(event) => { if (event.key === 'Enter') loadOrders(1); }}
                   placeholder="Tim ma don, ten, phone, IP, ISP..."
-                  className="w-full h-10 rounded-lg border border-[#D1D1D6] pl-9 pr-3 text-sm outline-none focus:border-[#0071E3]"
+                  className="w-full h-10 rounded-lg border border-[#DADCE0] pl-9 pr-3 text-sm outline-none focus:border-[#1A73E8]"
                 />
               </div>
-              <button onClick={() => loadOrders(1)} className="h-10 px-4 rounded-lg bg-[#F2F2F7] font-bold text-sm">Tai lai</button>
+              <button onClick={() => loadOrders(1)} className="h-10 px-4 rounded-lg bg-[#F1F3F4] font-bold text-sm">Tai lai</button>
             </div>
           </div>
 
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1080px] text-sm">
-              <thead className="bg-[#F5F5F7] text-[#6E6E73]">
+              <thead className="bg-[#F8FAFD] text-[#5F6368]">
                 <tr>
                   <th className="text-left p-3 font-extrabold">Thoi gian</th>
                   <th className="text-left p-3 font-extrabold">Don & khach</th>
@@ -480,52 +533,62 @@ export default function App() {
                   <th className="text-left p-3 font-extrabold">Vi tri / ISP</th>
                   <th className="text-left p-3 font-extrabold">Trang thai</th>
                   <th className="text-right p-3 font-extrabold">Chi tiet</th>
+                  <th className="text-right p-3 font-extrabold">Chan IP</th>
                 </tr>
               </thead>
               <tbody>
                 {loading && (
-                  <tr><td colSpan="7" className="p-10 text-center text-[#86868B] font-bold"><Loader2 className="w-5 h-5 animate-spin inline mr-2" />Dang tai...</td></tr>
+                  <tr><td colSpan="8" className="p-10 text-center text-[#86868B] font-bold"><Loader2 className="w-5 h-5 animate-spin inline mr-2" />Dang tai...</td></tr>
                 )}
                 {!loading && orders.length === 0 && (
-                  <tr><td colSpan="7" className="p-10 text-center text-[#86868B] font-bold">Chua co don trong khoang nay. Bam Quet don Sapo.</td></tr>
+                  <tr><td colSpan="8" className="p-10 text-center text-[#86868B] font-bold">Chua co don trong khoang nay. Bam Quet don Sapo.</td></tr>
                 )}
                 {!loading && orders.map(order => {
                   const info = order.order_info || {};
                   const risk = riskInfo(order);
                   const RiskIcon = risk.icon;
                   return (
-                    <tr key={order.id} className={cn('border-t border-[#E5E5EA]', order.risk_level === 'HIGH_RISK' && 'bg-[#FFF2F2]')}>
+                    <tr key={order.id} className={cn('border-t border-[#DADCE0]', (order.risk_level === 'HIGH_RISK' || order.is_blacklisted) && 'bg-[#FCE8E6]/45')}>
                       <td className="p-3 font-mono font-bold">{formatDate(order.created_at)}</td>
                       <td className="p-3">
-                        <div className="font-extrabold text-[#0071E3]">{info.order_id || order.id}</div>
+                        <div className="font-extrabold text-[#1A73E8]">{info.order_id || order.id}</div>
                         <div className="font-bold">{info.customer_name || '--'}</div>
-                        <div className="text-xs text-[#86868B]">{info.phone || '--'}</div>
+                        <div className="text-xs text-[#5F6368]">{info.phone || '--'}</div>
                       </td>
                       <td className="p-3">
-                        <div className={cn('inline-flex items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order) ? 'bg-[#FF3B30]/10 text-[#FF3B30]' : 'bg-[#F2F2F7]')}>
-                          <Wifi className={cn('w-4 h-4', isFakeConnection(order) ? 'text-[#FF3B30]' : 'text-[#0071E3]')} />
+                        <div className={cn('inline-flex items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order) ? 'bg-[#FCE8E6] text-[#D93025]' : 'bg-[#F1F3F4]')}>
+                          <Wifi className={cn('w-4 h-4', isFakeConnection(order) ? 'text-[#D93025]' : 'text-[#1A73E8]')} />
                           {ipText(order.client_ip)}
                         </div>
-                        <div className={cn('mt-1 text-[11px] font-bold', isFakeConnection(order) ? 'text-[#FF3B30]' : 'text-[#86868B]')}>{connectionLabel(order)}</div>
+                        <div className={cn('mt-1 text-[11px] font-bold', isFakeConnection(order) ? 'text-[#D93025]' : 'text-[#5F6368]')}>{connectionLabel(order)}</div>
                       </td>
                       <td className="p-3">
-                        <div className={cn('font-mono font-extrabold', order.webrtc_mismatch && 'text-[#FF3B30]')}>{ipText(order.webrtc_ip)}</div>
-                        <div className={cn('text-xs', order.webrtc_mismatch ? 'text-[#FF3B30] font-bold' : 'text-[#86868B]')}>{webrtcLabel(order)}</div>
+                        <div className={cn('font-mono font-extrabold', order.webrtc_mismatch && 'text-[#D93025]')}>{ipText(order.webrtc_ip)}</div>
+                        <div className={cn('text-xs', order.webrtc_mismatch ? 'text-[#D93025] font-bold' : 'text-[#5F6368]')}>{webrtcLabel(order)}</div>
                       </td>
                       <td className="p-3 max-w-[260px]">
                         <div className="font-bold truncate flex items-center gap-1"><Globe2 className="w-4 h-4" />{networkText(order)}</div>
-                        <div className="text-xs text-[#86868B] truncate">{ispText(order)}</div>
+                        <div className="text-xs text-[#5F6368] truncate">{ispText(order)}</div>
                       </td>
                       <td className="p-3">
-                        <div className={cn('inline-flex items-center gap-2 rounded-full px-3 py-1 font-extrabold text-xs', risk.tone === 'red' ? 'bg-[#FF3B30]/10 text-[#FF3B30]' : risk.tone === 'green' ? 'bg-[#34C759]/10 text-[#1A8F3A]' : 'bg-[#F2F2F7] text-[#6E6E73]')}>
+                        <div className={cn('inline-flex items-center gap-2 rounded-full px-3 py-1 font-extrabold text-xs', risk.tone === 'red' ? 'bg-[#FCE8E6] text-[#D93025]' : risk.tone === 'green' ? 'bg-[#E6F4EA] text-[#188038]' : 'bg-[#F1F3F4] text-[#5F6368]')}>
                           <RiskIcon className="w-4 h-4" />
                           {risk.label}
                         </div>
                       </td>
                       <td className="p-3 text-right">
-                        <button onClick={() => setSelectedOrder(order)} className="h-9 px-3 rounded-lg bg-[#E8F2FF] text-[#0071E3] font-extrabold inline-flex items-center gap-1">
+                        <button onClick={() => setSelectedOrder(order)} className="h-9 px-3 rounded-lg bg-[#E8F0FE] text-[#1A73E8] font-extrabold inline-flex items-center gap-1">
                           <Eye className="w-4 h-4" />
                           Xem
+                        </button>
+                      </td>
+                      <td className="p-3 text-right">
+                        <button
+                          onClick={() => order.is_blacklisted ? unblockOrder(order) : blockOrder(order)}
+                          className={cn('h-9 px-3 rounded-lg font-extrabold inline-flex items-center gap-1', order.is_blacklisted ? 'bg-[#F1F3F4] text-[#3C4043]' : 'bg-[#FCE8E6] text-[#D93025]')}
+                        >
+                          <Ban className="w-4 h-4" />
+                          {order.is_blacklisted ? 'Bo chan' : 'Chan'}
                         </button>
                       </td>
                     </tr>
@@ -535,15 +598,20 @@ export default function App() {
             </table>
           </div>
 
-          <div className="p-4 border-t border-[#E5E5EA] flex items-center justify-between">
-            <button disabled={pagination.page <= 1} onClick={() => loadOrders(pagination.page - 1)} className="h-9 px-3 rounded-lg bg-[#F2F2F7] font-bold disabled:opacity-40"><ChevronLeft className="w-4 h-4 inline" /> Truoc</button>
-            <div className="text-sm font-bold text-[#6E6E73]">Trang {pagination.page} / {pagination.totalPages} - {pagination.total} don</div>
-            <button disabled={pagination.page >= pagination.totalPages} onClick={() => loadOrders(pagination.page + 1)} className="h-9 px-3 rounded-lg bg-[#F2F2F7] font-bold disabled:opacity-40">Sau <ChevronRight className="w-4 h-4 inline" /></button>
+          <div className="p-4 border-t border-[#DADCE0] flex items-center justify-between">
+            <button disabled={pagination.page <= 1} onClick={() => loadOrders(pagination.page - 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40"><ChevronLeft className="w-4 h-4 inline" /> Truoc</button>
+            <div className="text-sm font-bold text-[#5F6368]">Trang {pagination.page} / {pagination.totalPages} - {pagination.total} don</div>
+            <button disabled={pagination.page >= pagination.totalPages} onClick={() => loadOrders(pagination.page + 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40">Sau <ChevronRight className="w-4 h-4 inline" /></button>
           </div>
         </section>
       </main>
 
-      <OrderDetail order={selectedOrder} onClose={() => setSelectedOrder(null)} />
+      <OrderDetail
+        order={selectedOrder}
+        onClose={() => setSelectedOrder(null)}
+        onBlockOrder={blockOrder}
+        onUnblockOrder={unblockOrder}
+      />
     </div>
   );
 }

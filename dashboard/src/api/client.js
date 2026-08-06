@@ -51,3 +51,18 @@ export async function getOrders(params = {}, options = {}) {
   const res = await axios.get(`${API_BASE}/logs`, adminConfig({ params, signal: options.signal }));
   return res.data;
 }
+
+export async function getBlacklist() {
+  const res = await axios.get(`${API_BASE}/blacklist`, adminConfig());
+  return res.data;
+}
+
+export async function addToBlacklist(ip, reason = 'Blocked from dashboard') {
+  const res = await axios.post(`${API_BASE}/blacklist`, { ip, reason, source: 'dashboard' }, adminConfig());
+  return res.data;
+}
+
+export async function removeFromBlacklist(ip) {
+  const res = await axios.delete(`${API_BASE}/blacklist/${encodeURIComponent(ip)}`, adminConfig());
+  return res.data;
+}

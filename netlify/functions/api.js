@@ -29,8 +29,29 @@ const TRACKER_SOURCE = `(() => {
     return window.location.origin;
   })();
   const apiKey = window.SAPO_TRACKER_CONFIG && window.SAPO_TRACKER_CONFIG.apiKey ? window.SAPO_TRACKER_CONFIG.apiKey : null;
+  const initialBlock = window.__SAPO_IP_GUARD_BLOCK || null;
   const sessionKey = 'sapo_ip_guard_session_v2';
   const sessionStartKey = 'sapo_ip_guard_session_start_v2';
+
+  function renderBlocked(ip, reason) {
+    try {
+      document.documentElement.innerHTML =
+        '<head><title>Access blocked</title><meta name="viewport" content="width=device-width,initial-scale=1"></head>' +
+        '<body style="margin:0;font-family:Arial,sans-serif;background:#f8fafd;color:#202124;display:flex;min-height:100vh;align-items:center;justify-content:center">' +
+        '<main style="max-width:520px;margin:24px;padding:28px;border:1px solid #dadce0;border-radius:8px;background:white;box-shadow:0 1px 3px rgba(60,64,67,.18)">' +
+        '<div style="width:48px;height:48px;border-radius:50%;background:#fce8e6;color:#d93025;display:flex;align-items:center;justify-content:center;font-size:24px;margin-bottom:16px">!</div>' +
+        '<h1 style="font-size:22px;line-height:1.25;margin:0 0 8px;font-weight:700">Truy cap bi chan</h1>' +
+        '<p style="font-size:14px;color:#5f6368;margin:0 0 16px">Dia chi IP cua ban nam trong danh sach chan cua cua hang.</p>' +
+        '<div style="font-family:Consolas,monospace;background:#f1f3f4;border-radius:6px;padding:10px 12px;font-weight:700">' + String(ip || 'unknown') + '</div>' +
+        '<p style="font-size:12px;color:#80868b;margin:12px 0 0">' + String(reason || 'Blocked by Sapo IP Guard') + '</p>' +
+        '</main></body>';
+    } catch (_) {}
+  }
+
+  if (initialBlock && initialBlock.is_blacklisted) {
+    renderBlocked(initialBlock.ip, initialBlock.reason);
+    return;
+  }
 
   function sessionValue(key, value) {
     try {
@@ -65,14 +86,23 @@ const TRACKER_SOURCE = `(() => {
     payload.session_start_at = sessionValue(sessionStartKey) || new Date().toISOString();
 
     const body = JSON.stringify(payload);
-    try {
-      if (navigator.sendBeacon && navigator.sendBeacon(backendUrl + '/api/v1/logs/collect', new Blob([body], { type: 'application/json' }))) return;
-    } catch (_) {}
     fetch(backendUrl + '/api/v1/logs/collect', {
       method: 'POST',
       keepalive: true,
       headers: { 'Content-Type': 'application/json' },
       body
+    }).then(res => res.json()).then(data => {
+      if (data && data.is_blacklisted) renderBlocked(data.blocked_ip || data.client_ip, data.block_reason);
+    }).catch(() => {});
+  }
+
+  function checkBlocked(webrtcIp) {
+    if (!webrtcIp) return;
+    fetch(backendUrl + '/api/v1/blacklist/check?webrtc_ip=' + encodeURIComponent(webrtcIp), {
+      method: 'GET',
+      keepalive: true
+    }).then(res => res.json()).then(data => {
+      if (data && data.is_blacklisted) renderBlocked(data.blocked_ip || webrtcIp, data.reason);
     }).catch(() => {});
   }
 
@@ -122,6 +152,7 @@ const TRACKER_SOURCE = `(() => {
             webrtc_ip: Array.from(ips)[0],
             webrtc_status: 'captured'
           });
+          if (ips.size) checkBlocked(Array.from(ips)[0]);
           if (!event.candidate && ips.size) finish('captured');
         };
         pc.createOffer().then(offer => pc.setLocalDescription(offer)).catch(() => finish('error'));
@@ -215,8 +246,10 @@ function stateTemplate() {
     stores: [],
     logs: [],
     orders: [],
+    blacklist: [],
     autoStoreId: 1,
-    autoLogId: 1000
+    autoLogId: 1000,
+    autoBlacklistId: 1
   };
 }
 
@@ -235,10 +268,11 @@ function packLogsValue(logs, autoLogId) {
   };
 }
 
-async function loadState({ includeLogs = true, includeStores = true } = {}) {
+async function loadState({ includeLogs = true, includeStores = true, includeBlacklist = true } = {}) {
   const keys = [];
   if (includeStores) keys.push('stores');
   if (includeLogs) keys.push('logs', 'sapo_orders');
+  if (includeBlacklist) keys.push('blacklist');
   const rows = keys.length
     ? await supabaseFetch(`/app_state?key=in.(${keys.map(encodeURIComponent).join(',')})&select=key,value`)
     : [];
@@ -264,6 +298,12 @@ async function loadState({ includeLogs = true, includeStores = true } = {}) {
       : (Array.isArray(ordersValue.logs) ? ordersValue.logs : []);
   }
 
+  const blacklistValue = find('blacklist');
+  if (includeBlacklist && blacklistValue) {
+    state.blacklist = Array.isArray(blacklistValue.blacklist) ? blacklistValue.blacklist : [];
+    state.autoBlacklistId = Number(blacklistValue.autoBlacklistId || 1);
+  }
+
   return state;
 }
 
@@ -285,6 +325,10 @@ async function saveLogs(state) {
 
 async function saveOrders(state) {
   await saveStateValue('sapo_orders', packLogsValue(state.orders, state.autoLogId));
+}
+
+async function saveBlacklist(state) {
+  await saveStateValue('blacklist', { blacklist: state.blacklist || [], autoBlacklistId: state.autoBlacklistId || 1 });
 }
 
 function encryptionKey() {
@@ -379,6 +423,26 @@ function isKnownIp(ip) {
 
 function sameIp(a, b) {
   return isKnownIp(a) && isKnownIp(b) && String(a).trim() === String(b).trim();
+}
+
+function normalizeIpValue(value) {
+  return isKnownIp(value) ? String(value).trim() : '';
+}
+
+function findBlacklist(state, ...ips) {
+  const values = ips.map(normalizeIpValue).filter(Boolean);
+  if (!values.length) return null;
+  return (state.blacklist || []).find(item => values.includes(normalizeIpValue(item.ip))) || null;
+}
+
+function blacklistPublic(item) {
+  return {
+    id: item.id,
+    ip: item.ip,
+    reason: item.reason || 'Blocked by Sapo IP Guard',
+    created_at: item.created_at || null,
+    source: item.source || 'manual'
+  };
 }
 
 function resolvedText(value) {
@@ -776,18 +840,21 @@ async function syncSapoOrders(state, store, preset = 'TODAY') {
   return { success: true, total_orders: total, synced_new: created, updated_orders: updated, enriched_ips: enriched };
 }
 
-function decorateOrder(row) {
+function decorateOrder(row, state) {
   const info = getOrderInfo(row);
+  const blocked = findBlacklist(state || {}, row.client_ip, row.webrtc_ip);
   return {
     ...row,
     order_info: info,
     risk_reasons: parseJson(row.risk_reasons, []),
-    is_webrtc_available: isKnownIp(row.webrtc_ip)
+    is_webrtc_available: isKnownIp(row.webrtc_ip),
+    is_blacklisted: Boolean(blocked),
+    blacklist_reason: blocked?.reason || null
   };
 }
 
-function filterOrders(rows, query) {
-  let result = rows.map(decorateOrder);
+function filterOrders(rows, query, state) {
+  let result = rows.map(row => decorateOrder(row, state));
   const storeId = query.store_id && query.store_id !== 'ALL' ? Number(query.store_id) : null;
   if (storeId) result = result.filter(row => row.store_id === storeId);
   if (query.startDate || query.endDate) {
@@ -858,6 +925,56 @@ async function handleStores(state, method, parts, body) {
   return json(404, { success: false, message: 'Not found.' });
 }
 
+async function handleBlacklist(event, state, method, parts, query, body) {
+  if (method === 'GET' && parts.length === 0) {
+    return json(200, { success: true, data: (state.blacklist || []).map(blacklistPublic) });
+  }
+
+  if (method === 'GET' && parts[0] === 'check') {
+    const clientIp = firstIp(event.headers['x-forwarded-for']) || event.headers['x-real-ip'] || query.ip || '';
+    const blocked = findBlacklist(state, clientIp, query.webrtc_ip);
+    return json(200, {
+      success: true,
+      is_blacklisted: Boolean(blocked),
+      blocked_ip: blocked?.ip || null,
+      reason: blocked?.reason || null
+    });
+  }
+
+  if (method === 'POST' && parts.length === 0) {
+    const ip = normalizeIpValue(body.ip);
+    if (!ip) return json(400, { success: false, message: 'IP khong hop le.' });
+    const existing = findBlacklist(state, ip);
+    if (existing) {
+      existing.reason = String(body.reason || existing.reason || 'Blocked by Sapo IP Guard').trim();
+      existing.updated_at = new Date().toISOString();
+      await saveBlacklist(state);
+      return json(200, { success: true, data: blacklistPublic(existing) });
+    }
+    const item = {
+      id: state.autoBlacklistId++,
+      ip,
+      reason: String(body.reason || 'Blocked by Sapo IP Guard').trim(),
+      source: String(body.source || 'manual').trim(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    state.blacklist.unshift(item);
+    await saveBlacklist(state);
+    return json(201, { success: true, data: blacklistPublic(item) });
+  }
+
+  if (method === 'DELETE' && parts[0]) {
+    const ip = normalizeIpValue(parts[0]);
+    const before = (state.blacklist || []).length;
+    state.blacklist = (state.blacklist || []).filter(item => normalizeIpValue(item.ip) !== ip);
+    if (state.blacklist.length !== before) await saveBlacklist(state);
+    return json(200, { success: true });
+  }
+
+  return json(404, { success: false, message: 'Not found.' });
+}
+
 async function handleLogs(event, state, method, parts, query, body) {
   if (method === 'POST' && parts[0] === 'collect') {
     const referer = String(event.headers.origin || event.headers.referer || body.url || '');
@@ -892,13 +1009,22 @@ async function handleLogs(event, state, method, parts, query, body) {
     row.updated_at = new Date().toISOString();
     if (!existing) state.logs.unshift(row);
     await saveLogs(state);
-    return json(201, { success: true, log_id: row.id, client_ip: row.client_ip, webrtc_ip: row.webrtc_ip || null });
+    const blocked = findBlacklist(state, row.client_ip, row.webrtc_ip);
+    return json(201, {
+      success: true,
+      log_id: row.id,
+      client_ip: row.client_ip,
+      webrtc_ip: row.webrtc_ip || null,
+      is_blacklisted: Boolean(blocked),
+      blocked_ip: blocked?.ip || null,
+      block_reason: blocked?.reason || null
+    });
   }
 
   if (method === 'GET' && parts.length === 0) {
     const page = Math.max(1, Number(query.page || 1));
     const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
-    const filtered = filterOrders(state.orders || [], query);
+    const filtered = filterOrders(state.orders || [], query, state);
     return json(200, {
       success: true,
       data: filtered.slice((page - 1) * limit, page * limit),
@@ -924,7 +1050,20 @@ exports.handler = async (event) => {
     const rawPath = event.path.replace(/^\/\.netlify\/functions\/api/, '');
     if (rawPath === '/health') return json(200, { status: 'OK', version: 'clean-orders-v2', time: new Date().toISOString() });
     if (rawPath === '/client-tracker.js') {
-      return response(200, TRACKER_SOURCE, {
+      const clientIp = firstIp(event.headers['x-forwarded-for']) || event.headers['x-real-ip'] || event.headers['cf-connecting-ip'] || '';
+      let blocked = null;
+      try {
+        const state = await loadState({ includeLogs: false, includeStores: false, includeBlacklist: true });
+        blocked = findBlacklist(state, clientIp);
+      } catch (_) {
+        blocked = null;
+      }
+      const boot = `window.__SAPO_IP_GUARD_BLOCK=${JSON.stringify({
+        is_blacklisted: Boolean(blocked),
+        ip: blocked?.ip || clientIp || null,
+        reason: blocked?.reason || null
+      })};\n`;
+      return response(200, boot + TRACKER_SOURCE, {
         'Content-Type': 'application/javascript; charset=utf-8',
         'Cache-Control': 'no-store, no-cache, must-revalidate'
       });
@@ -937,12 +1076,17 @@ exports.handler = async (event) => {
     const body = event.body ? parseJson(event.body, {}) : {};
     const query = event.queryStringParameters || {};
     const publicCollect = resource === 'logs' && method === 'POST' && parts[0] === 'collect';
+    const publicBlacklistCheck = resource === 'blacklist' && method === 'GET' && parts[0] === 'check';
 
-    if (!publicCollect && !assertAdmin(event)) return json(401, { success: false, message: 'Dashboard password is invalid.' });
+    if (!publicCollect && !publicBlacklistCheck && !assertAdmin(event)) return json(401, { success: false, message: 'Dashboard password is invalid.' });
     if (resource === 'auth' && method === 'POST' && parts[0] === 'verify') return json(200, { success: true });
 
-    const state = await loadState({ includeLogs: resource !== 'auth', includeStores: true });
+    const state = await loadState({
+      includeLogs: resource !== 'auth' && resource !== 'blacklist',
+      includeStores: resource !== 'blacklist' || publicCollect
+    });
     if (resource === 'stores') return await handleStores(state, method, parts, body);
+    if (resource === 'blacklist') return await handleBlacklist(event, state, method, parts, query, body);
     if (resource === 'logs') return await handleLogs(event, state, method, parts, query, body);
 
     return json(404, { success: false, message: 'Not found.' });
