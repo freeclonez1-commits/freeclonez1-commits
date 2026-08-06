@@ -507,8 +507,10 @@ export default function App() {
     if (res.success) setBlacklist(res.data || []);
   }, [adminKey]);
 
-  const loadOrders = useCallback(async (page = pagination.page) => {
+  const loadOrders = useCallback(async (page = pagination.page, overrides = {}) => {
     if (!adminKey) return;
+    const effectiveSearch = overrides.search ?? search;
+    const effectiveFilterMode = overrides.filterMode ?? filterMode;
     setLoading(true);
     try {
       const res = await getOrders({
@@ -517,8 +519,8 @@ export default function App() {
         store_id: selectedStoreId || 'ALL',
         startDate: activePreset.start(),
         endDate: activePreset.end(),
-        search,
-        filterMode
+        search: effectiveSearch,
+        filterMode: effectiveFilterMode
       });
       setOrders(res.data || []);
       setPagination(res.pagination || { page, limit: activePreset.limit, total: 0, totalPages: 1 });
@@ -543,8 +545,11 @@ export default function App() {
     setSyncing(true);
     try {
       const res = await syncStoreOrders(selectedStore.id, preset);
-      notify(`Da quet ${res.total_orders || 0} don, moi ${res.synced_new || 0}, cap nhat ${res.updated_orders || 0}, enrich IP ${res.enriched_ips || 0}.`);
-      await loadOrders(1);
+      setActiveView('orders');
+      setFilterMode('all');
+      setSearch('');
+      notify(`Da quet ${res.total_orders || 0} don. Dang hien Tat ca don hom nay.`);
+      await loadOrders(1, { filterMode: 'all', search: '' });
     } catch (err) {
       notify(err.response?.data?.message || 'Quet don that bai.', 'error');
     } finally {
@@ -770,6 +775,11 @@ export default function App() {
                   Tai lai
                 </button>
               </div>
+              {filterMode !== 'all' && (
+                <div className="rounded-lg border border-[#AECBFA] bg-[#E8F0FE] px-3 py-2 text-sm font-bold text-[#1A73E8]">
+                  Dang loc {FILTER_MODES.find(item => item.key === filterMode)?.label}. So don hien thi co the it hon tong don Sapo da quet.
+                </div>
+              )}
             </div>
 
             <div className="overflow-x-auto">
