@@ -1,600 +1,127 @@
 const crypto = require('crypto');
 const zlib = require('zlib');
 
-const DEFAULT_STATE_KEY = 'default';
 const BUSINESS_TIME_ZONE = process.env.BUSINESS_TIME_ZONE || 'Asia/Ho_Chi_Minh';
-const COLLECT_WINDOW_MS = 60 * 1000;
-const COLLECT_MAX_PER_WINDOW = 30;
-const collectCounters = new Map();
-const syncLocks = new Map();
-const ipIntelligenceCache = new Map();
 const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
 const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
-const IP_INTELLIGENCE_VERSION = 6;
-const IP_INTELLIGENCE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const IP_INTELLIGENCE_PENDING_RETRY_MS = 2 * 60 * 1000;
-const SYNC_LOOKBACK_MS = 5 * 60 * 1000;
-const SYNC_HISTORY_LIMIT = 40;
-const FULL_SYNC_RECONCILIATION_MS = 10 * 60 * 1000;
-const MAX_IP_ANALYSIS_GROUPS_PER_SYNC = 16;
 const BOOTSTRAP_DASHBOARD_PASSWORD_HASH = '5614f8701b76755fca46a29799ae4122ca791e6339afb80e45e9da52c4ea6474';
-const DATACENTER_PROVIDER_WORDS = [
-  'gthost', 'm247', 'vultr', 'digitalocean', 'linode', 'hetzner', 'ovh',
-  'aws', 'amazon', 'google cloud', 'azure', 'vpn', 'proxy', 'datacenter',
-  'datacamp', 'cdnext', 'cyberzone', 'cyberzon', 'cogent', 'ip transit',
-  'iptransit', 'server', 'hosting', 'host', 'cloud', 'tunnel', 'exit'
+const MAX_IP_LOOKUPS_PER_SYNC = 30;
+const DATACENTER_WORDS = [
+  'datacenter', 'data center', 'hosting', 'host', 'cloud', 'server', 'vps',
+  'vpn', 'proxy', 'gthost', 'm247', 'ovh', 'hetzner', 'digitalocean',
+  'linode', 'vultr', 'aws', 'amazon', 'google cloud', 'azure', 'datacamp',
+  'cloudflare', 'iomart', 'rapidswitch', 'purevoltage', 'ip transit'
 ];
 
-const TRACKER_SOURCE = `/**
- * Sapo Fake IP & WebRTC Leak Tracker Script
- */
-(function () {
+const memoryIpCache = new Map();
+
+const TRACKER_SOURCE = `(() => {
   'use strict';
 
-  var BACKEND_URL = (function () {
+  const script = document.currentScript || Array.from(document.scripts).find(s => String(s.src || '').includes('/client-tracker.js'));
+  const backendUrl = (() => {
     if (window.SAPO_TRACKER_CONFIG && window.SAPO_TRACKER_CONFIG.backendUrl) {
-      return window.SAPO_TRACKER_CONFIG.backendUrl.replace(/\\/$/, '');
+      return String(window.SAPO_TRACKER_CONFIG.backendUrl).replace(/\\/$/, '');
     }
-    var scripts = document.getElementsByTagName('script');
-    for (var i = 0; i < scripts.length; i++) {
-      if (scripts[i].src && scripts[i].src.indexOf('client-tracker.js') !== -1) {
-        var url = new URL(scripts[i].src);
-        return url.origin;
-      }
-    }
+    if (script && script.src) return new URL(script.src).origin;
     return window.location.origin;
   })();
+  const apiKey = window.SAPO_TRACKER_CONFIG && window.SAPO_TRACKER_CONFIG.apiKey ? window.SAPO_TRACKER_CONFIG.apiKey : null;
+  const sessionKey = 'sapo_ip_guard_session_v2';
+  const sessionStartKey = 'sapo_ip_guard_session_start_v2';
 
-  var API_KEY = (window.SAPO_TRACKER_CONFIG && window.SAPO_TRACKER_CONFIG.apiKey) ? window.SAPO_TRACKER_CONFIG.apiKey : null;
-  var lastPushedUrl = '';
-  var lastPushedTime = 0;
-  var lastCheckoutActivityAt = 0;
-  var lastInteractionAt = 0;
-  var INITIAL_BLOCK = window.__SAPO_IP_GUARD_INITIAL_BLOCK || null;
-  function getStorageItem(key) {
+  function sessionValue(key, value) {
     try {
-      var val = localStorage.getItem(key) || sessionStorage.getItem(key);
-      if (val) return val;
-      var match = document.cookie.match(new RegExp('(?:^|; )' + key + '=([^;]*)'));
-      return match ? decodeURIComponent(match[1]) : null;
-    } catch(e) { return null; }
-  }
-
-  function setStorageItem(key, val) {
-    try {
-      localStorage.setItem(key, val);
-      sessionStorage.setItem(key, val);
-      document.cookie = key + '=' + encodeURIComponent(val) + '; path=/; max-age=86400';
-    } catch(e) {}
-  }
-
-  function removeStorageItem(key) {
-    try {
-      localStorage.removeItem(key);
-      sessionStorage.removeItem(key);
-      document.cookie = key + '=; path=/; max-age=0';
-    } catch(e) {}
-  }
-
-  // Network identity belongs to the current browser tab. Persisting it in
-  // localStorage caused an old VPN/WebRTC result to leak into later visits.
-  function getSessionValue(key) {
-    try { return sessionStorage.getItem(key); } catch (e) { return null; }
-  }
-  function setSessionValue(key, value) {
-    try { sessionStorage.setItem(key, value); } catch (e) {}
-  }
-  var cachedPublicIp = getSessionValue('sapo_public_ip') || null;
-  var cachedWebRtcIp = getSessionValue('sapo_webrtc_ip') || null;
-  var cachedWebRtcStatus = getSessionValue('sapo_webrtc_status') || (cachedWebRtcIp ? 'captured' : 'pending');
-  var networkHydrateStarted = false;
-  var webRtcDiscoveryInFlight = false;
-  var webRtcCallbacks = [];
-  var lastNetworkIdentitySignature = '';
-  var forceNetworkIdentityPush = false;
-  var networkIdentityShouldPush = false;
-  var WEBRTC_DISCOVERY_TIMEOUT_MS = 5000;
-
-  function getSessionMeta() {
-    var sessionId = getStorageItem('sapo_session_id');
-    var sessionStart = getStorageItem('sapo_session_start');
-    var now = Date.now();
-    var sessionStartMs = sessionStart ? parseInt(sessionStart, 10) : NaN;
-
-    if (!sessionId || !sessionStart || !Number.isFinite(sessionStartMs) || (now - sessionStartMs > 12 * 60 * 60 * 1000)) {
-      sessionId = 'S-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 10);
-      sessionStartMs = now;
-      setStorageItem('sapo_session_id', sessionId);
-      setStorageItem('sapo_session_start', sessionStartMs.toString());
-    }
-    return {
-      session_id: sessionId,
-      session_start_at: new Date(sessionStartMs).toISOString(),
-      session_duration_sec: Math.max(1, Math.round((now - sessionStartMs) / 1000))
-    };
-  }
-
-  function getClientPublicIP(callback) {
-    var resolved = false;
-    var fallbackStarted = false;
-    var finish = function (ip) {
-      if (resolved) return;
-      resolved = true;
-      if (ip) {
-        cachedPublicIp = ip;
-        setSessionValue('sapo_public_ip', ip);
-      }
-      callback(ip || null);
-    };
-    var fetchIpify = function () {
-      if (resolved || fallbackStarted) return;
-      fallbackStarted = true;
-      var timer = setTimeout(function () { finish(null); }, 1000);
-      fetch('https://api.ipify.org?format=json', { cache: 'no-store' })
-        .then(function (res) { return res.json(); })
-        .then(function (data) {
-          clearTimeout(timer);
-          finish(data && data.ip ? data.ip : null);
-        })
-        .catch(function () {
-          clearTimeout(timer);
-          finish(null);
-        });
-    };
-
-    // Use the same Vercel edge that receives tracking events. This is both
-    // faster and more representative than a third-party IP lookup.
-    var edgeTimer = setTimeout(fetchIpify, 900);
-    fetch(BACKEND_URL + '/api/v1/blacklist/check?_=' + Date.now(), { cache: 'no-store' })
-      .then(function (res) { return res.json(); })
-      .then(function (data) {
-        clearTimeout(edgeTimer);
-        if (data && data.ip) finish(data.ip);
-        else fetchIpify();
-      })
-      .catch(function () {
-        clearTimeout(edgeTimer);
-        fetchIpify();
-      });
-  }
-
-  function getWebRTCIP(callback, force) {
-    if (!force && cachedWebRtcStatus !== 'pending') {
-      callback(cachedWebRtcIp);
-      return;
-    }
-    webRtcCallbacks.push(callback);
-    if (webRtcDiscoveryInFlight) return;
-    webRtcDiscoveryInFlight = true;
-
-    var webrtcIp = null;
-    var resolved = false;
-    var candidateSeen = false;
-    var privateCandidateSeen = false;
-    var complete = function (value, status) {
-      if (resolved) return;
-      resolved = true;
-      webRtcDiscoveryInFlight = false;
-      cachedWebRtcIp = value || null;
-      cachedWebRtcStatus = status || (value ? 'captured' : 'not_available');
-      if (cachedWebRtcIp) setSessionValue('sapo_webrtc_ip', cachedWebRtcIp);
-      setSessionValue('sapo_webrtc_status', cachedWebRtcStatus);
-      // WebRTC can finish after the first connection-IP check. Re-check once
-      // with the discovered candidate so a WebRTC-only blacklist is immediate.
-      if (cachedWebRtcIp) checkBlacklistImmediately();
-      var callbacks = webRtcCallbacks.splice(0, webRtcCallbacks.length);
-      callbacks.forEach(function (fn) { try { fn(cachedWebRtcIp); } catch (e) {} });
-    };
-    var RTCPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
-    if (!RTCPeerConnection) {
-      complete(null, 'unsupported');
-      return;
-    }
-    try {
-      var pc = new RTCPeerConnection({
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' },
-          { urls: 'stun:stun4.l.google.com:19302' },
-          { urls: 'stun:stun.cloudflare.com:3478' },
-          { urls: 'stun:stun.services.mozilla.com' }
-        ]
-      });
-      pc.createDataChannel('');
-      var finish = function (value) {
-        var status = value ? 'captured' : (privateCandidateSeen ? 'private_only' : (candidateSeen ? 'hidden' : 'not_available'));
-        try { pc.close(); } catch (e) {}
-        complete(value || null, status);
-      };
-      var isUsablePublicIp = function (ip) {
-        var value = String(ip || '').trim().replace(/^\[|\]$/g, '').split('%')[0].toLowerCase();
-        if (!value || value === '0.0.0.0' || value === '127.0.0.1') return false;
-
-        // WebRTC can expose a global IPv6 server-reflexive address. The older
-        // IPv4-only parser silently discarded it, leaving valid checks empty.
-        if (value.indexOf(':') >= 0) {
-          if (!/^[0-9a-f:.]+$/.test(value)) return false;
-          if (value.indexOf('::ffff:') === 0) return isUsablePublicIp(value.slice(7));
-          if (value === '::' || value === '::1' || /^fe[89ab]/.test(value) || /^f[cd]/.test(value) || /^ff/.test(value)) {
-            privateCandidateSeen = true;
-            return false;
-          }
-          return (value.match(/:/g) || []).length >= 2;
-        }
-
-        var p = value.split('.').map(function (n) { return parseInt(n, 10); });
-        if (p.length !== 4 || p.some(function (n) { return !Number.isFinite(n) || n < 0 || n > 255; })) return false;
-        if (p[0] === 10 || p[0] === 127 || p[0] === 0) { privateCandidateSeen = true; return false; }
-        if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) { privateCandidateSeen = true; return false; }
-        if (p[0] === 192 && p[1] === 168) { privateCandidateSeen = true; return false; }
-        if (p[0] === 169 && p[1] === 254) { privateCandidateSeen = true; return false; }
-        if (p[0] >= 224) return false;
-        return true;
-      };
-      var inspectCandidate = function (candidateText, explicitType, explicitAddress) {
-        if (!candidateText) return;
-        candidateSeen = true;
-        var lines = String(candidateText).split(/\r?\n/);
-        for (var i = 0; i < lines.length; i++) {
-          var parts = lines[i].trim().split(/\s+/);
-          var typeIndex = parts.indexOf('typ');
-          var candidateType = explicitType || (typeIndex >= 0 ? parts[typeIndex + 1] : '');
-          var candidateAddress = explicitAddress || parts[4] || '';
-          if (candidateType === 'host' || candidateType === 'srflx') {
-            if (isUsablePublicIp(candidateAddress)) {
-              webrtcIp = candidateAddress;
-              finish(webrtcIp);
-              return;
-            }
-          }
-        }
-      };
-      pc.onicecandidate = function (e) {
-        if (!e.candidate) return;
-        inspectCandidate(e.candidate.candidate, e.candidate.type, e.candidate.address);
-      };
-      pc.createOffer().then(function (sdp) {
-        inspectCandidate(sdp && sdp.sdp);
-        return pc.setLocalDescription(sdp);
-      }).then(function () {
-        setTimeout(function () { inspectCandidate(pc.localDescription && pc.localDescription.sdp); }, 350);
-      }).catch(function () {});
-      setTimeout(function () { if (!webrtcIp) finish(null); }, WEBRTC_DISCOVERY_TIMEOUT_MS);
-    } catch (err) {
-      complete(null, 'error');
+      if (value !== undefined) sessionStorage.setItem(key, value);
+      return sessionStorage.getItem(key);
+    } catch (_) {
+      return null;
     }
   }
 
-  function hydrateNetworkIdentity(force, knownPublicIp, emitEvent) {
-    if (emitEvent) networkIdentityShouldPush = true;
-    if (networkHydrateStarted) return;
-    if (!force && cachedWebRtcStatus !== 'pending') return;
-    networkHydrateStarted = true;
-    var trustedPublicIp = typeof knownPublicIp === 'string' ? knownPublicIp : null;
-    var publicIpReady = Boolean(trustedPublicIp);
-    var webRtcReady = false;
-    var finishHydration = function () {
-      if (!publicIpReady || !webRtcReady) return;
-      networkHydrateStarted = false;
-      var shouldPush = networkIdentityShouldPush;
-      networkIdentityShouldPush = false;
-      if (shouldPush) sendNetworkIdentity();
-    };
-    if (trustedPublicIp) {
-      cachedPublicIp = trustedPublicIp;
-    } else {
-      getClientPublicIP(function (ip) {
-        cachedPublicIp = ip || cachedPublicIp;
-        publicIpReady = true;
-        finishHydration();
-      });
-    }
-    getWebRTCIP(function () {
-      webRtcReady = true;
-      finishHydration();
-    }, Boolean(force));
+  let sessionId = sessionValue(sessionKey);
+  if (!sessionId) {
+    sessionId = 's_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
+    sessionValue(sessionKey, sessionId);
+    sessionValue(sessionStartKey, new Date().toISOString());
   }
 
-  function refreshNetworkIdentity(knownPublicIp) {
-    if (networkHydrateStarted || document.hidden) return;
-    var trustedPublicIp = typeof knownPublicIp === 'string' ? knownPublicIp : null;
-    if (trustedPublicIp) cachedPublicIp = trustedPublicIp;
-    forceNetworkIdentityPush = true;
-    hydrateNetworkIdentity(true, trustedPublicIp, false);
-  }
-
-  function getBrowserFingerprint() {
-    try {
-      var canvas = document.createElement('canvas');
-      var ctx = canvas.getContext('2d');
-      var txt = 'Sapo_Prod_Fingerprint_2026';
-      ctx.textBaseline = 'top';
-      ctx.font = "14px 'Arial'";
-      ctx.fillStyle = '#f60';
-      ctx.fillRect(125, 1, 62, 20);
-      ctx.fillStyle = '#069';
-      ctx.fillText(txt, 2, 15);
-      ctx.fillStyle = 'rgba(102, 204, 0, 0.7)';
-      ctx.fillText(txt, 4, 17);
-      var dataUrl = canvas.toDataURL();
-      var hash = 0;
-      for (var i = 0; i < dataUrl.length; i++) {
-        hash = ((hash << 5) - hash) + dataUrl.charCodeAt(i);
-        hash |= 0;
-      }
-      return 'FP-' + Math.abs(hash).toString(16) + '-' + screen.width + 'x' + screen.height;
-    } catch (e) {
-      return 'FP-fallback-' + Date.now();
-    }
-  }
-
-  function getSapoOrderInfo(formEl) {
-    var info = {};
-    var bz = window.Bizweb || window.Sapo || window.BizwebCheckout;
-    if (bz) {
-      var c = bz.checkout || bz.order;
-      if (c) {
-        info.order_id = c.name || (c.order_number ? '#' + c.order_number : null) || c.order_id || (c.id ? '#' + c.id : null);
-        var addr = c.shipping_address || c.billing_address;
-        if (addr) {
-          info.customer_name = addr.name || addr.full_name || ((addr.first_name || '') + ' ' + (addr.last_name || '')).trim();
-          info.phone = addr.phone;
-          info.address = addr.address1;
-        }
-        info.total_price = c.total_price || c.total;
-        info.email = c.email;
-      }
-    }
-    var path = (window.location.pathname || '').toLowerCase();
-    var isCheckoutPage = path.indexOf('/checkouts') !== -1 || path.indexOf('/thank') !== -1 || path.indexOf('/orders/') !== -1;
-    if (!info.order_id && isCheckoutPage) {
-      var orderCodeEl = document.querySelector('.order-number, .thankyou-order-id, #order_code, .order-code, [data-order-name], .os-order-number');
-      if (orderCodeEl) {
-        var text = orderCodeEl.innerText.trim();
-        if (text) info.order_id = text.startsWith('#') ? text : '#' + text;
-      }
-    }
-    var root = formEl || document;
-    var nameEl = root.querySelector('input[name*="full_name"], input[name*="name"], #billing_address_full_name, #billing_address_name, .customer-name');
-    var phoneEl = root.querySelector('input[name*="phone"], #billing_address_phone, .customer-phone');
-    var emailEl = root.querySelector('input[type="email"], input[name*="email"], #checkout_user_email');
-    if (!info.customer_name && nameEl && nameEl.value) info.customer_name = nameEl.value.trim();
-    if (!info.phone && phoneEl && phoneEl.value) info.phone = phoneEl.value.trim();
-    if (!info.email && emailEl && emailEl.value) info.email = emailEl.value.trim();
-    return (info.order_id || info.customer_name || info.phone) ? info : null;
-  }
-
-  function renderAccessDeniedScreen(blockedIp) {
-    try {
-      var ipText = blockedIp || 'unknown';
-      // Older tracker releases persisted this flag locally, which kept a
-      // visitor blocked after the administrator had removed the blacklist row.
-      // Server-side blacklist is the source of truth.
-      removeStorageItem('sapo_blocked_ip');
-
-      // Override fetch and XHR to block all network requests from blacklisted client
-      try {
-        window.fetch = function () { return Promise.reject(new Error('Access Denied: IP Blocked')); };
-        if (window.XMLHttpRequest) {
-          window.XMLHttpRequest.prototype.send = function () { throw new Error('Access Denied: IP Blocked'); };
-        }
-      } catch (e) {}
-
-      var blockHtml = '<div id="sapo-ip-guard-block-screen" style="position:fixed!important;inset:0!important;z-index:2147483647!important;display:flex!important;flex-direction:column!important;align-items:center!important;justify-content:center!important;min-height:100vh!important;width:100vw!important;background:#FAFAFA!important;font-family:-apple-system,BlinkMacSystemFont,\'SF Pro Display\',\'Segoe UI\',Roboto,sans-serif!important;color:#1D1D1F!important;padding:24px!important;box-sizing:border-box!important;">' +
-        '<div style="max-width:640px;width:100%;background:#FFFFFF;border:1px solid #D1D1D6;border-radius:24px;padding:36px;box-shadow:0 20px 40px rgba(0,0,0,0.12);text-align:left;box-sizing:border-box;">' +
-        '<div style="display:flex;align-items:center;gap:14px;margin-bottom:20px;">' +
-        '<div style="width:52px;height:52px;border-radius:18px;background:#FF3B30;display:flex;align-items:center;justify-content:center;color:#FFF;font-weight:900;font-size:26px;shrink-0:0;">🚫</div>' +
-        '<div>' +
-        '<h1 style="font-size:20px;font-weight:900;color:#1D1D1F;margin:0;letter-spacing:-0.02em;">CẢNH BÁO: QUYỀN TRUY CẬP BỊ KHÓA HOÀN TOÀN</h1>' +
-        '<p style="font-size:13px;color:#FF3B30;margin:4px 0 0 0;font-family:monospace;font-weight:700;">ERR_ACCESS_DENIED · IP: ' + ipText + '</p>' +
-        '</div>' +
-        '</div>' +
-        '<div style="background:#FFF5F5;border:1px solid rgba(255,59,48,0.3);border-radius:16px;padding:18px 20px;margin-bottom:20px;font-size:13px;line-height:1.6;color:#1D1D1F;">' +
-        'Địa chỉ IP của bạn (<strong>' + ipText + '</strong>) đã bị hệ thống ghi nhận vi phạm chính sách bảo mật / tạo đơn hàng giả mạo và đã bị khóa quyền truy cập.' +
-        '</div>' +
-        '<p style="font-size:12px;color:#86868B;margin:0;line-height:1.5;">Nếu cho rằng đây là sự nhầm lẫn, vui lòng liên hệ Quản trị viên cửa hàng để được hỗ trợ giải quyết.</p>' +
-        '</div></div>';
-
-      var container = document.getElementById('sapo-ip-guard-block-screen');
-      if (!container) {
-        document.documentElement.innerHTML = '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Truy cập bị khóa</title></head><body>' + blockHtml + '</body>';
-      }
-
-      if (window.MutationObserver) {
-        var observer = new MutationObserver(function () {
-          if (!document.getElementById('sapo-ip-guard-block-screen')) {
-            document.body.innerHTML = blockHtml;
-          }
-        });
-        observer.observe(document.documentElement, { childList: true, subtree: true });
-      }
-
-      window.stop && window.stop();
-    } catch (e) {}
-  }
-
-  function getDeviceType() {
-    var ua = navigator.userAgent || '';
-    if (/ipad|tablet/i.test(ua) || (/android/i.test(ua) && !/mobile/i.test(ua))) return 'Tablet';
-    if (/mobi|android|iphone|ipod/i.test(ua)) return 'Mobile';
+  function deviceType() {
+    const ua = navigator.userAgent || '';
+    if (/ipad|tablet/i.test(ua)) return 'Tablet';
+    if (/mobile|iphone|android/i.test(ua)) return 'Mobile';
     return 'Desktop';
   }
 
-  function getClickedUrl(target) {
-    var element = target && target.closest ? target.closest('a[href], button, [role="button"]') : null;
-    if (!element) return window.location.href;
-    var href = element.getAttribute('href');
-    if (!href || href === '#' || href.indexOf('javascript:') === 0) return window.location.href;
-    try { return new URL(href, window.location.href).href; } catch (e) { return window.location.href; }
-  }
+  function send(payload) {
+    payload.api_key = apiKey;
+    payload.url = location.href;
+    payload.referrer = document.referrer || null;
+    payload.user_agent = navigator.userAgent || null;
+    payload.device_type = deviceType();
+    payload.session_id = sessionId;
+    payload.session_start_at = sessionValue(sessionStartKey) || new Date().toISOString();
 
-  function buildCollectionPayload(orderInfo, triggerEvent, clickedUrl, sessionMeta) {
-    var meta = sessionMeta || getSessionMeta();
-    var currentUrl = window.location.href;
-    return {
-      client_ip: cachedPublicIp,
-      api_key: API_KEY,
-      webrtc_ip: cachedWebRtcIp,
-      webrtc_status: cachedWebRtcStatus,
-      user_agent: navigator.userAgent,
-      fingerprint: getBrowserFingerprint(),
-      order_info: orderInfo || getSapoOrderInfo(),
-      url: currentUrl,
-      last_clicked_url: clickedUrl || currentUrl,
-      device_type: getDeviceType(),
-      connection_status: 'active',
-      store_domain: window.location.hostname,
-      trigger_event: triggerEvent || 'page_view',
-      session_id: meta.session_id,
-      session_start_at: meta.session_start_at,
-      session_duration: meta.session_duration_sec
-    };
-  }
-
-  function sendCollection(payload, preferBeacon) {
-    var body = JSON.stringify(payload);
-    if (preferBeacon && navigator.sendBeacon) {
-      try {
-        if (navigator.sendBeacon(BACKEND_URL + '/api/v1/logs/collect', new Blob([body], { type: 'text/plain' }))) return;
-      } catch (e) {}
-    }
-    fetch(BACKEND_URL + '/api/v1/logs/collect', {
+    const body = JSON.stringify(payload);
+    try {
+      if (navigator.sendBeacon && navigator.sendBeacon(backendUrl + '/api/v1/logs/collect', new Blob([body], { type: 'application/json' }))) return;
+    } catch (_) {}
+    fetch(backendUrl + '/api/v1/logs/collect', {
       method: 'POST',
       keepalive: true,
       headers: { 'Content-Type': 'application/json' },
-      body: body
-    }).then(function (res) { return res.json(); }).then(function (data) {
-      if (data && data.is_blacklisted) renderAccessDeniedScreen(data.client_ip || cachedPublicIp);
-    }).catch(function () {});
+      body
+    }).catch(() => {});
   }
 
-  function sendNetworkIdentity() {
-    if (cachedWebRtcStatus === 'pending') return;
-    var meta = getSessionMeta();
-    var signature = [meta.session_id, cachedPublicIp || '', cachedWebRtcIp || '', cachedWebRtcStatus].join('|');
-    var forcePush = forceNetworkIdentityPush;
-    forceNetworkIdentityPush = false;
-    if (signature === lastNetworkIdentitySignature && !forcePush) return;
-    lastNetworkIdentitySignature = signature;
-    sendCollection(buildCollectionPayload(null, 'network_identity', window.location.href, meta));
+  function publicIpCandidate(text) {
+    const value = String(text || '').trim();
+    if (!value || value.endsWith('.local')) return null;
+    if (/^(10\\.|127\\.|169\\.254\\.|172\\.(1[6-9]|2\\d|3[0-1])\\.|192\\.168\\.)/.test(value)) return null;
+    return value;
   }
 
-  function pushLog(orderInfo, triggerEvent, clickedUrl) {
-    var now = Date.now();
-    var currentUrl = window.location.href;
-    if (triggerEvent === 'page_view' && !orderInfo && currentUrl === lastPushedUrl && (now - lastPushedTime < 10000)) return;
-    lastPushedUrl = currentUrl;
-    lastPushedTime = now;
-    // Checkout can navigate away immediately. Persist the event first; network
-    // identity is merged into this session once WebRTC discovery finishes.
-    sendCollection(buildCollectionPayload(orderInfo, triggerEvent, clickedUrl), triggerEvent === 'checkout_submit');
-    hydrateNetworkIdentity(false, null, true);
-  }
-
-  function attachFormSubmitListeners() {
-    var checkoutForms = document.querySelectorAll('form[action*="checkout"], form[action*="cart"], #checkout-form, .form-checkout');
-    checkoutForms.forEach(function (form) {
-      if (form.getAttribute('data-sapo-tracked')) return;
-      form.setAttribute('data-sapo-tracked', 'true');
-      form.addEventListener('submit', function () { pushLog(getSapoOrderInfo(form), 'checkout_submit'); });
-    });
-  }
-
-  function attachCheckoutActivityListeners() {
-    var fields = document.querySelectorAll('input[name*="phone"], input[name*="email"], input[name*="name"], #billing_address_phone, #billing_address_full_name, #checkout_user_email');
-    fields.forEach(function (field) {
-      if (field.getAttribute('data-sapo-activity-tracked')) return;
-      field.setAttribute('data-sapo-activity-tracked', 'true');
-      var capture = function () {
-        var now = Date.now();
-        if (now - lastCheckoutActivityAt < 8000) return;
-        var info = getSapoOrderInfo(field.form || document);
-        if (!info || (!info.phone && !info.email && !info.order_id)) return;
-        lastCheckoutActivityAt = now;
-        pushLog(info, 'checkout_activity');
+  function checkWebRtc() {
+    return new Promise(resolve => {
+      const RTCPeer = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
+      if (!RTCPeer) return resolve({ ip: null, status: 'not_supported' });
+      const ips = new Set();
+      let done = false;
+      const finish = (status) => {
+        if (done) return;
+        done = true;
+        try { pc.close(); } catch (_) {}
+        resolve({ ip: Array.from(ips)[0] || null, status });
       };
-      field.addEventListener('change', capture);
-      field.addEventListener('blur', capture);
-    });
-  }
-
-  function attachClickListeners() {
-    document.addEventListener('click', function (event) {
-      if (event.button && event.button !== 0) return;
-      var now = Date.now();
-      if (now - lastInteractionAt < 1000) return;
-      var clickedUrl = getClickedUrl(event.target);
-      if (!clickedUrl) return;
-      lastInteractionAt = now;
-      var meta = getSessionMeta();
-      var payload = {
-        api_key: API_KEY,
-        store_domain: window.location.hostname,
-        user_agent: navigator.userAgent,
-        fingerprint: getBrowserFingerprint(),
-        client_ip: cachedPublicIp,
-        webrtc_ip: cachedWebRtcIp,
-        webrtc_status: cachedWebRtcStatus,
-        url: window.location.href,
-        last_clicked_url: clickedUrl,
-        device_type: getDeviceType(),
-        connection_status: clickedUrl === window.location.href ? 'active' : 'inactive',
-        trigger_event: 'click',
-        session_id: meta.session_id,
-        session_start_at: meta.session_start_at,
-        session_duration: meta.session_duration_sec
-      };
+      let pc;
       try {
-        navigator.sendBeacon(BACKEND_URL + '/api/v1/logs/collect', new Blob([JSON.stringify(payload)], { type: 'text/plain' }));
-      } catch (e) {
-        fetch(BACKEND_URL + '/api/v1/logs/collect', { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(function () {});
+        pc = new RTCPeer({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        pc.createDataChannel('sapo-ip-guard');
+        pc.onicecandidate = event => {
+          const candidate = event && event.candidate ? event.candidate.candidate : '';
+          const matches = candidate.match(/([0-9]{1,3}(?:\\.[0-9]{1,3}){3}|[a-f0-9:]{8,})/ig) || [];
+          matches.forEach(item => {
+            const ip = publicIpCandidate(item);
+            if (ip) ips.add(ip);
+          });
+          if (!event.candidate && ips.size) finish('captured');
+        };
+        pc.createOffer().then(offer => pc.setLocalDescription(offer)).catch(() => finish('error'));
+        setTimeout(() => finish(ips.size ? 'captured' : 'not_available'), 3500);
+      } catch (_) {
+        finish('error');
       }
-    }, true);
+    });
   }
 
-  function checkBlacklistImmediately() {
-    if (INITIAL_BLOCK && INITIAL_BLOCK.is_blacklisted) {
-      renderAccessDeniedScreen(INITIAL_BLOCK.ip);
-      return;
-    }
-
-    var query = cachedWebRtcIp ? '?webrtc_ip=' + encodeURIComponent(cachedWebRtcIp) : '';
-    fetch(BACKEND_URL + '/api/v1/blacklist/check' + query, { cache: 'no-store' })
-      .then(function (r) { return r.json(); })
-      .then(function (res) {
-        if (!res) return;
-        if (res.is_blacklisted) {
-          renderAccessDeniedScreen(res.webrtc_ip || res.ip);
-          return;
-        }
-        if (res.ip) {
-          cachedPublicIp = res.ip;
-          setSessionValue('sapo_public_ip', res.ip);
-        }
-      })
-      .catch(function () {});
-  }
-
-  function initTracking() {
-    // Remove the legacy local-only lock so a server-side unblock takes effect
-    // as soon as the visitor refreshes the page.
-    removeStorageItem('sapo_blocked_ip');
-    if (INITIAL_BLOCK && INITIAL_BLOCK.is_blacklisted) {
-      renderAccessDeniedScreen(INITIAL_BLOCK.ip);
-      return;
-    }
-    hydrateNetworkIdentity(false, null, false);
-    checkBlacklistImmediately();
-    attachFormSubmitListeners();
-    attachCheckoutActivityListeners();
-    setInterval(attachFormSubmitListeners, 3000);
-    setInterval(attachCheckoutActivityListeners, 3000);
-  }
-
-  if (document.readyState === 'complete' || document.readyState === 'interactive') initTracking();
-  else document.addEventListener('DOMContentLoaded', initTracking);
+  send({ trigger_event: 'page_view', webrtc_status: 'pending' });
+  checkWebRtc().then(result => {
+    send({
+      trigger_event: 'network_identity',
+      webrtc_ip: result.ip,
+      webrtc_status: result.status
+    });
+  });
 })();`;
 
 function response(statusCode, body, headers = {}) {
@@ -611,14 +138,13 @@ function response(statusCode, body, headers = {}) {
 }
 
 function json(statusCode, body) {
-  return response(statusCode, body, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store'
-  });
+  return response(statusCode, body, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
 }
 
-function unauthorized(message = 'Dashboard password is invalid.') {
-  return json(401, { success: false, message });
+function parseJson(value, fallback = null) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
 }
 
 function sha256(value) {
@@ -626,46 +152,24 @@ function sha256(value) {
 }
 
 function safeEqual(left, right) {
-  const leftBuffer = Buffer.from(String(left || ''), 'utf8');
-  const rightBuffer = Buffer.from(String(right || ''), 'utf8');
-  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+  const a = Buffer.from(String(left || ''), 'utf8');
+  const b = Buffer.from(String(right || ''), 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 function assertAdmin(event) {
   const headers = event.headers || {};
-  const authorization = headers.authorization || headers.Authorization || '';
-  const suppliedPassword = headers['x-sapo-admin-key'] || headers['X-Sapo-Admin-Key'] || String(authorization).replace(/^Bearer\s+/i, '');
-  if (!suppliedPassword) return false;
-
+  const auth = headers.authorization || headers.Authorization || '';
+  const supplied = headers['x-sapo-admin-key'] || headers['X-Sapo-Admin-Key'] || String(auth).replace(/^Bearer\s+/i, '');
+  if (!supplied) return false;
   const configuredHash = process.env.DASHBOARD_PASSWORD_HASH || '';
   const configuredPassword = process.env.DASHBOARD_PASSWORD || '';
   const expectedHash = configuredHash || (configuredPassword ? sha256(configuredPassword) : BOOTSTRAP_DASHBOARD_PASSWORD_HASH);
-  return safeEqual(sha256(suppliedPassword), expectedHash.toLowerCase());
-}
-
-function stateTemplate() {
-  return {
-    stores: [],
-    logs: [],
-    orders: [],
-    blacklist: [],
-    syncState: { byStore: {}, runs: [] },
-    autoStoreId: 1,
-    autoLogId: 1000,
-    autoBlacklistId: 10
-  };
-}
-
-let inMemoryState = null;
-
-function hasSupabaseConfig() {
-  const url = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.service_role || process.env.SERVICE_ROLE || '';
-  return Boolean(url && key);
+  return safeEqual(sha256(supplied), String(expectedHash).toLowerCase());
 }
 
 function supabaseConfig() {
-  const url = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.service_role || process.env.SERVICE_ROLE || '';
   if (!url || !key) throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required.');
   return { url, key };
@@ -683,23 +187,24 @@ async function supabaseFetch(path, options = {}) {
     }
   });
   const text = await res.text();
-  let data = null;
-  if (text) {
-    try { data = JSON.parse(text); } catch (_) { data = text; }
-  }
-  if (!res.ok) {
-    throw new Error(typeof data === 'string' ? data : (data?.message || `Supabase request failed: ${res.status}`));
-  }
+  const data = text ? parseJson(text, text) : null;
+  if (!res.ok) throw new Error(typeof data === 'string' ? data : (data?.message || `Supabase error ${res.status}`));
   return data;
+}
+
+function stateTemplate() {
+  return {
+    stores: [],
+    logs: [],
+    orders: [],
+    autoStoreId: 1,
+    autoLogId: 1000
+  };
 }
 
 function unpackLogsValue(value) {
   if (!value || value.encoding !== COMPRESSED_LOGS_ENCODING || !value.data) return value;
-  try {
-    return JSON.parse(zlib.gunzipSync(Buffer.from(value.data, 'base64')).toString('utf8'));
-  } catch (_) {
-    throw new Error('Stored logs could not be decompressed.');
-  }
+  return JSON.parse(zlib.gunzipSync(Buffer.from(value.data, 'base64')).toString('utf8'));
 }
 
 function packLogsValue(logs, autoLogId) {
@@ -712,192 +217,56 @@ function packLogsValue(logs, autoLogId) {
   };
 }
 
-function isCompressedLogsValue(value) {
-  return Boolean(value && value.encoding === COMPRESSED_LOGS_ENCODING && value.data);
-}
+async function loadState({ includeLogs = true, includeStores = true } = {}) {
+  const keys = [];
+  if (includeStores) keys.push('stores');
+  if (includeLogs) keys.push('logs', 'sapo_orders');
+  const rows = keys.length
+    ? await supabaseFetch(`/app_state?key=in.(${keys.map(encodeURIComponent).join(',')})&select=key,value`)
+    : [];
+  const state = stateTemplate();
+  const find = key => Array.isArray(rows) ? rows.find(row => row.key === key)?.value : null;
 
-async function loadState({ includeLogs = true, includeStores = true, includeBlacklist = true, includeSyncState = true } = {}) {
-  if (!hasSupabaseConfig()) {
-    throw new Error('Persistent storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');
+  const storesValue = find('stores');
+  if (includeStores && storesValue) {
+    state.stores = Array.isArray(storesValue.stores) ? storesValue.stores : [];
+    state.autoStoreId = Number(storesValue.autoStoreId || 1);
   }
-  try {
-    const keys = [];
-    if (includeLogs) keys.push('logs', 'sapo_orders');
-    if (includeStores) keys.push('stores');
-    if (includeBlacklist) keys.push('blacklist');
-    if (includeSyncState) keys.push('sync_state');
-    let rows = await supabaseFetch(`/app_state?key=in.(${keys.map(encodeURIComponent).join(',')})&select=key,value`);
-    let logsRow = rows.find(row => row.key === 'logs');
-    let defaultRow = null;
 
-    // Older installations keep logs in the legacy default state. Read it only once
-    // to migrate, so normal dashboard requests never download that large blob again.
-    if (includeLogs && !logsRow?.value) {
-      const fallbackRows = await supabaseFetch(`/app_state?key=eq.${encodeURIComponent(DEFAULT_STATE_KEY)}&select=key,value`);
-      defaultRow = Array.isArray(fallbackRows) ? fallbackRows.find(row => row.key === DEFAULT_STATE_KEY) : null;
-      rows = [...rows, ...(Array.isArray(fallbackRows) ? fallbackRows : [])];
-    }
-
-    if (includeLogs && !logsRow?.value && !defaultRow?.value) {
-      const initial = stateTemplate();
-      await saveState(initial);
-      await saveStoresState(initial);
-      await saveLogsState(initial);
-      await saveOrdersState(initial);
-      await saveBlacklistState(initial);
-      await saveSyncState(initial);
-      return initial;
-    }
-
-    const state = { ...stateTemplate(), ...(defaultRow?.value || {}) };
-    if (!includeLogs) state.logs = [];
-    if (!includeStores) state.stores = [];
-    if (!includeBlacklist) state.blacklist = [];
-    if (!includeSyncState) state.syncState = { byStore: {}, runs: [] };
-
-    logsRow = rows.find(row => row.key === 'logs');
-    if (includeLogs && logsRow?.value) {
-      const logsValue = unpackLogsValue(logsRow.value);
-      state.logs = Array.isArray(logsValue?.logs) ? logsValue.logs : state.logs;
-      state.autoLogId = Number(logsValue?.autoLogId || state.autoLogId);
-      // Migrate the legacy JSON object on the next successful read. This keeps
-      // the existing data intact while making future dashboard reads much smaller.
-      if (!isCompressedLogsValue(logsRow.value) && Buffer.byteLength(JSON.stringify(logsValue || {}), 'utf8') >= LOG_COMPRESSION_THRESHOLD_BYTES) {
-        await saveLogsState(state);
-      }
-    } else if (includeLogs && defaultRow?.value) {
-      // Migrate existing installations once, then keep order-log reads lightweight.
-      await saveLogsState(state);
-    }
-
-    const ordersRow = rows.find(row => row.key === 'sapo_orders');
-    if (includeLogs && ordersRow?.value) {
-      const orderValue = unpackLogsValue(ordersRow.value);
-      // sapo_orders uses the same compressed envelope as logs, whose payload
-      // field is named `logs`. Accept `orders` as well for forward compatibility.
-      state.orders = Array.isArray(orderValue?.orders)
-        ? orderValue.orders
-        : (Array.isArray(orderValue?.logs) ? orderValue.logs : []);
-    } else if (includeLogs) {
-      // Migrate legacy order rows once. Tracker events stay in `logs`, while
-      // Sapo's canonical order snapshot gets its own storage key so concurrent
-      // visitor tracking can never overwrite an order reconciliation.
-      state.orders = state.logs.filter(log => hasOrderInfo(log.order_info));
-      state.logs = state.logs.filter(log => !hasOrderInfo(log.order_info));
-      await Promise.all([saveLogsState(state), saveOrdersState(state)]);
-    }
-
-    const storesRow = rows.find(row => row.key === 'stores');
-    if (includeStores && storesRow?.value) {
-      state.stores = Array.isArray(storesRow.value.stores) ? storesRow.value.stores : state.stores;
-      state.autoStoreId = Number(storesRow.value.autoStoreId || state.autoStoreId);
-    }
-    const blacklistRow = rows.find(row => row.key === 'blacklist');
-    if (includeBlacklist && blacklistRow?.value && Array.isArray(blacklistRow.value.blacklist)) {
-      state.blacklist = blacklistRow.value.blacklist;
-      state.autoBlacklistId = Number(blacklistRow.value.autoBlacklistId || state.autoBlacklistId);
-    }
-    const syncStateRow = rows.find(row => row.key === 'sync_state');
-    if (includeSyncState && syncStateRow?.value) {
-      state.syncState = {
-        byStore: syncStateRow.value.byStore && typeof syncStateRow.value.byStore === 'object' ? syncStateRow.value.byStore : {},
-        runs: Array.isArray(syncStateRow.value.runs) ? syncStateRow.value.runs : []
-      };
-    }
-    return state;
-  } catch (e) {
-    throw new Error(`Persistent storage is unavailable: ${e.message}`);
+  const logsValue = unpackLogsValue(find('logs'));
+  if (includeLogs && logsValue) {
+    state.logs = Array.isArray(logsValue.logs) ? logsValue.logs : [];
+    state.autoLogId = Number(logsValue.autoLogId || state.autoLogId);
   }
+
+  const ordersValue = unpackLogsValue(find('sapo_orders'));
+  if (includeLogs && ordersValue) {
+    state.orders = Array.isArray(ordersValue.orders)
+      ? ordersValue.orders
+      : (Array.isArray(ordersValue.logs) ? ordersValue.logs : []);
+  }
+
+  return state;
 }
 
 async function saveStateValue(key, value) {
-  if (!hasSupabaseConfig()) throw new Error('Persistent storage is not configured.');
-  const payload = { key, value, updated_at: new Date().toISOString() };
   await supabaseFetch('/app_state?on_conflict=key', {
     method: 'POST',
     headers: { Prefer: 'resolution=merge-duplicates' },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({ key, value, updated_at: new Date().toISOString() })
   });
 }
 
-async function saveState(state) {
-  await saveStateValue(DEFAULT_STATE_KEY, state);
+async function saveStores(state) {
+  await saveStateValue('stores', { stores: state.stores, autoStoreId: state.autoStoreId });
 }
 
-async function saveStoresState(state) {
-  await saveStateValue('stores', {
-    stores: state.stores,
-    autoStoreId: state.autoStoreId
-  });
-}
-
-async function saveLogsState(state) {
+async function saveLogs(state) {
   await saveStateValue('logs', packLogsValue(state.logs, state.autoLogId));
 }
 
-async function saveOrdersState(state) {
-  await saveStateValue('sapo_orders', packLogsValue(state.orders || [], state.autoLogId));
-}
-
-function allLogs(state) {
-  return [...(state.orders || []), ...(state.logs || [])];
-}
-
-async function saveBlacklistState(state) {
-  await saveStateValue('blacklist', {
-    blacklist: state.blacklist,
-    autoBlacklistId: state.autoBlacklistId
-  });
-}
-
-async function saveSyncState(state) {
-  const syncState = state.syncState || { byStore: {}, runs: [] };
-  await saveStateValue('sync_state', {
-    byStore: syncState.byStore || {},
-    runs: Array.isArray(syncState.runs) ? syncState.runs.slice(0, SYNC_HISTORY_LIMIT) : []
-  });
-}
-
-function recordSyncRun(state, run) {
-  if (!state.syncState || typeof state.syncState !== 'object') {
-    state.syncState = { byStore: {}, runs: [] };
-  }
-  if (!state.syncState.byStore || typeof state.syncState.byStore !== 'object') state.syncState.byStore = {};
-  if (!Array.isArray(state.syncState.runs)) state.syncState.runs = [];
-
-  const previous = state.syncState.byStore[String(run.store_id)] || {};
-  const summary = {
-    store_id: Number(run.store_id),
-    status: run.status || 'success',
-    mode: run.mode || 'full',
-    started_at: run.started_at || new Date().toISOString(),
-    finished_at: run.finished_at || new Date().toISOString(),
-    total_orders: Number(run.total_orders || 0),
-    synced_new: Number(run.synced_new || 0),
-    updated_orders: Number(run.updated_orders || 0),
-    removed_orders: Number(run.removed_orders || 0),
-    message: run.message || null,
-    since: run.since || null,
-    last_full_at: run.mode === 'full' ? (run.finished_at || new Date().toISOString()) : (previous.last_full_at || null)
-  };
-  state.syncState.byStore[String(summary.store_id)] = summary;
-  state.syncState.runs.unshift(summary);
-  state.syncState.runs = state.syncState.runs.slice(0, SYNC_HISTORY_LIMIT);
-  return summary;
-}
-
-function cleanDomain(domain) {
-  return String(domain || '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
-}
-
-function publicStore(store, syncState = null) {
-  const { api_secret, api_secret_encrypted, ...safe } = store;
-  return {
-    ...safe,
-    has_api_secret: Boolean(api_secret || api_secret_encrypted),
-    credentials_saved_at: store.credentials_saved_at || store.created_at || null,
-    sync_status: syncState?.byStore?.[String(store.id)] || null
-  };
+async function saveOrders(state) {
+  await saveStateValue('sapo_orders', packLogsValue(state.orders, state.autoLogId));
 }
 
 function encryptionKey() {
@@ -908,1425 +277,633 @@ function encryptSecret(value) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey(), iv);
   const encrypted = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `${iv.toString('base64')}:${tag.toString('base64')}:${encrypted.toString('base64')}`;
+  return `${iv.toString('base64')}:${cipher.getAuthTag().toString('base64')}:${encrypted.toString('base64')}`;
 }
 
 function decryptSecret(value) {
   if (!value) return '';
   if (String(value).startsWith('v1.')) {
     try {
-      const [, ivBase64, tagBase64, ciphertextBase64] = String(value).split('.');
-      const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(ivBase64, 'base64'));
-      decipher.setAuthTag(Buffer.from(tagBase64, 'base64'));
-      return Buffer.concat([decipher.update(Buffer.from(ciphertextBase64, 'base64')), decipher.final()]).toString('utf8');
-    } catch (e) {
+      const [, iv, tag, encrypted] = String(value).split('.');
+      const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(iv, 'base64'));
+      decipher.setAuthTag(Buffer.from(tag, 'base64'));
+      return Buffer.concat([decipher.update(Buffer.from(encrypted, 'base64')), decipher.final()]).toString('utf8');
+    } catch (_) {
       return '';
     }
   }
-  const parts = String(value || '').split(':');
+  const parts = String(value).split(':');
   if (parts.length < 3) return value;
   try {
-    const [ivB64, tagB64, encryptedB64] = parts;
-    const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(ivB64, 'base64'));
-    decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
-    return Buffer.concat([decipher.update(Buffer.from(encryptedB64, 'base64')), decipher.final()]).toString('utf8');
-  } catch (e) {
+    const [iv, tag, encrypted] = parts;
+    const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(iv, 'base64'));
+    decipher.setAuthTag(Buffer.from(tag, 'base64'));
+    return Buffer.concat([decipher.update(Buffer.from(encrypted, 'base64')), decipher.final()]).toString('utf8');
+  } catch (_) {
     return value;
   }
 }
 
+function normalizeDomain(value) {
+  return String(value || '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
+}
+
+function publicStore(store) {
+  return {
+    id: store.id,
+    store_name: store.store_name,
+    mysapo_domain: store.mysapo_domain,
+    api_key: store.api_key,
+    has_api_secret: Boolean(store.api_secret_encrypted),
+    created_at: store.created_at || null
+  };
+}
+
 function businessDate(value = new Date()) {
-  const date = value instanceof Date ? value : new Date(value);
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: BUSINESS_TIME_ZONE,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit'
-  }).formatToParts(date);
-  const get = type => parts.find(part => part.type === type)?.value;
-  return `${get('year')}-${get('month')}-${get('day')}`;
+  }).formatToParts(new Date(value));
+  const map = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${map.year}-${map.month}-${map.day}`;
 }
 
-function businessDayBounds(day) {
-  if (!day) return null;
-  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : businessDate(day);
-  const start = new Date(`${normalized}T00:00:00.000+07:00`).toISOString();
-  const end = new Date(`${normalized}T23:59:59.999+07:00`).toISOString();
-  return { start, end };
+function businessStartUtc(daysAgo = 0) {
+  const now = new Date();
+  const vnDate = businessDate(now);
+  const start = new Date(`${vnDate}T00:00:00.000Z`).getTime() - (7 * 60 * 60 * 1000) - (daysAgo * 24 * 60 * 60 * 1000);
+  return new Date(start).toISOString();
 }
 
-function hasOrderInfo(value) {
-  if (!value || value === 'null' || value === '') return false;
-  const parsed = typeof value === 'string' ? safeJsonParse(value, null) : value;
-  return Boolean(parsed && parsed.order_id);
+function presetMinDate(preset) {
+  if (preset === 'ALL') return null;
+  if (preset === '7_DAYS') return businessStartUtc(6);
+  if (preset === '30_DAYS') return businessStartUtc(29);
+  return businessStartUtc(0);
 }
 
-function safeJsonParse(value, fallback) {
-  try { return JSON.parse(value); } catch (_) { return fallback; }
-}
-
-function getClientIp(event, fallback) {
-  const forwarded = event.headers['x-vercel-forwarded-for'] ||
-    event.headers['x-real-ip'] ||
-    event.headers['x-forwarded-for'] ||
-    event.headers['X-Forwarded-For'];
-  // Prefer the address supplied by the hosting edge over a browser-provided value.
-  // The fallback is kept only for local development where proxy headers are absent.
-  return (forwarded ? forwarded.split(',')[0].trim() : event.headers['client-ip']) || fallback || 'unknown';
-}
-
-function allowCollection(ip) {
-  const key = ip || 'unknown';
-  const now = Date.now();
-  const current = collectCounters.get(key);
-  if (!current || now - current.startedAt >= COLLECT_WINDOW_MS) {
-    collectCounters.set(key, { startedAt: now, count: 1 });
-    return true;
-  }
-  current.count += 1;
-  return current.count <= COLLECT_MAX_PER_WINDOW;
+function inPreset(createdAt, preset) {
+  if (preset === 'ALL') return true;
+  if (!createdAt) return false;
+  const day = businessDate(createdAt);
+  const end = businessDate();
+  const min = presetMinDate(preset);
+  const start = min ? businessDate(min) : '';
+  return day >= start && day <= end;
 }
 
 function isKnownIp(ip) {
   const value = String(ip || '').trim().toLowerCase();
-  return Boolean(value && value !== 'unknown' && value !== '0.0.0.0' && value !== '::');
+  return Boolean(value && value !== 'unknown' && value !== '0.0.0.0' && value !== '::' && value !== 'null');
+}
+
+function sameIp(a, b) {
+  return isKnownIp(a) && isKnownIp(b) && String(a).trim() === String(b).trim();
+}
+
+function resolvedText(value) {
+  const text = String(value || '').trim().toLowerCase();
+  return Boolean(text && !['unknown', 'xx', 'n/a', 'na', 'null', 'undefined'].includes(text));
+}
+
+function hasIpIdentity(data) {
+  return [data?.country, data?.countryCode, data?.region, data?.city, data?.isp, data?.org, data?.as].some(resolvedText);
+}
+
+function providerText(...values) {
+  return values.filter(Boolean).join(' ').toLowerCase();
 }
 
 function hasDatacenterProvider(...values) {
-  const text = values.filter(Boolean).join(' ').toLowerCase();
-  return DATACENTER_PROVIDER_WORDS.some(word => text.includes(word));
+  const text = providerText(...values);
+  return DATACENTER_WORDS.some(word => text.includes(word));
 }
 
-function isForeignIp(countryCode, country) {
-  const code = String(countryCode || '').toUpperCase().trim();
-  const name = String(country || '').toLowerCase().trim();
-  if (!code && !name) return false;
-  if (code === 'VN' || name === 'vietnam' || name === 'việt nam' || code === 'XX' || name === 'unknown') return false;
-  return true;
-}
-
-function effectiveRiskLevel(row) {
-  // A foreign IP is a review signal, not proof of VPN/fraud. Only concrete
-  // network evidence may automatically turn a row into high risk.
-  const detectedRisk = row?.is_vpn || row?.is_datacenter || row?.is_proxy || row?.is_tor || row?.is_abuser || row?.webrtc_mismatch || hasDatacenterProvider(row?.isp, row?.org);
-  return detectedRisk ? 'HIGH_RISK' : (row?.risk_level || 'CLEAN');
-}
-
-function getNextId(state) {
-  return state.logs.length > 0 ? Math.max(...state.logs.map(r => Number(r.id) || 0)) + 1 : 1000;
-}
-
-function getNextBlacklistId(state) {
-  const list = state.blacklist || [];
-  return list.length > 0 ? Math.max(...list.map(r => Number(r.id) || 0)) + 1 : 100;
-}
-
-async function fetchJsonWithTimeout(url, timeoutMs) {
+async function fetchJson(url, timeoutMs = 2500) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) throw new Error(`IP intelligence request failed: ${res.status}`);
+    if (!res.ok) return null;
     return await res.json();
+  } catch (_) {
+    return null;
   } finally {
     clearTimeout(timer);
   }
 }
 
-function rememberIpData(ip, data, ttlMs = IP_INTELLIGENCE_CACHE_TTL_MS) {
-  if (data && Object.keys(data).length && hasResolvedIpIdentity(data)) {
-    ipIntelligenceCache.set(ip, { data, expiresAt: Date.now() + ttlMs });
-  }
-  return data;
-}
-
-function recentIpDataFromLogs(stateLogs, ip) {
-  const row = stateLogs.find(log => {
-    if (log.client_ip !== ip || log.ip_intelligence_version !== IP_INTELLIGENCE_VERSION) return false;
-    const checkedAt = new Date(log.ip_intelligence_checked_at || 0).getTime();
-    return Number.isFinite(checkedAt) && Date.now() - checkedAt < 24 * 60 * 60 * 1000;
-  });
-  if (!row) return null;
-  const cachedData = {
-    country: row.country,
-    countryCode: row.country_code,
-    region: row.region,
-    city: row.city,
-    isp: row.isp,
-    org: row.org,
-    as: row.asn,
-    hosting: Boolean(row.is_datacenter),
-    vpn: Boolean(row.is_vpn),
-    proxy: Boolean(row.is_proxy),
-    tor: Boolean(row.is_tor),
-    abuser: Boolean(row.is_abuser),
-    vpnService: row.vpn_service || null,
-    source: row.ip_intelligence_source || 'cache',
-    intelligenceVersion: IP_INTELLIGENCE_VERSION
+function normalizeIpApiIs(data) {
+  if (!data || data.error) return null;
+  const company = data.company || {};
+  const asn = data.asn || {};
+  const location = data.location || {};
+  return {
+    country: location.country || data.country || data.country_name || 'Unknown',
+    countryCode: location.country_code || data.country_code || data.cc || 'XX',
+    region: location.region || data.region || data.state || 'Unknown',
+    city: location.city || data.city || data.region || 'Unknown',
+    isp: company.name || data.company_name || asn.org || data.asn_org || 'Unknown',
+    org: asn.org || data.asn_org || company.name || data.company_name || 'Unknown',
+    as: asn.asn ? `AS${asn.asn}` : (data.asn_num ? `AS${data.asn_num}` : null),
+    hosting: Boolean(data.is_datacenter || company.type === 'hosting' || asn.type === 'hosting'),
+    vpn: Boolean(data.is_vpn),
+    proxy: Boolean(data.is_proxy),
+    tor: Boolean(data.is_tor),
+    abuser: Boolean(data.is_abuser),
+    source: 'ipapi.is'
   };
-  if (cachedData.source === 'fallback_pending' || !hasResolvedIpIdentity(cachedData)) return null;
-  return cachedData;
 }
 
-function isResolvedIpIdentityValue(value) {
-  const normalized = String(value || '').trim().toLowerCase();
-  return Boolean(normalized && !['unknown', 'xx', 'n/a', 'na', 'none', 'null', 'undefined'].includes(normalized));
-}
-
-function hasResolvedIpIdentity(ipData) {
-  if (!ipData || typeof ipData !== 'object') return false;
-  return [
-    ipData.country,
-    ipData.countryCode,
-    ipData.city,
-    ipData.isp,
-    ipData.org,
-    ipData.as
-  ].some(isResolvedIpIdentityValue);
-}
-
-async function lookupIp(ip) {
-  if (!isKnownIp(ip)) return {};
-  const cached = ipIntelligenceCache.get(ip);
-  if (cached && cached.expiresAt > Date.now()) return cached.data;
-  if (cached) ipIntelligenceCache.delete(ip);
-
-  const ipApiKey = process.env.IPAPI_IS_KEY || '';
-  const keyParam = ipApiKey ? `&key=${encodeURIComponent(ipApiKey)}` : '';
-
-  const primaryPromise = fetchJsonWithTimeout(`https://api.ipapi.is/?q=${encodeURIComponent(ip)}${keyParam}`, 1800)
-    .then(data => {
-      if (!data || data.error) return null;
-      const company = data.company || {};
-      const asn = data.asn || {};
-      const location = data.location || {};
-      return {
-        // ipapi.is has both legacy nested and current flat response shapes.
-        // Normalise both before deciding whether this provider gave us an answer.
-        country: location.country || data.country || data.country_name || 'Unknown',
-        countryCode: location.country_code || data.country_code || data.cc || 'XX',
-        region: location.region || location.state || data.region || data.state || 'Unknown',
-        city: location.city || data.city || data.region || data.state || 'Unknown',
-        isp: company.name || data.company_name || asn.org || data.asn_org || 'Unknown',
-        org: asn.org || data.asn_org || company.name || data.company_name || 'Unknown',
-        as: asn.asn ? `AS${asn.asn}` : (data.asn_num ? `AS${data.asn_num}` : null),
-        hosting: Boolean(data.is_datacenter || company.type === 'hosting' || asn.type === 'hosting' || data.company_type === 'hosting' || data.asn_type === 'hosting'),
-        vpn: Boolean(data.is_vpn),
-        proxy: Boolean(data.is_proxy),
-        tor: Boolean(data.is_tor),
-        abuser: Boolean(data.is_abuser),
-        vpnService: data.vpn?.service || null,
-        source: 'ipapi.is',
-        intelligenceVersion: IP_INTELLIGENCE_VERSION
-      };
-    })
-    .catch(() => null);
-
-  const secondaryPromise = fetchJsonWithTimeout(`https://ipwho.is/${encodeURIComponent(ip)}`, 1800)
-    .then(data => {
-      if (!data || data.success === false) return null;
-      const isDatacenter = hasDatacenterProvider(data.connection?.isp, data.connection?.org, data.connection?.domain);
-      return {
-        country: data.country || 'Unknown',
-        countryCode: data.country_code || 'XX',
-        region: data.region || 'Unknown',
-        city: data.city || 'Unknown',
-        isp: data.connection?.isp || data.connection?.org || 'Unknown',
-        org: data.connection?.org || data.connection?.isp || 'Unknown',
-        as: data.connection?.asn ? `AS${data.connection.asn}` : null,
-        hosting: isDatacenter,
-        vpn: false,
-        proxy: false,
-        tor: false,
-        abuser: false,
-        vpnService: null,
-        source: 'ipwho.is',
-        intelligenceVersion: IP_INTELLIGENCE_VERSION
-      };
-    })
-    .catch(() => null);
-
-  const tertiaryPromise = fetchJsonWithTimeout(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,city,isp,org,as,hosting,proxy`, 2500)
-    .then(data => {
-      if (!data || data.status !== 'success') return null;
-      const isDatacenter = Boolean(data.hosting || hasDatacenterProvider(data.isp, data.org, data.as));
-      return {
-        country: data.country || 'Unknown',
-        countryCode: data.countryCode || 'XX',
-        region: data.regionName || data.region || 'Unknown',
-        city: data.city || 'Unknown',
-        isp: data.isp || 'Unknown',
-        org: data.org || data.isp || 'Unknown',
-        as: data.as || null,
-        hosting: isDatacenter,
-        vpn: Boolean(data.proxy),
-        proxy: Boolean(data.proxy),
-        tor: false,
-        abuser: false,
-        vpnService: null,
-        source: 'ip-api.com',
-        intelligenceVersion: IP_INTELLIGENCE_VERSION
-      };
-    })
-    .catch(() => null);
-
-  // HTTPS fallback for hosts where ipapi.is/ipwho.is are temporarily rate
-  // limited. It is only reached during a manual Sapo sync, never on dashboard
-  // refresh, so it does not increase background quota usage.
-  const quaternaryPromise = fetchJsonWithTimeout(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, 3200)
-    .then(data => {
-      if (!data || data.error || data.reserved) return null;
-      const org = data.org || '';
-      return {
-        country: data.country_name || 'Unknown',
-        countryCode: data.country_code || 'XX',
-        region: data.region || 'Unknown',
-        city: data.city || data.region || 'Unknown',
-        isp: org || 'Unknown',
-        org: org || 'Unknown',
-        as: data.asn || null,
-        hosting: hasDatacenterProvider(org),
-        vpn: false,
-        proxy: false,
-        tor: false,
-        abuser: false,
-        vpnService: null,
-        source: 'ipapi.co',
-        intelligenceVersion: IP_INTELLIGENCE_VERSION
-      };
-    })
-    .catch(() => null);
-
-  const [primaryData, secondaryData, tertiaryData, quaternaryData] = await Promise.all([primaryPromise, secondaryPromise, tertiaryPromise, quaternaryPromise]);
-
-  const resolvedSources = [primaryData, secondaryData, quaternaryData, tertiaryData]
-    .filter(hasResolvedIpIdentity);
-  let result = resolvedSources[0] || null;
-
-  if (hasResolvedIpIdentity(primaryData) && hasResolvedIpIdentity(secondaryData)) {
-    // Keep location/ISP fields from the provider that returned them, but retain
-    // every concrete risk signal. A partial response must not hide valid data
-    // from the secondary provider.
-    const preferred = secondaryData;
-    const fallback = primaryData;
-    result = {
-      ...fallback,
-      ...preferred,
-      country: isResolvedIpIdentityValue(preferred.country) ? preferred.country : fallback.country,
-      countryCode: isResolvedIpIdentityValue(preferred.countryCode) ? preferred.countryCode : fallback.countryCode,
-      region: isResolvedIpIdentityValue(preferred.region) ? preferred.region : fallback.region,
-      city: isResolvedIpIdentityValue(preferred.city) ? preferred.city : fallback.city,
-      isp: isResolvedIpIdentityValue(preferred.isp) ? preferred.isp : fallback.isp,
-      org: isResolvedIpIdentityValue(preferred.org) ? preferred.org : fallback.org,
-      as: isResolvedIpIdentityValue(preferred.as) ? preferred.as : fallback.as,
-      hosting: Boolean(primaryData.hosting || secondaryData.hosting),
-      vpn: Boolean(primaryData.vpn || secondaryData.vpn),
-      proxy: Boolean(primaryData.proxy || secondaryData.proxy),
-      tor: Boolean(primaryData.tor || secondaryData.tor),
-      abuser: Boolean(primaryData.abuser || secondaryData.abuser),
-      vpnService: primaryData.vpnService || secondaryData.vpnService || null,
-      source: 'ipapi.is+ipwho.is',
-      intelligenceVersion: IP_INTELLIGENCE_VERSION
-    };
-  }
-
-  if (result && hasResolvedIpIdentity(result)) {
-    return rememberIpData(ip, result);
-  }
-
-  // Fallback if all external lookup services failed or timed out.
-  // DO NOT hardcode Vietnam/Viettel so unknown IPs are never falsely marked safe.
-  const defaultFallback = {
-    country: 'Unknown',
-    countryCode: 'XX',
-    region: 'Unknown',
-    city: 'Unknown',
-    isp: 'Unknown',
-    org: 'Unknown',
-    as: null,
-    hosting: false,
+function normalizeIpWho(data) {
+  if (!data || data.success === false) return null;
+  const isp = data.connection?.isp || data.connection?.org || 'Unknown';
+  const org = data.connection?.org || data.connection?.isp || 'Unknown';
+  return {
+    country: data.country || 'Unknown',
+    countryCode: data.country_code || 'XX',
+    region: data.region || 'Unknown',
+    city: data.city || 'Unknown',
+    isp,
+    org,
+    as: data.connection?.asn ? `AS${data.connection.asn}` : null,
+    hosting: hasDatacenterProvider(isp, org, data.connection?.domain),
     vpn: false,
     proxy: false,
     tor: false,
     abuser: false,
-    vpnService: null,
-    source: 'fallback_pending',
-    intelligenceVersion: IP_INTELLIGENCE_VERSION
+    source: 'ipwho.is'
   };
-  return defaultFallback;
 }
 
-async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
-  if (!isKnownIp(clientIp)) {
+function mergeIpData(primary, secondary) {
+  const sources = [primary, secondary].filter(hasIpIdentity);
+  if (!sources.length) {
     return {
-      ipData: {},
-      isVpn: false,
-      isDatacenter: false,
-      webrtcMismatch: false,
-      riskLevel: 'UNKNOWN',
-      riskReasons: ['No usable IP captured']
+      country: 'Unknown',
+      countryCode: 'XX',
+      region: 'Unknown',
+      city: 'Unknown',
+      isp: 'Unknown',
+      org: 'Unknown',
+      as: null,
+      hosting: false,
+      vpn: false,
+      proxy: false,
+      tor: false,
+      abuser: false,
+      source: 'unknown'
     };
   }
-
-  let ipData = ipCache ? ipCache.get(clientIp) : null;
-  if (!ipData) ipData = recentIpDataFromLogs(stateLogs, clientIp);
-  if (!ipData) {
-    ipData = await lookupIp(clientIp);
-    if (ipCache) ipCache.set(clientIp, ipData);
-  }
-  if (!ipData || Object.keys(ipData).length === 0 || !hasResolvedIpIdentity(ipData)) {
-    return {
-      ipData: {},
-      isVpn: false,
-      isDatacenter: false,
-      webrtcMismatch: false,
-      riskLevel: 'UNKNOWN',
-      riskReasons: ['IP intelligence is temporarily unavailable']
-    };
-  }
-
-  const orgText = `${ipData.isp || ''} ${ipData.org || ''} ${ipData.as || ''}`.toLowerCase();
-  const isDatacenter = Boolean(ipData.hosting || hasDatacenterProvider(ipData.isp, ipData.org, ipData.as));
-  const isVpn = Boolean(ipData.vpn || ipData.proxy || orgText.includes('vpn') || orgText.includes('proxy'));
-  const isTor = Boolean(ipData.tor);
-  const isAbuser = Boolean(ipData.abuser);
-
-  let webrtcMismatch = false;
-  if (webrtcIp && clientIp && webrtcIp !== clientIp) {
-    if (isDatacenter || isVpn) {
-      webrtcMismatch = true;
-    } else {
-      let webrtcData = ipCache ? ipCache.get(webrtcIp) : null;
-      if (!webrtcData && isKnownIp(webrtcIp)) {
-        webrtcData = recentIpDataFromLogs(stateLogs, webrtcIp) || await lookupIp(webrtcIp);
-        if (ipCache) ipCache.set(webrtcIp, webrtcData);
-      }
-      if (webrtcData && ipData.country && webrtcData.country && ipData.country !== webrtcData.country) {
-        webrtcMismatch = true;
-      }
-    }
-  }
-
-  const countryCode = String(ipData.countryCode || '').toUpperCase().trim();
-  const countryName = String(ipData.country || '').toLowerCase().trim();
-  const isForeignCountry = isForeignIp(countryCode, countryName);
-
-  const riskReasons = [];
-  if (isForeignCountry) riskReasons.push(`Foreign IP location detected (${ipData.country || countryCode})`);
-  if (isVpn) riskReasons.push(ipData.vpnService ? `${ipData.vpnService} VPN detected` : 'VPN/Proxy detected');
-  if (isDatacenter) riskReasons.push('Datacenter/hosting IP detected');
-  if (isTor) riskReasons.push('Tor exit node detected');
-  if (isAbuser) riskReasons.push('Abusive IP reputation detected');
-  if (webrtcMismatch) riskReasons.push('WebRTC IP mismatch detected');
-  const hasConcreteRisk = isVpn || isDatacenter || isTor || isAbuser || webrtcMismatch;
+  const base = secondary && hasIpIdentity(secondary) ? secondary : sources[0];
   return {
-    ipData,
-    isVpn,
-    isDatacenter,
-    isTor,
-    isAbuser,
-    webrtcMismatch,
-    riskLevel: hasConcreteRisk ? 'HIGH_RISK' : 'CLEAN',
-    riskReasons
+    ...base,
+    country: resolvedText(base.country) ? base.country : sources[0].country,
+    countryCode: resolvedText(base.countryCode) ? base.countryCode : sources[0].countryCode,
+    region: resolvedText(base.region) ? base.region : sources[0].region,
+    city: resolvedText(base.city) ? base.city : sources[0].city,
+    isp: resolvedText(base.isp) ? base.isp : sources[0].isp,
+    org: resolvedText(base.org) ? base.org : sources[0].org,
+    as: resolvedText(base.as) ? base.as : sources[0].as,
+    hosting: Boolean(primary?.hosting || secondary?.hosting || hasDatacenterProvider(base.isp, base.org, base.as)),
+    vpn: Boolean(primary?.vpn || secondary?.vpn),
+    proxy: Boolean(primary?.proxy || secondary?.proxy),
+    tor: Boolean(primary?.tor || secondary?.tor),
+    abuser: Boolean(primary?.abuser || secondary?.abuser),
+    source: [primary?.source, secondary?.source].filter(Boolean).join('+') || base.source
   };
 }
 
-function filterLogs(logs, query, { sort = true } = {}) {
-  let rows = [...logs];
-  if (query.store_id && query.store_id !== 'ALL') {
-    const storeId = Number(query.store_id);
-    rows = rows.filter(row => row.store_id === storeId);
-  }
-  if (query.risk_level && query.risk_level !== 'ALL') {
-    rows = rows.filter(row => effectiveRiskLevel(row) === query.risk_level);
-  }
-  if (query.orders_only === 'true') {
-    rows = rows.filter(row => hasOrderInfo(row.order_info));
-  }
-  if (query.search) {
-    const s = query.search.toLowerCase();
-    rows = rows.filter(row =>
-      String(row.client_ip || '').toLowerCase().includes(s) ||
-      String(row.webrtc_ip || '').toLowerCase().includes(s) ||
-      String(row.isp || '').toLowerCase().includes(s) ||
-      String(row.order_info || '').toLowerCase().includes(s) ||
-      String(row.last_clicked_url || '').toLowerCase().includes(s) ||
-      String(row.device_type || '').toLowerCase().includes(s) ||
-      String(row.fingerprint || '').toLowerCase().includes(s)
-    );
-  }
-  const startBounds = businessDayBounds(query.startDate);
-  const endBounds = businessDayBounds(query.endDate);
-  if (startBounds) rows = rows.filter(row => row.created_at && row.created_at >= startBounds.start);
-  if (endBounds) rows = rows.filter(row => row.created_at && row.created_at <= endBounds.end);
-  return sort ? rows.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)) : rows;
+async function lookupIp(ip) {
+  if (!isKnownIp(ip)) return null;
+  const cached = memoryIpCache.get(ip);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
+
+  const key = process.env.IPAPI_IS_KEY ? `&key=${encodeURIComponent(process.env.IPAPI_IS_KEY)}` : '';
+  const [ipapi, ipwho] = await Promise.all([
+    fetchJson(`https://api.ipapi.is/?q=${encodeURIComponent(ip)}${key}`, 2200).then(normalizeIpApiIs),
+    fetchJson(`https://ipwho.is/${encodeURIComponent(ip)}`, 2200).then(normalizeIpWho)
+  ]);
+  const data = mergeIpData(ipapi, ipwho);
+  memoryIpCache.set(ip, { data, expiresAt: Date.now() + 6 * 60 * 60 * 1000 });
+  return data;
 }
 
-function formatDuration(seconds) {
-  if (seconds === null || seconds === undefined) return 'Chưa bắt được phiên';
-  const safeSeconds = Math.max(1, Math.round(Number(seconds)));
-  if (!Number.isFinite(safeSeconds) || safeSeconds > 24 * 60 * 60) return 'Chưa bắt được phiên';
-  if (safeSeconds < 15) return `${safeSeconds} giây (Đặt cực nhanh)`;
-  if (safeSeconds < 60) return `${safeSeconds} giây`;
-  const mins = Math.floor(safeSeconds / 60);
-  const secs = safeSeconds % 60;
-  if (mins >= 60) {
-    const hours = Math.floor(mins / 60);
-    const remMins = mins % 60;
-    return `> ${hours} giờ${remMins > 0 ? ` ${remMins}p` : ''} (Treo tab)`;
-  }
-  return `${mins} phút${secs > 0 ? ` ${secs}s` : ''}`;
-}
-
-function decorateLog(row, state) {
-  const blacklisted = new Set(state.blacklist.map(item => item.ip));
-  const hasOrder = hasOrderInfo(row.order_info);
-  const inferredDatacenter = hasDatacenterProvider(row.isp, row.org);
-  const storedReasons = row.risk_reasons ? safeJsonParse(row.risk_reasons, []) : [];
-  const riskReasons = inferredDatacenter && !storedReasons.includes('Datacenter/hosting IP detected')
-    ? [...storedReasons, 'Datacenter/hosting IP detected']
-    : storedReasons;
-  const riskLevel = effectiveRiskLevel(row);
-  let timeToOrder = null;
-  if (hasOrder && row.session_duration_sec) timeToOrder = formatDuration(Number(row.session_duration_sec));
-  const effectiveWebrtc = (row.webrtc_ip && isKnownIp(row.webrtc_ip)) ? row.webrtc_ip : null;
-  let effectiveWebrtcStatus = row.webrtc_status || (effectiveWebrtc ? 'captured' : 'not_available');
-  const rowAgeMs = Date.now() - new Date(row.created_at || 0).getTime();
-  if (!effectiveWebrtc && effectiveWebrtcStatus === 'pending' && Number.isFinite(rowAgeMs) && rowAgeMs > 30 * 1000) {
-    effectiveWebrtcStatus = 'not_available';
-  }
-  const isBlacklisted = blacklisted.has(row.client_ip) || (row.webrtc_ip && blacklisted.has(row.webrtc_ip));
+function analyze(ipData, clientIp, webrtcIp) {
+  const mismatch = Boolean(isKnownIp(clientIp) && isKnownIp(webrtcIp) && !sameIp(clientIp, webrtcIp));
+  const datacenter = Boolean(ipData?.hosting || hasDatacenterProvider(ipData?.isp, ipData?.org, ipData?.as));
+  const vpn = Boolean(ipData?.vpn || ipData?.proxy || providerText(ipData?.isp, ipData?.org).includes('vpn'));
+  const risk = Boolean(mismatch || datacenter || vpn || ipData?.tor || ipData?.abuser);
+  const reasons = [];
+  if (mismatch) reasons.push('WebRTC IP khac IP ket noi');
+  if (vpn || ipData?.proxy) reasons.push('VPN/Proxy');
+  if (datacenter) reasons.push('Datacenter/Hosting');
+  if (ipData?.abuser) reasons.push('IP reputation rui ro');
+  if (ipData?.tor) reasons.push('Tor');
   return {
-    ...row,
-    webrtc_ip: effectiveWebrtc,
-    webrtc_status: effectiveWebrtcStatus,
-    is_vpn: Boolean(row.is_vpn),
-    is_datacenter: Boolean(row.is_datacenter || inferredDatacenter),
-    risk_level: riskLevel,
-    webrtc_mismatch: Boolean(row.webrtc_mismatch),
-    is_blacklisted: isBlacklisted,
-    time_to_order: timeToOrder || (hasOrder ? 'Chưa bắt được phiên' : null),
-    order_info: hasOrder ? safeJsonParse(row.order_info, null) : null,
-    risk_reasons: riskReasons
+    is_vpn: vpn,
+    is_proxy: Boolean(ipData?.proxy),
+    is_datacenter: datacenter,
+    is_tor: Boolean(ipData?.tor),
+    is_abuser: Boolean(ipData?.abuser),
+    webrtc_mismatch: mismatch,
+    risk_level: risk ? 'HIGH_RISK' : (hasIpIdentity(ipData) ? 'CLEAN' : 'UNKNOWN'),
+    risk_reasons: reasons
   };
 }
 
-async function handleStores(event, state, method, parts, body) {
-  if (!assertAdmin(event)) return unauthorized();
-  if (method === 'GET' && parts.length === 0) {
-    return json(200, { success: true, data: state.stores.map(store => publicStore(store, state.syncState)) });
-  }
-  if (method === 'POST' && parts.length === 0) {
-    const { store_name, mysapo_domain, api_key, api_secret } = body || {};
-    if (!store_name || !mysapo_domain || !api_key || !api_secret) {
-      return json(400, { success: false, message: 'Vui long dien day du thong tin store.' });
-    }
-    const domain = cleanDomain(mysapo_domain);
-    if (state.stores.some(store => cleanDomain(store.mysapo_domain) === domain)) {
-      return json(409, { success: false, message: 'Cua hang voi Mysapo Domain nay da duoc lien ket.' });
-    }
-    const newStore = {
-      id: state.autoStoreId++,
-      store_name: String(store_name).trim(),
-      mysapo_domain: domain,
-      api_key: String(api_key).trim(),
-      api_secret_encrypted: encryptSecret(String(api_secret).trim()),
-      credentials_saved_at: new Date().toISOString(),
-      is_active: 1,
-      created_at: new Date().toISOString()
-    };
-    state.stores.unshift(newStore);
-    await saveStoresState(state);
-    return json(201, { success: true, data: publicStore(newStore), message: 'Da lien ket cua hang.' });
-  }
-  const id = Number(parts[0]);
-  const store = state.stores.find(item => item.id === id);
-  if (!store) return json(404, { success: false, message: 'Store not found' });
-  if (method === 'PUT') {
-    const { store_name, mysapo_domain, api_key, api_secret } = body || {};
-    const domain = cleanDomain(mysapo_domain);
-    if (!store_name || !domain || !api_key) return json(400, { success: false, message: 'Vui long dien day du thong tin.' });
-    if (state.stores.some(item => item.id !== id && cleanDomain(item.mysapo_domain) === domain)) {
-      return json(409, { success: false, message: 'Mysapo Domain nay da thuoc cua hang khac.' });
-    }
-    store.store_name = String(store_name).trim();
-    store.mysapo_domain = domain;
-    store.api_key = String(api_key).trim();
-    if (api_secret) {
-      store.api_secret_encrypted = encryptSecret(String(api_secret).trim());
-      store.credentials_saved_at = new Date().toISOString();
-    }
-    await saveStoresState(state);
-    return json(200, { success: true, message: 'Da cap nhat store.' });
-  }
-  if (method === 'DELETE') {
-    state.stores = state.stores.filter(item => item.id !== id);
-    await saveStoresState(state);
-    return json(200, { success: true, message: 'Da xoa store.' });
-  }
-  if (method === 'POST' && parts[1] === 'test') {
-    return json(200, await testSapoConnection(store));
-  }
-  if (method === 'POST' && parts[1] === 'sync') {
-    const preset = body?.datePreset || 'TODAY';
-    const incremental = body?.incremental === true && preset === 'TODAY';
-    const lockKey = `${store.id}:${preset}`;
-    if (syncLocks.has(lockKey)) {
-      return json(202, { success: true, syncing: true, total_orders: 0, synced_new: 0, message: 'Sync dang chay, dashboard se tu cap nhat ngay khi co du lieu moi.' });
-    }
-    const syncPromise = syncSapoOrders(state, store, preset, { incremental });
-    syncLocks.set(lockKey, syncPromise);
-    try {
-      const result = await syncPromise;
-      return json(200, result);
-    } catch (error) {
-      recordSyncRun(state, {
-        store_id: store.id,
-        status: 'error',
-        mode: incremental ? 'delta' : 'full',
-        message: error.message || 'Sync failed'
-      });
-      await saveSyncState(state);
-      throw error;
-    } finally {
-      syncLocks.delete(lockKey);
-    }
-  }
-  return json(404, { success: false, message: 'Not found' });
-}
-
-function parseSapoOrder(order) {
-  const addr = order.shipping_address || order.billing_address || {};
-  return {
-    order_id: order.name || (order.order_number ? `#${order.order_number}` : String(order.id || '')),
-    customer_name: addr.name || `${addr.first_name || ''} ${addr.last_name || ''}`.trim() || order.customer?.name || '',
-    phone: addr.phone || order.phone || '',
-    email: order.email || '',
-    total_price: order.total_price || order.total || null
-  };
-}
-
-function sapoOrderClientIp(order) {
-  const value = order?.client_details?.browser_ip || order?.browser_ip || order?.client_ip || '';
-  const normalized = String(value || '').trim();
-  return isKnownIp(normalized) ? normalized : 'unknown';
-}
-
-function normalizeContact(value) {
-  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-function sameContact(left, right) {
-  if (!left || !right) return false;
-  if (left === right) return true;
-  // Phone numbers can differ only by the Vietnamese country prefix (0 / 84).
-  return left.length >= 9 && right.length >= 9 && left.slice(-9) === right.slice(-9);
-}
-
-function orderInfoFromLog(log) {
-  return safeJsonParse(log.order_info, null) || {};
-}
-
-function isSameOrder(log, orderInfo) {
-  const logged = orderInfoFromLog(log);
-  return Boolean(logged.order_id && orderInfo.order_id && String(logged.order_id) === String(orderInfo.order_id));
-}
-
-function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt, orderClientIp) {
-  const orderTime = new Date(orderCreatedAt).getTime();
-  if (!Number.isFinite(orderTime)) return null;
-  const orderPhone = normalizeContact(orderInfo?.phone);
-  const orderEmail = normalizeContact(orderInfo?.email);
-  const orderIp = isKnownIp(orderClientIp) ? orderClientIp : null;
-  const targetOrderId = String(orderInfo?.order_id || '').toLowerCase();
-
-  // Filter candidate browsing logs from tracker (excluding sapo_sync) for the same store
-  const candidates = state.logs.filter(log => {
-    if (log.trigger_event === 'sapo_sync') return false;
-    if (storeId && log.store_id && log.store_id !== storeId) return false;
-    
-    // If the log has an order_id bound to it, make sure it's not a different order
-    const loggedOrder = orderInfoFromLog(log);
-    if (loggedOrder?.order_id && targetOrderId && String(loggedOrder.order_id).toLowerCase() !== targetOrderId) {
-      return false;
-    }
-
-    const logTime = new Date(log.created_at).getTime();
-    if (!Number.isFinite(logTime)) return false;
-    const diff = orderTime - logTime;
-    // Match visits within 6 hours before order creation or 15 mins after
-    return diff >= -15 * 60 * 1000 && diff <= 6 * 60 * 60 * 1000;
-  });
-
-  if (candidates.length === 0) return null;
-
-  // Priority 1: Match by Phone or Email if captured in log
-  if (orderPhone || orderEmail) {
-    const contactMatch = candidates.find(log => {
-      const captured = orderInfoFromLog(log);
-      const capturedPhone = normalizeContact(captured?.phone);
-      const capturedEmail = normalizeContact(captured?.email);
-      return (orderPhone && sameContact(capturedPhone, orderPhone)) ||
-             (orderEmail && Boolean(capturedEmail && capturedEmail === orderEmail));
-    });
-    if (contactMatch) return contactMatch;
-  }
-
-  // Priority 2: Match by IP address (client_ip or webrtc_ip matching orderIp)
-  if (orderIp) {
-    // Prefer candidate that has session_start_at or webrtc_ip
-    const ipMatch = candidates.find(log => (log.client_ip === orderIp || log.webrtc_ip === orderIp) && (log.session_start_at || isKnownIp(log.webrtc_ip)))
-                 || candidates.find(log => log.client_ip === orderIp || log.webrtc_ip === orderIp);
-    if (ipMatch) return ipMatch;
-  }
-
-  // A nearby browsing event alone is not enough evidence. Returning it caused
-  // one shopper's WebRTC/session to be attached to another shopper's order.
-  return null;
-}
-
-function shouldRefreshIpIntelligence(log, now = Date.now(), { forceUnresolved = false } = {}) {
-  const checkedAt = new Date(log?.ip_intelligence_checked_at || 0).getTime();
-  const ageMs = Number.isFinite(checkedAt) ? now - checkedAt : Number.POSITIVE_INFINITY;
-  const isResolved = hasResolvedIpIdentity({
-    country: log?.country,
-    countryCode: log?.country_code,
-    city: log?.city,
-    isp: log?.isp,
-    org: log?.org,
-    as: log?.asn
-  });
-
-  if (!isResolved || log?.ip_intelligence_source === 'fallback_pending') {
-    if (forceUnresolved) return true;
-    return ageMs >= IP_INTELLIGENCE_PENDING_RETRY_MS;
-  }
-  return ageMs >= IP_INTELLIGENCE_CACHE_TTL_MS || log?.ip_intelligence_version !== IP_INTELLIGENCE_VERSION;
-}
-
-function sessionDurationToOrder(sessionStartAt, orderCreatedAt) {
-  if (!sessionStartAt || !orderCreatedAt) return null;
-  const start = new Date(sessionStartAt).getTime();
-  const end = new Date(orderCreatedAt).getTime();
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
-  const seconds = Math.max(1, Math.round((end - start) / 1000));
-  return seconds <= 24 * 60 * 60 ? seconds : null;
-}
-
-function applySyncedOrder(log, orderInfo, orderCreatedAt) {
-  log.order_info = JSON.stringify(orderInfo);
-  log.created_at = new Date(orderCreatedAt).toISOString();
-  if (log.session_start_at) {
-    log.session_duration_sec = sessionDurationToOrder(log.session_start_at, orderCreatedAt);
-  }
-}
-
-async function applyIpAnalysis(log, clientIp, webrtcIp, extraReasons = [], ipCache = null, stateLogs = []) {
-  const analysis = await analyzeRisk(clientIp, webrtcIp, ipCache, stateLogs);
-  log.client_ip = isKnownIp(clientIp) ? clientIp : 'unknown';
-  log.webrtc_ip = isKnownIp(webrtcIp) ? webrtcIp : null;
-  log.country = analysis.ipData.country || 'Unknown';
-  log.country_code = analysis.ipData.countryCode || 'XX';
-  log.region = analysis.ipData.region || 'Unknown';
-  log.city = analysis.ipData.city || 'Unknown';
-  log.isp = analysis.ipData.isp || 'Unknown';
-  log.org = analysis.ipData.org || 'Unknown';
-  log.asn = analysis.ipData.as || null;
-  log.is_vpn = analysis.isVpn;
-  log.is_datacenter = analysis.isDatacenter;
-  log.is_proxy = Boolean(analysis.ipData.proxy);
-  log.is_tor = analysis.isTor;
-  log.is_abuser = analysis.isAbuser;
-  log.vpn_service = analysis.ipData.vpnService || null;
-  log.ip_intelligence_source = analysis.ipData.source || null;
-  log.ip_intelligence_version = Number(analysis.ipData.intelligenceVersion || 0);
-  log.ip_intelligence_checked_at = new Date().toISOString();
-  log.webrtc_mismatch = analysis.webrtcMismatch;
-  log.risk_level = analysis.riskLevel;
-  log.risk_reasons = JSON.stringify([...analysis.riskReasons, ...extraReasons]);
-}
-
-function queueIpAnalysis(pendingIpAnalysis, log, clientIp = log?.client_ip, webrtcIp = log?.webrtc_ip) {
-  if (!isKnownIp(clientIp)) return false;
-  const analysisKey = `${clientIp}|${webrtcIp || ''}`;
-  const pending = pendingIpAnalysis.get(analysisKey);
-  if (pending) {
-    if (!pending.logs.includes(log)) pending.logs.push(log);
-  } else {
-    pendingIpAnalysis.set(analysisKey, {
-      logs: [log],
-      clientIp,
-      webrtcIp
-    });
-  }
-  return true;
+function applyIp(order, ipData, clientIp, webrtcIp) {
+  const risk = analyze(ipData, clientIp, webrtcIp);
+  order.client_ip = isKnownIp(clientIp) ? clientIp : 'unknown';
+  order.webrtc_ip = isKnownIp(webrtcIp) ? webrtcIp : null;
+  order.country = ipData?.country || 'Unknown';
+  order.country_code = ipData?.countryCode || 'XX';
+  order.region = ipData?.region || 'Unknown';
+  order.city = ipData?.city || 'Unknown';
+  order.isp = ipData?.isp || 'Unknown';
+  order.org = ipData?.org || 'Unknown';
+  order.asn = ipData?.as || null;
+  order.is_vpn = risk.is_vpn;
+  order.is_proxy = risk.is_proxy;
+  order.is_datacenter = risk.is_datacenter;
+  order.is_tor = risk.is_tor;
+  order.is_abuser = risk.is_abuser;
+  order.webrtc_mismatch = risk.webrtc_mismatch;
+  order.risk_level = risk.risk_level;
+  order.risk_reasons = JSON.stringify(risk.risk_reasons);
+  order.ip_intelligence_source = ipData?.source || 'unknown';
+  order.ip_intelligence_checked_at = new Date().toISOString();
 }
 
 function sapoAuthHeaders(store, secret) {
-  const auth = Buffer.from(`${store.api_key}:${secret}`).toString('base64');
+  const token = Buffer.from(`${store.api_key}:${secret}`).toString('base64');
   return {
-    Authorization: `Basic ${auth}`,
+    Authorization: `Basic ${token}`,
     'X-Sapo-Access-Token': secret,
     'X-Bizweb-Access-Token': secret,
     Accept: 'application/json',
-    'User-Agent': 'Sapo-IP-Guard/1.0'
+    'User-Agent': 'Sapo-IP-Guard-Clean/2.0'
   };
 }
 
-async function sapoFetchJson(store, secret, path) {
-  const url = `https://${store.mysapo_domain}${path}`;
+async function sapoFetch(store, path) {
+  const secret = decryptSecret(store.api_secret_encrypted);
+  if (!secret) throw new Error('Missing Sapo API secret.');
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
-  let res;
+  const timer = setTimeout(() => controller.abort(), 10000);
   try {
-    res = await fetch(url, { headers: sapoAuthHeaders(store, secret), signal: controller.signal });
-  } catch (error) {
-    if (controller.signal.aborted) throw new Error('Sapo API timed out after 8 seconds.');
-    throw error;
+    const res = await fetch(`https://${store.mysapo_domain}${path}`, {
+      headers: sapoAuthHeaders(store, secret),
+      signal: controller.signal
+    });
+    const data = await res.json().catch(() => null);
+    return { res, data };
   } finally {
     clearTimeout(timer);
   }
-  let data = null;
-  try {
-    data = await res.json();
-  } catch (_) {
-    data = null;
-  }
-  return { res, data };
 }
 
-function sapoAuthErrorMessage(status) {
-  if (status === 401) {
-    return 'Sapo tu choi xac thuc (401). API Key/API Secret khong dung, khong thuoc store nay, hoac khong phai cap Private App dang hoat dong.';
-  }
-  if (status === 403) {
-    return 'Sapo da xac thuc app nhung chua cap quyen doc don hang (403). Hay vao Private App va bat quyen doc Orders.';
-  }
+function sapoError(status) {
+  if (status === 401) return 'Sapo tu choi xac thuc. Kiem tra API key/secret.';
+  if (status === 403) return 'Sapo chua cap quyen doc don hang.';
   return `Sapo API error ${status}`;
 }
 
-function sapoCreatedOnMin(datePreset) {
-  if (datePreset === 'ALL') return null;
-  let daysAgo = 0;
-  if (datePreset === '7_DAYS') daysAgo = 6;
-  if (datePreset === '30_DAYS') daysAgo = 29;
-
-  const now = new Date();
-  const vnTime = new Date(now.getTime() + (7 * 60 * 60 * 1000));
-  const vnDateStr = vnTime.toISOString().slice(0, 10);
-  const vnStartUtcMs = new Date(`${vnDateStr}T00:00:00.000Z`).getTime() - (7 * 60 * 60 * 1000) - (daysAgo * 24 * 60 * 60 * 1000);
-  return new Date(vnStartUtcMs).toISOString();
+function parseSapoOrder(order) {
+  const address = order.shipping_address || order.billing_address || {};
+  const orderId = order.name || (order.order_number ? `#${order.order_number}` : String(order.id || ''));
+  return {
+    order_id: orderId,
+    sapo_id: order.id || null,
+    customer_name: address.name || `${address.first_name || ''} ${address.last_name || ''}`.trim() || order.customer?.name || '',
+    phone: address.phone || order.phone || '',
+    email: order.email || '',
+    total_price: order.total_price || order.total || null,
+    financial_status: order.financial_status || null,
+    fulfillment_status: order.fulfillment_status || null
+  };
 }
 
-function getSyncWindow(state, store, datePreset, incremental) {
-  const fullSince = sapoCreatedOnMin(datePreset);
-  if (!incremental || !fullSince) return { since: fullSince, mode: 'full' };
+function sapoClientIp(order) {
+  const value = order?.client_details?.browser_ip || order?.browser_ip || order?.client_ip || '';
+  return isKnownIp(value) ? String(value).trim() : 'unknown';
+}
 
-  const previous = state.syncState?.byStore?.[String(store.id)];
-  const lastSuccessMs = new Date(previous?.finished_at || 0).getTime();
-  const lastFullMs = new Date(previous?.last_full_at || 0).getTime();
-  if (!Number.isFinite(lastSuccessMs) || !Number.isFinite(lastFullMs) || Date.now() - lastFullMs >= FULL_SYNC_RECONCILIATION_MS) {
-    return { since: fullSince, mode: 'full' };
+function getOrderInfo(row) {
+  return parseJson(row?.order_info, row?.order_info || {});
+}
+
+function findVisitForOrder(state, storeId, orderInfo, createdAt, orderIp) {
+  const orderTime = new Date(createdAt).getTime();
+  if (!Number.isFinite(orderTime)) return null;
+  const candidates = (state.logs || []).filter(log => {
+    if (log.store_id !== storeId) return false;
+    const visitTime = new Date(log.created_at).getTime();
+    if (!Number.isFinite(visitTime)) return false;
+    const diff = orderTime - visitTime;
+    return diff >= -15 * 60 * 1000 && diff <= 6 * 60 * 60 * 1000;
+  });
+  const sameIpCandidates = candidates.filter(log => sameIp(log.client_ip, orderIp) || sameIp(log.webrtc_ip, orderIp));
+  return sameIpCandidates.find(log => isKnownIp(log.webrtc_ip)) || sameIpCandidates[0] || null;
+}
+
+async function enrichOrders(orders) {
+  const groups = new Map();
+  for (const order of orders) {
+    if (!isKnownIp(order.client_ip)) continue;
+    const stale = !hasIpIdentity({
+      country: order.country,
+      countryCode: order.country_code,
+      region: order.region,
+      city: order.city,
+      isp: order.isp,
+      org: order.org,
+      as: order.asn
+    });
+    if (!stale && order.ip_intelligence_checked_at) continue;
+    const key = `${order.client_ip}|${order.webrtc_ip || ''}`;
+    if (!groups.has(key)) groups.set(key, { clientIp: order.client_ip, webrtcIp: order.webrtc_ip, orders: [] });
+    groups.get(key).orders.push(order);
   }
-
-  const deltaSinceMs = Math.max(new Date(fullSince).getTime(), lastSuccessMs - SYNC_LOOKBACK_MS);
-  return { since: new Date(deltaSinceMs).toISOString(), mode: 'delta' };
-}
-
-function isSapoOrderInDatePreset(createdAt, datePreset) {
-  if (datePreset === 'ALL') return true;
-  if (!createdAt) return false;
-
-  const timestamp = new Date(createdAt);
-  if (!Number.isFinite(timestamp.getTime())) return false;
-
-  const orderDay = businessDate(timestamp);
-  const today = businessDate();
-  let daysAgo = 0;
-  if (datePreset === '7_DAYS') daysAgo = 6;
-  if (datePreset === '30_DAYS') daysAgo = 29;
-  const startDay = businessDate(new Date(Date.now() - (daysAgo * 24 * 60 * 60 * 1000)));
-  return orderDay >= startDay && orderDay <= today;
-}
-
-async function testSapoConnection(store) {
-  const secret = decryptSecret(store.api_secret_encrypted);
-  if (!secret) throw new Error('Missing Sapo API secret.');
-  const storeCheck = await sapoFetchJson(store, secret, '/admin/store.json');
-  if (!storeCheck.res.ok) {
-    throw new Error(sapoAuthErrorMessage(storeCheck.res.status));
+  let count = 0;
+  for (const group of groups.values()) {
+    if (count >= MAX_IP_LOOKUPS_PER_SYNC) break;
+    const data = await lookupIp(group.clientIp);
+    group.orders.forEach(order => applyIp(order, data, group.clientIp, group.webrtcIp));
+    count++;
   }
-  const orderCheck = await sapoFetchJson(store, secret, '/admin/orders/count.json?status=any');
-  if (!orderCheck.res.ok) {
-    if (orderCheck.res.status === 401 || orderCheck.res.status === 403) {
-      throw new Error('Da xac thuc duoc store Sapo, nhung app chua doc duoc don hang. Hay kiem tra quyen Orders/Don hang trong Private App roi luu lai.');
-    }
-    throw new Error(sapoAuthErrorMessage(orderCheck.res.status));
-  }
-  const count = Number(orderCheck.data?.count ?? orderCheck.data?.orders_count ?? 0);
-  return { success: true, message: `Ket noi Sapo thanh cong. API doc duoc don hang (${count} don).`, order_count: count };
+  return count;
 }
 
-async function syncSapoOrders(state, store, datePreset, { incremental = false } = {}) {
-  const syncStartTime = Date.now();
-  const startedAt = new Date(syncStartTime).toISOString();
-  const secret = decryptSecret(store.api_secret_encrypted);
-  if (!secret) throw new Error('Missing Sapo API secret.');
-  const syncWindow = getSyncWindow(state, store, datePreset, incremental);
-  const since = syncWindow.since;
-  const ipCache = new Map();
-  const forceUnresolvedIpRefresh = !incremental;
-  let total = 0;
-  let synced = 0;
-  let updated = 0;
-  let removed = 0;
-  let ordersChanged = false;
-  let completedRange = false;
-  let queryParam = 'created_at_min';
-  const syncedOrderIds = new Set();
-  const knownOrders = new Map();
-  const pendingIpAnalysis = new Map();
-  (state.orders || []).forEach(log => {
-    if (log.store_id !== store.id || !hasOrderInfo(log.order_info)) return;
-    const order = safeJsonParse(log.order_info, null);
-    if (order?.order_id) knownOrders.set(String(order.order_id), log);
+async function syncSapoOrders(state, store, preset = 'TODAY') {
+  const createdMin = presetMinDate(preset);
+  const pageLimit = preset === 'TODAY' ? 100 : 250;
+  const maxPages = preset === 'TODAY' ? 2 : (preset === '7_DAYS' ? 4 : 8);
+  const known = new Map();
+  (state.orders || []).forEach(row => {
+    if (row.store_id !== store.id) return;
+    const info = getOrderInfo(row);
+    if (info?.order_id) known.set(String(info.order_id), row);
   });
 
-  const pageLimit = datePreset === 'TODAY' ? 100 : 250;
-  const maxPages = datePreset === 'TODAY' ? 2 : (datePreset === '7_DAYS' ? 4 : 8);
+  const seenOrderIds = new Set();
+  let total = 0;
+  let created = 0;
+  let updated = 0;
+  let completed = false;
+  let minParamName = 'created_at_min';
+
   for (let page = 1; page <= maxPages; page++) {
-    if (Date.now() - syncStartTime > 13500) break;
-
-    const minParam = since ? `&${queryParam}=${encodeURIComponent(since)}` : '';
-    // Sapo's order-list endpoint for this store returns an empty array when
-    // status=any is supplied, even though orders exist. Keep the proven list
-    // query and use completion of that response as the reconciliation source.
-    let path = `/admin/orders.json?limit=${pageLimit}&page=${page}${minParam}`;
-    let { res, data } = await sapoFetchJson(store, secret, path);
-
-    if (page === 1 && (!res.ok || !data?.orders?.length)) {
-      const altParam = queryParam === 'created_at_min' ? 'created_on_min' : 'created_at_min';
-      const altMinParam = since ? `&${altParam}=${encodeURIComponent(since)}` : '';
-      const altPath = `/admin/orders.json?limit=${pageLimit}&page=1${altMinParam}`;
-      const altResult = await sapoFetchJson(store, secret, altPath);
-      if (altResult.res.ok && altResult.data?.orders?.length) {
-        res = altResult.res;
-        data = altResult.data;
-        queryParam = altParam;
+    const activeMinParam = createdMin ? `&${minParamName}=${encodeURIComponent(createdMin)}` : '';
+    let { res, data } = await sapoFetch(store, `/admin/orders.json?limit=${pageLimit}&page=${page}${activeMinParam}`);
+    if (page === 1 && res.ok && createdMin && (!Array.isArray(data?.orders) || data.orders.length === 0)) {
+      const altParam = minParamName === 'created_at_min' ? 'created_on_min' : 'created_at_min';
+      const alt = await sapoFetch(store, `/admin/orders.json?limit=${pageLimit}&page=1&${altParam}=${encodeURIComponent(createdMin)}`);
+      if (alt.res.ok && Array.isArray(alt.data?.orders) && alt.data.orders.length > 0) {
+        minParamName = altParam;
+        res = alt.res;
+        data = alt.data;
       }
     }
-
-    if (!res.ok) {
-      if (page === 1) {
-        throw new Error(sapoAuthErrorMessage(res.status));
-      }
-      break;
-    }
-    const orders = data?.orders || [];
+    if (!res.ok) throw new Error(sapoError(res.status));
+    const orders = Array.isArray(data?.orders) ? data.orders : [];
     if (!orders.length) {
-      completedRange = true;
+      completed = true;
       break;
     }
-    let reachedOlderOrder = false;
 
-    for (const order of orders) {
-      if (Date.now() - syncStartTime > 14000) break;
-      const createdAt = order.created_on || order.created_at || null;
-      if (!isSapoOrderInDatePreset(createdAt, datePreset)) {
-        reachedOlderOrder = true;
-        continue;
-      }
-      const orderInfo = parseSapoOrder(order);
-      if (!orderInfo.order_id) continue;
-      const orderKey = String(orderInfo.order_id);
-      if (syncedOrderIds.has(orderKey)) continue;
-      syncedOrderIds.add(orderKey);
+    for (const sapoOrder of orders) {
+      const createdAt = sapoOrder.created_on || sapoOrder.created_at || new Date().toISOString();
+      if (!inPreset(createdAt, preset)) continue;
+      const info = parseSapoOrder(sapoOrder);
+      if (!info.order_id) continue;
+      seenOrderIds.add(String(info.order_id));
       total++;
-      const orderClientIp = sapoOrderClientIp(order);
-      const existing = knownOrders.get(orderKey);
-      const candidateVisit = existing ? null : findTrackedVisitForOrder(state, store.id, orderInfo, createdAt, orderClientIp);
-      const trackedVisit = existing || candidateVisit;
-      const before = existing ? JSON.stringify(existing) : '';
-      const effectiveClientIp = isKnownIp(orderClientIp) ? orderClientIp : (trackedVisit?.client_ip || 'unknown');
-      const orderLog = existing || {
-        id: `sapo:${store.id}:${orderKey}`,
+
+      const orderIp = sapoClientIp(sapoOrder);
+      const existing = known.get(String(info.order_id));
+      const visit = findVisitForOrder(state, store.id, info, createdAt, orderIp);
+      const webrtcIp = isKnownIp(visit?.webrtc_ip) ? visit.webrtc_ip : (existing?.webrtc_ip || null);
+      const row = existing || {
+        id: `sapo:${store.id}:${info.order_id}`,
         store_id: store.id,
         store_domain: store.mysapo_domain,
-        client_ip: effectiveClientIp,
-        webrtc_ip: isKnownIp(candidateVisit?.webrtc_ip) ? candidateVisit.webrtc_ip : null,
-        webrtc_status: candidateVisit?.webrtc_status || 'not_available',
-        user_agent: candidateVisit?.user_agent || 'Sapo API Sync',
-        fingerprint: candidateVisit?.fingerprint || 'FP-SAPO-SYNCED',
-        country: candidateVisit?.country || 'Unknown',
-        country_code: candidateVisit?.country_code || 'XX',
-        region: candidateVisit?.region || 'Unknown',
-        city: candidateVisit?.city || 'Unknown',
-        isp: candidateVisit?.isp || 'Unknown',
-        org: candidateVisit?.org || 'Unknown',
-        asn: candidateVisit?.asn || null,
-        is_vpn: Boolean(candidateVisit?.is_vpn),
-        is_datacenter: Boolean(candidateVisit?.is_datacenter),
-        is_proxy: Boolean(candidateVisit?.is_proxy),
-        is_tor: Boolean(candidateVisit?.is_tor),
-        is_abuser: Boolean(candidateVisit?.is_abuser),
-        webrtc_mismatch: Boolean(candidateVisit?.webrtc_mismatch),
-        risk_level: candidateVisit?.risk_level || 'UNKNOWN',
-        risk_reasons: candidateVisit?.risk_reasons || '["IP analysis pending"]',
-        trigger_event: 'sapo_sync',
-        session_id: candidateVisit?.session_id || null,
-        session_start_at: candidateVisit?.session_start_at || null,
-        session_duration_sec: null,
-        created_at: new Date(createdAt).toISOString()
+        trigger_event: 'sapo_sync'
       };
-      applySyncedOrder(orderLog, orderInfo, createdAt);
-      orderLog.store_id = store.id;
-      orderLog.store_domain = store.mysapo_domain;
-      orderLog.client_ip = effectiveClientIp;
-      if (candidateVisit && isKnownIp(candidateVisit.webrtc_ip)) orderLog.webrtc_ip = candidateVisit.webrtc_ip;
-      if (candidateVisit?.webrtc_status && candidateVisit.webrtc_status !== 'pending') orderLog.webrtc_status = candidateVisit.webrtc_status;
-      if (candidateVisit?.session_start_at) {
-        orderLog.session_start_at = candidateVisit.session_start_at;
-        orderLog.session_duration_sec = sessionDurationToOrder(candidateVisit.session_start_at, createdAt);
+      const before = JSON.stringify(row);
+      row.client_ip = isKnownIp(orderIp) ? orderIp : (isKnownIp(visit?.client_ip) ? visit.client_ip : (row.client_ip || 'unknown'));
+      row.webrtc_ip = isKnownIp(webrtcIp) ? webrtcIp : null;
+      row.webrtc_status = visit?.webrtc_status || (row.webrtc_ip ? 'captured' : 'not_available');
+      row.session_id = visit?.session_id || row.session_id || null;
+      row.session_start_at = visit?.session_start_at || row.session_start_at || null;
+      row.user_agent = visit?.user_agent || row.user_agent || 'Sapo API Sync';
+      row.device_type = visit?.device_type || row.device_type || 'Unknown';
+      row.order_info = JSON.stringify(info);
+      row.created_at = new Date(createdAt).toISOString();
+      row.updated_at = new Date().toISOString();
+
+      if (!existing) {
+        state.orders.unshift(row);
+        known.set(String(info.order_id), row);
+        created++;
+      } else if (JSON.stringify(row) !== before) {
+        updated++;
       }
-      const shouldAnalyze = shouldRefreshIpIntelligence(orderLog, Date.now(), { forceUnresolved: forceUnresolvedIpRefresh }) || !existing;
-      if (shouldAnalyze && isKnownIp(effectiveClientIp)) {
-        queueIpAnalysis(pendingIpAnalysis, orderLog, effectiveClientIp, orderLog.webrtc_ip);
-      }
-      if (existing) {
-        if (JSON.stringify(orderLog) !== before) {
-          ordersChanged = true;
-          updated++;
-        }
-      } else {
-        state.orders.unshift(orderLog);
-        synced++;
-        ordersChanged = true;
-      }
-      knownOrders.set(orderKey, orderLog);
     }
-    // Sapo occasionally ignores created_at_min. Orders are newest first, so do
-    // not fetch another page once the response has crossed the selected range.
-    if (reachedOlderOrder || orders.length < pageLimit) {
-      completedRange = true;
+
+    if (orders.length < pageLimit) {
+      completed = true;
       break;
     }
   }
 
-  // A delta response cannot prove an order was deleted. Only a complete full-day
-  // reconciliation may remove dashboard orders that no longer exist in Sapo.
-  if (syncWindow.mode === 'full' && datePreset === 'TODAY' && completedRange) {
-    state.orders = state.orders.filter(log => {
-      if (log.store_id !== store.id || !hasOrderInfo(log.order_info) || !isSapoOrderInDatePreset(log.created_at, datePreset)) return true;
-      const orderInfo = safeJsonParse(log.order_info, null);
-      if (!orderInfo?.order_id || syncedOrderIds.has(String(orderInfo.order_id))) return true;
-      removed++;
-      return false;
+  if (preset === 'TODAY' && completed) {
+    state.orders = state.orders.filter(row => {
+      if (row.store_id !== store.id || !inPreset(row.created_at, preset)) return true;
+      const info = getOrderInfo(row);
+      return !info?.order_id || seenOrderIds.has(String(info.order_id));
     });
-    if (removed > 0) ordersChanged = true;
   }
 
-  // Deduplicate the canonical Sapo snapshot by order_id per store.
-  const seenOrders = new Set();
-  const ordersBeforeDeduplication = state.orders.length;
-  state.orders = state.orders.filter(log => {
-    if (hasOrderInfo(log.order_info)) {
-      const ordInfo = safeJsonParse(log.order_info, null);
-      if (ordInfo && ordInfo.order_id) {
-        const dupKey = ordInfo.order_id + '_' + log.store_id;
-        if (seenOrders.has(dupKey)) return false;
-        seenOrders.add(dupKey);
-      }
+  const backfill = state.orders.filter(row => row.store_id === store.id && inPreset(row.created_at, preset));
+  const enriched = await enrichOrders(backfill);
+  await saveOrders(state);
+  return { success: true, total_orders: total, synced_new: created, updated_orders: updated, enriched_ips: enriched };
+}
+
+function decorateOrder(row) {
+  const info = getOrderInfo(row);
+  return {
+    ...row,
+    order_info: info,
+    risk_reasons: parseJson(row.risk_reasons, []),
+    is_webrtc_available: isKnownIp(row.webrtc_ip)
+  };
+}
+
+function filterOrders(rows, query) {
+  let result = rows.map(decorateOrder);
+  const storeId = query.store_id && query.store_id !== 'ALL' ? Number(query.store_id) : null;
+  if (storeId) result = result.filter(row => row.store_id === storeId);
+  if (query.startDate || query.endDate) {
+    result = result.filter(row => {
+      const day = businessDate(row.created_at);
+      if (query.startDate && day < query.startDate) return false;
+      if (query.endDate && day > query.endDate) return false;
       return true;
-    }
-    return true;
-  });
-  if (state.orders.length !== ordersBeforeDeduplication) ordersChanged = true;
+    });
+  }
+  const search = String(query.search || '').trim().toLowerCase();
+  if (search) {
+    result = result.filter(row => {
+      const info = row.order_info || {};
+      return [
+        info.order_id, info.customer_name, info.phone, info.email,
+        row.client_ip, row.webrtc_ip, row.country, row.region, row.city, row.isp, row.org
+      ].some(value => String(value || '').toLowerCase().includes(search));
+    });
+  }
+  return result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+}
 
-  // Backfill canonical orders from recent tracker visits without mutating those visits.
-  for (const log of state.orders) {
-    if (log.store_id === store.id && hasOrderInfo(log.order_info)) {
-      const originalWebRtcIp = log.webrtc_ip;
-      const originalWebRtcMismatch = log.webrtc_mismatch;
-      const originalSessionStart = log.session_start_at;
-      const originalSessionDuration = log.session_duration_sec;
-      const ordInfo = safeJsonParse(log.order_info, null);
-      if (!ordInfo) continue;
-      const match = findTrackedVisitForOrder(state, store.id, ordInfo, log.created_at, log.client_ip);
-      if (match) {
-        if (!isKnownIp(log.webrtc_ip) && isKnownIp(match.webrtc_ip)) {
-          log.webrtc_ip = match.webrtc_ip;
-          log.webrtc_mismatch = Boolean(log.client_ip && log.webrtc_ip && log.webrtc_ip !== log.client_ip);
-        }
-        if (!log.session_start_at && match.session_start_at) {
-          log.session_start_at = match.session_start_at;
-          log.session_duration_sec = sessionDurationToOrder(match.session_start_at, log.created_at);
-        }
-        if ((!log.webrtc_status || log.webrtc_status === 'pending') && match.webrtc_status && match.webrtc_status !== 'pending') {
-          log.webrtc_status = match.webrtc_status;
-        }
-      }
-      if (log.session_duration_sec === null && log.session_start_at) {
-        log.session_duration_sec = sessionDurationToOrder(log.session_start_at, log.created_at);
-      }
-      if (log.webrtc_ip !== originalWebRtcIp || log.webrtc_mismatch !== originalWebRtcMismatch || log.session_start_at !== originalSessionStart || log.session_duration_sec !== originalSessionDuration) {
-        ordersChanged = true;
-      }
-      if (
-        forceUnresolvedIpRefresh &&
-        isSapoOrderInDatePreset(log.created_at, datePreset) &&
-        shouldRefreshIpIntelligence(log, Date.now(), { forceUnresolved: true })
-      ) {
-        queueIpAnalysis(pendingIpAnalysis, log);
-      }
-    }
+async function handleStores(state, method, parts, body) {
+  if (method === 'GET' && parts.length === 0) {
+    return json(200, { success: true, data: state.stores.map(publicStore) });
+  }
+  if (method === 'POST' && parts.length === 0) {
+    const store = {
+      id: state.autoStoreId++,
+      store_name: String(body.store_name || body.mysapo_domain || 'Sapo Store').trim(),
+      mysapo_domain: normalizeDomain(body.mysapo_domain),
+      api_key: String(body.api_key || '').trim(),
+      api_secret_encrypted: encryptSecret(String(body.api_secret || '').trim()),
+      created_at: new Date().toISOString()
+    };
+    if (!store.mysapo_domain || !store.api_key || !body.api_secret) return json(400, { success: false, message: 'Store domain, API key, API secret are required.' });
+    state.stores.push(store);
+    await saveStores(state);
+    return json(201, { success: true, data: publicStore(store) });
   }
 
-  const analysisTargets = Array.from(pendingIpAnalysis.values()).slice(0, MAX_IP_ANALYSIS_GROUPS_PER_SYNC);
-  const stateLogSnapshot = allLogs(state);
-  for (let i = 0; i < analysisTargets.length; i += 3) {
-    const batch = analysisTargets.slice(i, i + 3);
-    await Promise.all(batch.map(async target => {
-      // The lookup result is cached by IP after the first row. Applying it to
-      // every duplicate row keeps the dashboard internally consistent without
-      // spending extra external IP-intelligence requests.
-      for (const log of target.logs) {
-        await applyIpAnalysis(log, target.clientIp, target.webrtcIp, [], ipCache, stateLogSnapshot);
-      }
-    }));
-    ordersChanged = true;
-  }
+  const id = Number(parts[0]);
+  const store = state.stores.find(item => item.id === id);
+  if (!store) return json(404, { success: false, message: 'Store not found.' });
 
-  if (ordersChanged) await saveOrdersState(state);
-  const syncStatus = recordSyncRun(state, {
-    store_id: store.id,
-    status: 'success',
-    mode: syncWindow.mode,
-    started_at: startedAt,
-    finished_at: new Date().toISOString(),
-    total_orders: total,
-    synced_new: synced,
-    updated_orders: updated,
-    removed_orders: removed,
-    since
-  });
-  await saveSyncState(state);
-  return { success: true, total_orders: total, synced_new: synced, updated_orders: updated, removed_orders: removed, sync_status: syncStatus };
+  if (method === 'PUT') {
+    store.store_name = String(body.store_name || store.store_name).trim();
+    store.mysapo_domain = normalizeDomain(body.mysapo_domain || store.mysapo_domain);
+    store.api_key = String(body.api_key || store.api_key).trim();
+    if (body.api_secret) store.api_secret_encrypted = encryptSecret(String(body.api_secret).trim());
+    await saveStores(state);
+    return json(200, { success: true, data: publicStore(store) });
+  }
+  if (method === 'DELETE') {
+    state.stores = state.stores.filter(item => item.id !== id);
+    await saveStores(state);
+    return json(200, { success: true });
+  }
+  if (method === 'POST' && parts[1] === 'test') {
+    const { res, data } = await sapoFetch(store, '/admin/orders/count.json');
+    if (!res.ok) throw new Error(sapoError(res.status));
+    return json(200, { success: true, order_count: Number(data?.count || data?.orders_count || 0) });
+  }
+  if (method === 'POST' && parts[1] === 'sync') {
+    return json(200, await syncSapoOrders(state, store, body.datePreset || 'TODAY'));
+  }
+  return json(404, { success: false, message: 'Not found.' });
 }
 
 async function handleLogs(event, state, method, parts, query, body) {
   if (method === 'POST' && parts[0] === 'collect') {
-    const referer = event.headers.referer || event.headers.origin || body?.url || '';
-    let matched = null;
-    if (body?.api_key) matched = state.stores.find(store => store.api_key === body.api_key);
-    if (!matched && (referer || body?.store_domain)) {
-      const targetStr = (referer + ' ' + (body?.store_domain || '')).toLowerCase();
-      matched = state.stores.find(store => targetStr.includes(cleanDomain(store.mysapo_domain)));
-      if (!matched) {
-        matched = state.stores.find(store => {
-          const prefix = cleanDomain(store.mysapo_domain).split('.')[0].replace(/-/g, '');
-          const cleanRef = targetStr.replace(/[^a-z0-9]/g, '');
-          return cleanRef.includes(prefix);
-        });
-      }
+    const referer = String(event.headers.origin || event.headers.referer || body.url || '');
+    let store = body.api_key ? state.stores.find(item => item.api_key === body.api_key) : null;
+    if (!store) {
+      const cleanRef = normalizeDomain(referer);
+      store = state.stores.find(item => cleanRef.includes(normalizeDomain(item.mysapo_domain)));
     }
-    if (!matched && state.stores.length === 1) {
-      matched = state.stores[0];
-    }
-    if (!matched) return json(403, { success: false, message: 'Tracker origin is not a connected Sapo store.' });
-    const realClientIp = getClientIp(event, body?.client_ip);
-    if (!allowCollection(realClientIp)) return json(429, { success: false, message: 'Too many tracking events.' });
-    const blacklistCheck = state.blacklist.find(item => item.ip === realClientIp || (body?.webrtc_ip && item.ip === body.webrtc_ip));
+    if (!store && state.stores.length === 1) store = state.stores[0];
+    if (!store) return json(403, { success: false, message: 'Unknown store.' });
 
-    // WebRTC discovery can finish shortly after navigation. Update only recent
-    // tracker events so a later VPN/network change cannot rewrite old orders.
-    if (body?.trigger_event === 'network_identity' && body?.session_id) {
-      const now = Date.now();
-      const sessionLogs = state.logs.filter(log => {
-        if (log.store_id !== matched.id || log.session_id !== body.session_id) return false;
-        if (log.trigger_event === 'sapo_sync') return false;
-        const logTime = new Date(log.created_at).getTime();
-        return Number.isFinite(logTime) && Math.abs(now - logTime) <= 15 * 1000;
-      });
-      const capturedWebrtcIp = isKnownIp(body?.webrtc_ip) ? body.webrtc_ip : null;
-      const webRtcStatus = String(body?.webrtc_status || 'unknown');
-      for (const log of sessionLogs) {
-        if (webRtcStatus !== 'pending') log.webrtc_status = webRtcStatus;
-        await applyIpAnalysis(log, realClientIp, capturedWebrtcIp, [], null, state.logs);
-        const logBlacklist = state.blacklist.find(item => item.ip === log.client_ip || (log.webrtc_ip && item.ip === log.webrtc_ip));
-        if (logBlacklist) {
-          const existingReasons = safeJsonParse(log.risk_reasons, []);
-          log.risk_level = 'HIGH_RISK';
-          log.risk_reasons = JSON.stringify([...existingReasons, `IP is blacklisted: ${logBlacklist.reason || 'Manual block'}`]);
-        }
-      }
-      if (sessionLogs.length) await saveLogsState(state);
-      if (sessionLogs.length) {
-        return json(200, {
-          success: true,
-          updated: 'network_identity',
-          updated_logs: sessionLogs.length,
-          client_ip: realClientIp,
-          webrtc_ip: capturedWebrtcIp,
-          webrtc_status: webRtcStatus,
-          is_blacklisted: Boolean(blacklistCheck)
-        });
-      }
-    }
-    const analysis = await analyzeRisk(realClientIp, body?.webrtc_ip, null, state.logs);
-    const reasons = [...analysis.riskReasons];
-    let riskLevel = analysis.riskLevel;
-    if (blacklistCheck) {
-      riskLevel = 'HIGH_RISK';
-      reasons.push(`IP is blacklisted: ${blacklistCheck.reason || 'Manual block'}`);
-    }
-    if (body?.trigger_event === 'page_exit' && body?.connection_status === 'inactive' && body?.session_id) {
-      const latestSessionLog = state.logs.find(log => log.store_id === matched.id && log.session_id === body.session_id);
-      if (latestSessionLog) {
-        latestSessionLog.connection_status = 'inactive';
-        latestSessionLog.left_at = new Date().toISOString();
-        await saveLogsState(state);
-        return json(200, { success: true, log_id: latestSessionLog.id, client_ip: realClientIp, is_blacklisted: Boolean(blacklistCheck), updated: 'session_inactive' });
-      }
-    }
-    const log = {
-      id: getNextId(state),
-      store_id: matched.id,
-      store_domain: matched.mysapo_domain,
-      client_ip: realClientIp,
-      webrtc_ip: body?.webrtc_ip || null,
-      webrtc_status: body?.webrtc_status || (body?.webrtc_ip ? 'captured' : 'unknown'),
-      user_agent: body?.user_agent || null,
-      fingerprint: body?.fingerprint || null,
-      order_info: body?.order_info ? (typeof body.order_info === 'object' ? JSON.stringify(body.order_info) : String(body.order_info)) : null,
-      country: analysis.ipData.country || 'Unknown',
-      country_code: analysis.ipData.countryCode || 'XX',
-      region: analysis.ipData.region || 'Unknown',
-      city: analysis.ipData.city || 'Unknown',
-      isp: analysis.ipData.isp || 'Unknown',
-      org: analysis.ipData.org || 'Unknown',
-      asn: analysis.ipData.as || null,
-      is_vpn: analysis.isVpn,
-      is_datacenter: analysis.isDatacenter,
-      is_proxy: Boolean(analysis.ipData.proxy),
-      is_tor: analysis.isTor,
-      is_abuser: analysis.isAbuser,
-      vpn_service: analysis.ipData.vpnService || null,
-      ip_intelligence_source: analysis.ipData.source || null,
-      ip_intelligence_version: Number(analysis.ipData.intelligenceVersion || 0),
-      ip_intelligence_checked_at: new Date().toISOString(),
-      webrtc_mismatch: analysis.webrtcMismatch,
-      risk_level: riskLevel,
-      risk_reasons: JSON.stringify(reasons),
-      url: body?.url || referer || null,
-      trigger_event: body?.trigger_event || null,
-      last_clicked_url: body?.last_clicked_url || body?.url || referer || null,
-      device_type: body?.device_type || 'Unknown',
-      connection_status: body?.connection_status === 'inactive' ? 'inactive' : 'active',
-      session_id: body?.session_id || null,
-      session_start_at: body?.session_start_at || null,
-      session_duration_sec: body?.session_duration || null,
+    const ip = firstIp(event.headers['x-forwarded-for']) || event.headers['x-real-ip'] || body.client_ip || 'unknown';
+    const existing = body.trigger_event === 'network_identity' && body.session_id
+      ? state.logs.find(row => row.store_id === store.id && row.session_id === body.session_id && row.trigger_event === 'page_view')
+      : null;
+    const row = existing || {
+      id: state.autoLogId++,
+      store_id: store.id,
+      store_domain: store.mysapo_domain,
       created_at: new Date().toISOString()
     };
-    state.logs.unshift(log);
-    await saveLogsState(state);
-    return json(201, { success: true, log_id: log.id, client_ip: realClientIp, risk_level: riskLevel, is_blacklisted: Boolean(blacklistCheck), reasons });
+    row.client_ip = isKnownIp(ip) ? String(ip).trim() : 'unknown';
+    if (isKnownIp(body.webrtc_ip)) row.webrtc_ip = String(body.webrtc_ip).trim();
+    row.webrtc_status = body.webrtc_status || row.webrtc_status || (row.webrtc_ip ? 'captured' : 'pending');
+    row.url = body.url || row.url || null;
+    row.referrer = body.referrer || row.referrer || null;
+    row.user_agent = body.user_agent || row.user_agent || null;
+    row.device_type = body.device_type || row.device_type || 'Unknown';
+    row.session_id = body.session_id || row.session_id || null;
+    row.session_start_at = body.session_start_at || row.session_start_at || null;
+    row.trigger_event = existing ? 'page_view' : (body.trigger_event || 'page_view');
+    row.updated_at = new Date().toISOString();
+    if (!existing) state.logs.unshift(row);
+    await saveLogs(state);
+    return json(201, { success: true, log_id: row.id, client_ip: row.client_ip, webrtc_ip: row.webrtc_ip || null });
   }
+
   if (method === 'GET' && parts.length === 0) {
     const page = Math.max(1, Number(query.page || 1));
     const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
-    const records = allLogs(state);
-
-    const filtered = filterLogs(records, query);
-    const orderTotal = filterLogs(records, { ...query, orders_only: 'true' }, { sort: false }).length;
-    const allTotal = filterLogs(records, { ...query, orders_only: 'false' }, { sort: false }).length;
-    const rows = filtered.slice((page - 1) * limit, page * limit).map(row => decorateLog(row, state));
+    const filtered = filterOrders(state.orders || [], query);
     return json(200, {
       success: true,
-      data: rows,
+      data: filtered.slice((page - 1) * limit, page * limit),
       pagination: {
         page,
         limit,
         total: filtered.length,
-        totalPages: Math.ceil(filtered.length / limit),
-        orderTotal,
-        allTotal
+        totalPages: Math.max(1, Math.ceil(filtered.length / limit))
       }
     });
   }
-  if (method === 'DELETE' && parts[0]) {
-    const id = String(parts[0]);
-    const beforeTrackerLogs = state.logs.length;
-    const beforeOrders = state.orders.length;
-    state.logs = state.logs.filter(row => String(row.id) !== id);
-    state.orders = state.orders.filter(row => String(row.id) !== id);
-    const trackerChanged = state.logs.length !== beforeTrackerLogs;
-    const ordersChanged = state.orders.length !== beforeOrders;
-    if (trackerChanged) await saveLogsState(state);
-    if (ordersChanged) await saveOrdersState(state);
-    return !trackerChanged && !ordersChanged
-      ? json(404, { success: false, message: 'Log not found' })
-      : json(200, { success: true, message: 'Log deleted' });
-  }
-  return json(404, { success: false, message: 'Not found' });
+
+  return json(404, { success: false, message: 'Not found.' });
 }
 
-async function handleBlacklist(event, state, method, parts, query, body) {
-  if (method === 'GET' && parts[0] === 'check') {
-    const ip = query.ip || getClientIp(event);
-    const webrtcIp = query.webrtc_ip || null;
-    const row = state.blacklist.find(item => item.ip === ip || (webrtcIp && item.ip === webrtcIp));
-    return json(200, { success: true, ip, webrtc_ip: webrtcIp, is_blacklisted: Boolean(row), reason: row?.reason || null, created_at: row?.created_at || null });
-  }
-  if (!assertAdmin(event)) return unauthorized();
-  if (method === 'GET' && parts.length === 0) return json(200, { success: true, data: state.blacklist });
-  if (method === 'POST' && parts.length === 0) {
-    const ip = String(body?.ip || '').trim();
-    if (!ip) return json(400, { success: false, message: 'IP address is required' });
-
-    const relatedIps = new Set([ip]);
-    allLogs(state).forEach(log => {
-      if (log.client_ip === ip || log.webrtc_ip === ip) {
-        if (isKnownIp(log.client_ip)) relatedIps.add(log.client_ip);
-        if (isKnownIp(log.webrtc_ip)) relatedIps.add(log.webrtc_ip);
-        log.risk_level = 'HIGH_RISK';
-        log.is_blacklisted = true;
-      }
-    });
-
-    relatedIps.forEach(targetIp => {
-      const existing = state.blacklist.find(item => item.ip === targetIp);
-      if (existing) {
-        existing.reason = body?.reason || 'Manual block';
-        existing.source = body?.source || 'MANUAL';
-        existing.created_at = new Date().toISOString();
-      } else {
-        state.blacklist.unshift({
-          id: getNextBlacklistId(state),
-          ip: targetIp,
-          reason: body?.reason || 'Manual block',
-          source: body?.source || 'MANUAL',
-          created_at: new Date().toISOString()
-        });
-      }
-    });
-
-    await saveBlacklistState(state);
-    return json(201, { success: true, message: `IP ${ip} và các IP liên quan đã bị chặn` });
-  }
-  if (method === 'DELETE' && parts[0]) {
-    const ip = decodeURIComponent(parts[0]);
-    const before = state.blacklist.length;
-    
-    // Find all related IPs from logs to unblock as well
-    const relatedIps = new Set([ip]);
-    allLogs(state).forEach(log => {
-      if (log.client_ip === ip || log.webrtc_ip === ip) {
-        if (isKnownIp(log.client_ip)) relatedIps.add(log.client_ip);
-        if (isKnownIp(log.webrtc_ip)) relatedIps.add(log.webrtc_ip);
-      }
-    });
-
-    state.blacklist = state.blacklist.filter(item => !relatedIps.has(item.ip));
-    await saveBlacklistState(state);
-    return json(200, {
-      success: true,
-      already_unblocked: before === state.blacklist.length,
-      message: before === state.blacklist.length ? `IP ${ip} was already unblocked` : `IP ${ip} unblocked`
-    });
-  }
-  return json(404, { success: false, message: 'Not found' });
-}
-
-function handleStats(event, state, method, parts, query) {
-  if (!assertAdmin(event)) return unauthorized();
-  const storeId = query.store_id && query.store_id !== 'ALL' ? Number(query.store_id) : null;
-  const records = allLogs(state);
-  let logs = storeId ? records.filter(log => log.store_id === storeId) : records;
-  if (method === 'GET' && parts[0] === 'overview') {
-    const totalLogs = logs.length;
-    const highRiskCount = logs.filter(log => effectiveRiskLevel(log) === 'HIGH_RISK').length;
-    const cleanCount = totalLogs - highRiskCount;
-    const today = businessDate();
-    const suspiciousOrdersToday = logs.filter(log => effectiveRiskLevel(log) === 'HIGH_RISK' && hasOrderInfo(log.order_info) && log.created_at && businessDate(log.created_at) === today).length;
-    const ispMap = {};
-    logs.filter(log => effectiveRiskLevel(log) === 'HIGH_RISK' && log.isp && log.isp !== 'Unknown').forEach(log => { ispMap[log.isp] = (ispMap[log.isp] || 0) + 1; });
-    const topIsps = Object.keys(ispMap).map(isp => ({ isp, count: ispMap[isp] })).sort((a, b) => b.count - a.count).slice(0, 5);
-    return json(200, { success: true, data: { totalLogs, highRiskCount, cleanCount, vpnRate: totalLogs ? Number(((highRiskCount / totalLogs) * 100).toFixed(1)) : 0, totalBlacklisted: state.blacklist.length, suspiciousOrdersToday, topIsps } });
-  }
-  if (method === 'GET' && parts[0] === 'chart') {
-    const formatter = new Intl.DateTimeFormat('en-GB', { timeZone: BUSINESS_TIME_ZONE, hour: '2-digit', hourCycle: 'h23' });
-    const now = Date.now();
-    const buckets = Array.from({ length: 24 }, (_, hour) => ({ time_label: `${String(hour).padStart(2, '0')}:00`, clean: 0, high_risk: 0 }));
-    logs.forEach(log => {
-      const ts = new Date(log.created_at).getTime();
-      if (!Number.isFinite(ts) || now - ts > 24 * 60 * 60 * 1000 || ts > now) return;
-      const hour = Number(formatter.format(new Date(ts)));
-      if (effectiveRiskLevel(log) === 'HIGH_RISK') buckets[hour].high_risk += 1;
-      else buckets[hour].clean += 1;
-    });
-    return json(200, { success: true, data: buckets });
-  }
-  return json(404, { success: false, message: 'Not found' });
+function firstIp(value) {
+  return String(value || '').split(',')[0].trim();
 }
 
 exports.handler = async (event) => {
   try {
     if (event.httpMethod === 'OPTIONS') return response(204, '');
-
     const rawPath = event.path.replace(/^\/\.netlify\/functions\/api/, '');
-    if (rawPath === '/health') {
-      return json(200, { status: 'OK', system: 'Sapo IP Guard Netlify API', timestamp: new Date().toISOString() });
-    }
-
+    if (rawPath === '/health') return json(200, { status: 'OK', version: 'clean-orders-v2', time: new Date().toISOString() });
     if (rawPath === '/client-tracker.js') {
-      const state = await loadState({ includeLogs: false, includeStores: false, includeSyncState: false });
-      const visitorIp = getClientIp(event);
-      const block = state.blacklist.find(item => item.ip === visitorIp);
-      const initialBlock = block ? { is_blacklisted: true, ip: visitorIp } : null;
-      return response(200, `window.__SAPO_IP_GUARD_INITIAL_BLOCK = ${JSON.stringify(initialBlock)};\n${TRACKER_SOURCE}`, {
+      return response(200, TRACKER_SOURCE, {
         'Content-Type': 'application/javascript; charset=utf-8',
-        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'
+        'Cache-Control': 'no-store, no-cache, must-revalidate'
       });
     }
 
     const apiPath = rawPath.replace(/^\/api\/v1\/?/, '');
     const parts = apiPath.split('/').filter(Boolean).map(decodeURIComponent);
     const resource = parts.shift();
-    const body = event.body ? JSON.parse(event.body) : {};
-    const query = event.queryStringParameters || {};
     const method = event.httpMethod;
-    const isPublicCollection = resource === 'logs' && method === 'POST' && parts[0] === 'collect';
-    const isPublicBlacklistCheck = resource === 'blacklist' && method === 'GET' && parts[0] === 'check';
+    const body = event.body ? parseJson(event.body, {}) : {};
+    const query = event.queryStringParameters || {};
+    const publicCollect = resource === 'logs' && method === 'POST' && parts[0] === 'collect';
 
-    // Reject protected API requests before loading any persistent state.
-    if (!isPublicCollection && !isPublicBlacklistCheck && !assertAdmin(event)) return unauthorized();
-    if (resource === 'auth' && method === 'POST' && parts[0] === 'verify') {
-      return json(200, { success: true });
-    }
+    if (!publicCollect && !assertAdmin(event)) return json(401, { success: false, message: 'Dashboard password is invalid.' });
+    if (resource === 'auth' && method === 'POST' && parts[0] === 'verify') return json(200, { success: true });
 
-    if (resource === 'stores') {
-      const isSync = method === 'POST' && parts[1] === 'sync';
-      const state = await loadState({ includeLogs: isSync, includeStores: true, includeBlacklist: isSync });
-      return await handleStores(event, state, method, parts, body);
-    }
-    if (resource === 'logs') {
-      const isCollection = method === 'POST' && parts[0] === 'collect';
-      const state = await loadState({ includeLogs: true, includeStores: isCollection, includeBlacklist: true });
-      return await handleLogs(event, state, method, parts, query, body);
-    }
-    if (resource === 'blacklist') {
-      const isPublicCheck = method === 'GET' && parts[0] === 'check';
-      const state = await loadState({ includeLogs: !isPublicCheck, includeStores: false, includeBlacklist: true, includeSyncState: false });
-      return await handleBlacklist(event, state, method, parts, query, body);
-    }
-    if (resource === 'stats') {
-      const state = await loadState({ includeLogs: true, includeStores: false, includeBlacklist: true });
-      return handleStats(event, state, method, parts, query);
-    }
+    const state = await loadState({ includeLogs: resource !== 'auth', includeStores: true });
+    if (resource === 'stores') return await handleStores(state, method, parts, body);
+    if (resource === 'logs') return await handleLogs(event, state, method, parts, query, body);
 
-    return json(404, { success: false, message: 'Not found' });
+    return json(404, { success: false, message: 'Not found.' });
   } catch (error) {
-    return json(500, { success: false, message: error.message });
+    return json(500, { success: false, message: error.message || 'Server error.' });
   }
 };
