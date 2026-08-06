@@ -406,7 +406,6 @@ export default function App() {
           ? { ...log, is_blacklisted: true, risk_level: 'HIGH_RISK' }
           : log
         ));
-        refreshLogsOnly();
         setNotice({ type: 'success', message: `Đã chặn IP ${ip}.` });
         return true;
       }
@@ -425,10 +424,9 @@ export default function App() {
       if (res.success) {
         setBlacklist(prev => prev.filter(item => item.ip !== ip));
         setLogs(prev => prev.map(log => (log.client_ip === ip || log.webrtc_ip === ip)
-          ? { ...log, is_blacklisted: Boolean((log.client_ip !== ip && log.client_ip) || (log.webrtc_ip !== ip && log.webrtc_ip)) && log.is_blacklisted }
+          ? { ...log, is_blacklisted: false }
           : log
         ));
-        refreshLogsOnly();
         setNotice({ type: 'success', message: res.already_unblocked ? `IP ${ip} đã được bỏ chặn trước đó.` : `Đã bỏ chặn IP ${ip}.` });
         return true;
       }
