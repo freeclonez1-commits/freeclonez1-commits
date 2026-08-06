@@ -10,7 +10,7 @@ const syncLocks = new Map();
 const ipIntelligenceCache = new Map();
 const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
 const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
-const IP_INTELLIGENCE_VERSION = 5;
+const IP_INTELLIGENCE_VERSION = 6;
 const IP_INTELLIGENCE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const IP_INTELLIGENCE_PENDING_RETRY_MS = 2 * 60 * 1000;
 const SYNC_LOOKBACK_MS = 5 * 60 * 1000;
@@ -1050,6 +1050,7 @@ function recentIpDataFromLogs(stateLogs, ip) {
   return {
     country: row.country,
     countryCode: row.country_code,
+    region: row.region,
     city: row.city,
     isp: row.isp,
     org: row.org,
@@ -1098,13 +1099,16 @@ async function lookupIp(ip) {
       const asn = data.asn || {};
       const location = data.location || {};
       return {
-        country: location.country || 'Unknown',
-        countryCode: location.country_code || 'XX',
-        city: location.city || location.state || 'Unknown',
-        isp: company.name || asn.org || 'Unknown',
-        org: asn.org || company.name || 'Unknown',
-        as: asn.asn ? `AS${asn.asn}` : null,
-        hosting: Boolean(data.is_datacenter || company.type === 'hosting' || asn.type === 'hosting'),
+        // ipapi.is has both legacy nested and current flat response shapes.
+        // Normalise both before deciding whether this provider gave us an answer.
+        country: location.country || data.country || data.country_name || 'Unknown',
+        countryCode: location.country_code || data.country_code || data.cc || 'XX',
+        region: location.region || location.state || data.region || data.state || 'Unknown',
+        city: location.city || data.city || data.region || data.state || 'Unknown',
+        isp: company.name || data.company_name || asn.org || data.asn_org || 'Unknown',
+        org: asn.org || data.asn_org || company.name || data.company_name || 'Unknown',
+        as: asn.asn ? `AS${asn.asn}` : (data.asn_num ? `AS${data.asn_num}` : null),
+        hosting: Boolean(data.is_datacenter || company.type === 'hosting' || asn.type === 'hosting' || data.company_type === 'hosting' || data.asn_type === 'hosting'),
         vpn: Boolean(data.is_vpn),
         proxy: Boolean(data.is_proxy),
         tor: Boolean(data.is_tor),
@@ -1123,6 +1127,7 @@ async function lookupIp(ip) {
       return {
         country: data.country || 'Unknown',
         countryCode: data.country_code || 'XX',
+        region: data.region || 'Unknown',
         city: data.city || 'Unknown',
         isp: data.connection?.isp || data.connection?.org || 'Unknown',
         org: data.connection?.org || data.connection?.isp || 'Unknown',
@@ -1146,6 +1151,7 @@ async function lookupIp(ip) {
       return {
         country: data.country || 'Unknown',
         countryCode: data.countryCode || 'XX',
+        region: data.regionName || data.region || 'Unknown',
         city: data.city || 'Unknown',
         isp: data.isp || 'Unknown',
         org: data.org || data.isp || 'Unknown',
@@ -1172,6 +1178,7 @@ async function lookupIp(ip) {
       return {
         country: data.country_name || 'Unknown',
         countryCode: data.country_code || 'XX',
+        region: data.region || 'Unknown',
         city: data.city || data.region || 'Unknown',
         isp: org || 'Unknown',
         org: org || 'Unknown',
@@ -1190,22 +1197,35 @@ async function lookupIp(ip) {
 
   const [primaryData, secondaryData, tertiaryData, quaternaryData] = await Promise.all([primaryPromise, secondaryPromise, tertiaryPromise, quaternaryPromise]);
 
-  let result = primaryData || secondaryData || quaternaryData || tertiaryData;
+  const resolvedSources = [primaryData, secondaryData, quaternaryData, tertiaryData]
+    .filter(hasResolvedIpIdentity);
+  let result = resolvedSources[0] || null;
 
-  if (primaryData && secondaryData) {
-    const primaryIdentity = `${primaryData.countryCode}|${primaryData.isp}|${primaryData.org}`.toLowerCase();
-    const secondaryIdentity = `${secondaryData.countryCode}|${secondaryData.isp}|${secondaryData.org}`.toLowerCase();
-    const identityConflict = primaryIdentity !== secondaryIdentity;
-    const primaryHighRisk = primaryData.hosting || primaryData.abuser || primaryData.vpn || primaryData.proxy;
-
-    if (primaryHighRisk && !secondaryData.hosting && identityConflict) {
-      result = {
-        ...secondaryData,
-        source: 'ipapi.is+ipwho.is:conflict',
-        intelligenceVersion: IP_INTELLIGENCE_VERSION,
-        intelligenceConflict: true
-      };
-    }
+  if (hasResolvedIpIdentity(primaryData) && hasResolvedIpIdentity(secondaryData)) {
+    // Keep location/ISP fields from the provider that returned them, but retain
+    // every concrete risk signal. A partial response must not hide valid data
+    // from the secondary provider.
+    const preferred = secondaryData;
+    const fallback = primaryData;
+    result = {
+      ...fallback,
+      ...preferred,
+      country: isResolvedIpIdentityValue(preferred.country) ? preferred.country : fallback.country,
+      countryCode: isResolvedIpIdentityValue(preferred.countryCode) ? preferred.countryCode : fallback.countryCode,
+      region: isResolvedIpIdentityValue(preferred.region) ? preferred.region : fallback.region,
+      city: isResolvedIpIdentityValue(preferred.city) ? preferred.city : fallback.city,
+      isp: isResolvedIpIdentityValue(preferred.isp) ? preferred.isp : fallback.isp,
+      org: isResolvedIpIdentityValue(preferred.org) ? preferred.org : fallback.org,
+      as: isResolvedIpIdentityValue(preferred.as) ? preferred.as : fallback.as,
+      hosting: Boolean(primaryData.hosting || secondaryData.hosting),
+      vpn: Boolean(primaryData.vpn || secondaryData.vpn),
+      proxy: Boolean(primaryData.proxy || secondaryData.proxy),
+      tor: Boolean(primaryData.tor || secondaryData.tor),
+      abuser: Boolean(primaryData.abuser || secondaryData.abuser),
+      vpnService: primaryData.vpnService || secondaryData.vpnService || null,
+      source: 'ipapi.is+ipwho.is',
+      intelligenceVersion: IP_INTELLIGENCE_VERSION
+    };
   }
 
   if (result && hasResolvedIpIdentity(result)) {
@@ -1214,17 +1234,17 @@ async function lookupIp(ip) {
 
   // Fallback if all external lookup services failed or timed out.
   // DO NOT hardcode Vietnam/Viettel so unknown IPs are never falsely marked safe.
-  const isKnownDatacenterPrefix = /^38\.|^185\.|^45\.|^198\.|^104\.|^192\.241\.|^159\.65\.|^167\.99\./.test(ip);
   const defaultFallback = {
     country: 'Unknown',
     countryCode: 'XX',
+    region: 'Unknown',
     city: 'Unknown',
-    isp: isKnownDatacenterPrefix ? 'Datacenter / Hosting IP' : 'Unknown',
+    isp: 'Unknown',
     org: 'Unknown',
     as: null,
-    hosting: isKnownDatacenterPrefix,
-    vpn: isKnownDatacenterPrefix,
-    proxy: isKnownDatacenterPrefix,
+    hosting: false,
+    vpn: false,
+    proxy: false,
     tor: false,
     abuser: false,
     vpnService: null,
@@ -1604,6 +1624,7 @@ async function applyIpAnalysis(log, clientIp, webrtcIp, extraReasons = [], ipCac
   log.webrtc_ip = isKnownIp(webrtcIp) ? webrtcIp : null;
   log.country = analysis.ipData.country || 'Unknown';
   log.country_code = analysis.ipData.countryCode || 'XX';
+  log.region = analysis.ipData.region || 'Unknown';
   log.city = analysis.ipData.city || 'Unknown';
   log.isp = analysis.ipData.isp || 'Unknown';
   log.org = analysis.ipData.org || 'Unknown';
@@ -1818,6 +1839,7 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
         fingerprint: candidateVisit?.fingerprint || 'FP-SAPO-SYNCED',
         country: candidateVisit?.country || 'Unknown',
         country_code: candidateVisit?.country_code || 'XX',
+        region: candidateVisit?.region || 'Unknown',
         city: candidateVisit?.city || 'Unknown',
         isp: candidateVisit?.isp || 'Unknown',
         org: candidateVisit?.org || 'Unknown',
@@ -2061,6 +2083,7 @@ async function handleLogs(event, state, method, parts, query, body) {
       order_info: body?.order_info ? (typeof body.order_info === 'object' ? JSON.stringify(body.order_info) : String(body.order_info)) : null,
       country: analysis.ipData.country || 'Unknown',
       country_code: analysis.ipData.countryCode || 'XX',
+      region: analysis.ipData.region || 'Unknown',
       city: analysis.ipData.city || 'Unknown',
       isp: analysis.ipData.isp || 'Unknown',
       org: analysis.ipData.org || 'Unknown',

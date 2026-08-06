@@ -165,7 +165,11 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
   };
 
   const networkLabel = (log) => {
-    const country = log.country || 'Unknown';
+    const country = [
+      log.country,
+      isResolvedText(log.region) ? log.region : null,
+      isResolvedText(log.city) ? log.city : null
+    ].filter(Boolean).join(' · ') || 'Unknown';
     if (log.webrtc_mismatch) return `${country} · Lệch WebRTC`;
     if (log.is_tor) return `${country} · Tor`;
     if (log.is_vpn || log.is_proxy) return `${country} · ${log.vpn_service || 'VPN / Proxy'}`;
@@ -827,7 +831,11 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
                     )}
                   </div>
                   <span className="text-right text-[11px] text-[#86868B]">
-                    <strong>{selectedLog.isp}</strong><br />{selectedLog.country} ({selectedLog.city})
+                    <strong>{selectedLog.isp}</strong><br />{[
+                      selectedLog.country,
+                      isResolvedText(selectedLog.region) ? selectedLog.region : null,
+                      isResolvedText(selectedLog.city) ? selectedLog.city : null
+                    ].filter(Boolean).join(' · ') || 'Unknown'}
                   </span>
                 </div>
 
