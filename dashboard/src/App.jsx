@@ -45,6 +45,12 @@ const DATE_PRESETS = {
   '30_DAYS': { label: '30 ngay', start: () => businessDateDaysAgo(29), end: () => businessDate(), limit: 80 }
 };
 
+const FILTER_MODES = [
+  { key: 'all', label: 'Tat ca' },
+  { key: 'duplicate_ip', label: 'Trung IP' },
+  { key: 'duplicate_fingerprint', label: 'Trung dau vet' }
+];
+
 function cn(...values) {
   return values.filter(Boolean).join(' ');
 }
@@ -76,6 +82,12 @@ function ipVersion(value) {
 
 function samePublicIp(left, right) {
   return Boolean(left && right && String(left).trim().toLowerCase() === String(right).trim().toLowerCase());
+}
+
+function shortId(value) {
+  const text = String(value || '').trim();
+  if (!text) return '--';
+  return text.length > 18 ? `${text.slice(0, 10)}...${text.slice(-6)}` : text;
 }
 
 function isUnknownText(value) {
@@ -280,6 +292,7 @@ function OrderDetail({ order, onClose, onBlockOrder, onUnblockOrder }) {
   const RiskIcon = risk.icon;
   const clientIpVersion = ipVersion(order.client_ip);
   const webrtcIpVersion = ipVersion(order.webrtc_ip);
+  const trace = order.browser_trace || {};
   return (
     <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4">
       <div className="w-full max-w-3xl max-h-[90vh] overflow-y-auto bg-white rounded-lg shadow-xl border border-[#E5E5EA]">
@@ -322,6 +335,19 @@ function OrderDetail({ order, onClose, onBlockOrder, onUnblockOrder }) {
               <Info label="ISP / To chuc / ASN" value={ispText(order)} />
               <Info label="Nguon tra cuu" value={order.ip_intelligence_source || '--'} />
               <Info label="Thiet bi" value={order.device_type || '--'} />
+            </div>
+          </div>
+          <div className="md:col-span-2 border border-[#E5E5EA] rounded-lg p-4">
+            <div className="text-xs font-bold uppercase text-[#6E6E73] mb-3">Dau vet trinh duyet</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Info label="Fingerprint" value={shortId(order.fingerprint)} mono />
+              <Info label="Session" value={shortId(order.session_id)} mono />
+              <Info label="Timezone" value={trace.timezone || '--'} />
+              <Info label="Ngon ngu / Platform" value={[trace.language, trace.platform].filter(Boolean).join(' / ') || '--'} />
+              <Info label="Man hinh" value={trace.screen || '--'} mono />
+              <Info label="CPU / RAM / Touch" value={[trace.hardware_concurrency ? `${trace.hardware_concurrency} CPU` : '', trace.device_memory ? `${trace.device_memory}GB RAM` : '', trace.max_touch_points ? `${trace.max_touch_points} touch` : ''].filter(Boolean).join(' / ') || '--'} />
+              <Info label="Webdriver" value={trace.webdriver ? 'Co dau hieu automation' : 'Khong thay'} tone={trace.webdriver ? 'red' : 'gray'} />
+              <Info label="User Agent" value={order.user_agent || trace.user_agent || '--'} mono />
             </div>
           </div>
         </div>
@@ -445,6 +471,7 @@ export default function App() {
   const [selectedStoreId, setSelectedStoreId] = useState(() => localStorage.getItem('sapo_selected_store_id_v2') || '');
   const [preset, setPreset] = useState('TODAY');
   const [search, setSearch] = useState('');
+  const [filterMode, setFilterMode] = useState('all');
   const [orders, setOrders] = useState([]);
   const [blacklist, setBlacklist] = useState([]);
   const [activeView, setActiveView] = useState('orders');
@@ -490,7 +517,8 @@ export default function App() {
         store_id: selectedStoreId || 'ALL',
         startDate: activePreset.start(),
         endDate: activePreset.end(),
-        search
+        search,
+        filterMode
       });
       setOrders(res.data || []);
       setPagination(res.pagination || { page, limit: activePreset.limit, total: 0, totalPages: 1 });
@@ -505,7 +533,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [adminKey, activePreset, pagination.page, search, selectedStoreId, notify, loadBlacklist]);
+  }, [adminKey, activePreset, pagination.page, search, selectedStoreId, filterMode, notify, loadBlacklist]);
 
   const runSync = async () => {
     if (!selectedStore) {
@@ -576,7 +604,7 @@ export default function App() {
 
   useEffect(() => {
     if (adminKey) loadOrders(1);
-  }, [adminKey, preset, selectedStoreId]);
+  }, [adminKey, preset, selectedStoreId, filterMode]);
 
   useEffect(() => {
     localStorage.setItem('sapo_selected_store_id_v2', selectedStoreId || '');
@@ -725,6 +753,18 @@ export default function App() {
                     className="w-full h-10 rounded-lg border border-[#DADCE0] pl-9 pr-3 text-sm outline-none focus:border-[#1A73E8]"
                   />
                 </div>
+                <div className="flex gap-2 overflow-x-auto pb-1">
+                  {FILTER_MODES.map(item => (
+                    <button
+                      key={item.key}
+                      onClick={() => setFilterMode(item.key)}
+                      className={cn('h-10 px-3 rounded-lg text-sm font-extrabold inline-flex items-center gap-2 whitespace-nowrap', filterMode === item.key ? 'bg-[#E8F0FE] text-[#1A73E8] border border-[#AECBFA]' : 'bg-[#F1F3F4] text-[#3C4043] border border-transparent')}
+                    >
+                      <ListFilter className="w-4 h-4" />
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
                 <button onClick={() => loadOrders(1)} className="h-10 px-4 rounded-lg bg-[#F1F3F4] font-bold text-sm inline-flex items-center justify-center gap-2">
                   <RefreshCw className="w-4 h-4" />
                   Tai lai
@@ -766,6 +806,7 @@ export default function App() {
                           <div className="font-extrabold text-[#1A73E8]">{info.order_id || order.id}</div>
                           <div className="font-bold">{info.customer_name || '--'}</div>
                           <div className="text-xs text-[#5F6368]">{info.phone || '--'}</div>
+                          <div className="mt-1 text-[11px] font-mono text-[#5F6368]">FP: {shortId(order.fingerprint)}</div>
                         </td>
                         <td className="p-3">
                           <div className={cn('inline-flex max-w-[260px] items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order) ? 'bg-[#FCE8E6] text-[#D93025]' : 'bg-[#F1F3F4]')}>

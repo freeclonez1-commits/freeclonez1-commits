@@ -86,7 +86,45 @@ const TRACKER_SOURCE = `(() => {
     return 'Desktop';
   }
 
+  function simpleHash(input) {
+    let hash = 2166136261;
+    const text = String(input || '');
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    }
+    return ('00000000' + (hash >>> 0).toString(16)).slice(-8);
+  }
+
+  function browserTrace() {
+    const nav = navigator || {};
+    const scr = screen || {};
+    const tz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (_) { return ''; } })();
+    const plugins = (() => {
+      try { return Array.from(nav.plugins || []).slice(0, 12).map(item => item.name).join('|'); } catch (_) { return ''; }
+    })();
+    const languages = (() => {
+      try { return Array.from(nav.languages || [nav.language]).filter(Boolean).join(','); } catch (_) { return nav.language || ''; }
+    })();
+    const trace = {
+      user_agent: nav.userAgent || '',
+      language: nav.language || '',
+      languages,
+      platform: nav.platform || '',
+      timezone: tz,
+      screen: [scr.width, scr.height, scr.colorDepth, window.devicePixelRatio || 1].join('x'),
+      hardware_concurrency: nav.hardwareConcurrency || null,
+      device_memory: nav.deviceMemory || null,
+      max_touch_points: nav.maxTouchPoints || 0,
+      webdriver: Boolean(nav.webdriver),
+      plugins_hash: simpleHash(plugins)
+    };
+    trace.fingerprint = simpleHash(JSON.stringify(trace));
+    return trace;
+  }
+
   function send(payload) {
+    const trace = browserTrace();
     payload.api_key = apiKey;
     payload.url = location.href;
     payload.referrer = document.referrer || null;
@@ -94,6 +132,8 @@ const TRACKER_SOURCE = `(() => {
     payload.device_type = deviceType();
     payload.session_id = sessionId;
     payload.session_start_at = sessionValue(sessionStartKey) || new Date().toISOString();
+    payload.fingerprint = trace.fingerprint;
+    payload.browser_trace = trace;
 
     const body = JSON.stringify(payload);
     fetch(backendUrl + '/api/v1/logs/collect', {
@@ -468,6 +508,24 @@ function blacklistPublic(item) {
   };
 }
 
+function normalizeTrace(value) {
+  const data = parseJson(value, value || null);
+  return data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+}
+
+function fallbackFingerprint(row) {
+  const trace = normalizeTrace(row?.browser_trace);
+  if (trace?.fingerprint) return String(trace.fingerprint).trim();
+  const userAgent = String(row?.user_agent || '').trim();
+  if (!userAgent || userAgent === 'Sapo API Sync') return null;
+  return sha256([
+    userAgent,
+    row?.device_type || '',
+    row?.client_ip || '',
+    row?.webrtc_ip || ''
+  ].join('|')).slice(0, 12);
+}
+
 function resolvedText(value) {
   const text = String(value || '').trim().toLowerCase();
   return Boolean(text && !['unknown', 'xx', 'n/a', 'na', 'null', 'undefined'].includes(text));
@@ -830,6 +888,8 @@ async function syncSapoOrders(state, store, preset = 'TODAY') {
       row.session_start_at = visit?.session_start_at || row.session_start_at || null;
       row.user_agent = visit?.user_agent || row.user_agent || 'Sapo API Sync';
       row.device_type = visit?.device_type || row.device_type || 'Unknown';
+      row.fingerprint = visit?.fingerprint || row.fingerprint || null;
+      row.browser_trace = visit?.browser_trace || row.browser_trace || null;
       row.order_info = JSON.stringify(info);
       row.created_at = new Date(createdAt).toISOString();
       row.updated_at = new Date().toISOString();
@@ -871,10 +931,14 @@ function decorateOrder(row, state) {
   const hasOtherRisk = Boolean(row.is_vpn || row.is_proxy || row.is_datacenter || row.is_tor || row.is_abuser);
   const riskReasons = parseJson(row.risk_reasons, []).filter(reason => !(invalidWebrtc && /webrtc/i.test(String(reason))));
   const blocked = findBlacklist(state || {}, clientIp, webrtcIp);
+  const browserTrace = normalizeTrace(row.browser_trace);
+  const fingerprint = row.fingerprint || fallbackFingerprint(row);
   return {
     ...row,
     client_ip: clientIp,
     webrtc_ip: webrtcIp,
+    fingerprint,
+    browser_trace: browserTrace,
     webrtc_status: invalidWebrtc ? 'invalid_candidate' : row.webrtc_status,
     webrtc_mismatch: webrtcIp ? Boolean(row.webrtc_mismatch) : false,
     risk_level: invalidWebrtc && !hasOtherRisk ? 'UNKNOWN' : row.risk_level,
@@ -907,6 +971,22 @@ function filterOrders(rows, query, state) {
         row.client_ip, row.webrtc_ip, row.country, row.region, row.city, row.isp, row.org
       ].some(value => String(value || '').toLowerCase().includes(search));
     });
+  }
+  if (query.filterMode === 'duplicate_ip') {
+    const counts = new Map();
+    result.forEach(row => {
+      const key = normalizeIpValue(row.client_ip);
+      if (key) counts.set(key, (counts.get(key) || 0) + 1);
+    });
+    result = result.filter(row => (counts.get(normalizeIpValue(row.client_ip)) || 0) > 1);
+  }
+  if (query.filterMode === 'duplicate_fingerprint') {
+    const counts = new Map();
+    result.forEach(row => {
+      const key = String(row.fingerprint || '').trim();
+      if (key) counts.set(key, (counts.get(key) || 0) + 1);
+    });
+    result = result.filter(row => (counts.get(String(row.fingerprint || '').trim()) || 0) > 1);
   }
   return result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 }
@@ -1045,6 +1125,10 @@ async function handleLogs(event, state, method, parts, query, body) {
     row.device_type = body.device_type || row.device_type || 'Unknown';
     row.session_id = body.session_id || row.session_id || null;
     row.session_start_at = body.session_start_at || row.session_start_at || null;
+    row.fingerprint = String(body.fingerprint || row.fingerprint || '').trim() || null;
+    row.browser_trace = body.browser_trace && typeof body.browser_trace === 'object'
+      ? body.browser_trace
+      : (row.browser_trace || null);
     row.trigger_event = existing ? 'page_view' : (body.trigger_event || 'page_view');
     row.updated_at = new Date().toISOString();
     if (!existing) state.logs.unshift(row);
