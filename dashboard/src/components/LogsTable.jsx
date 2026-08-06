@@ -183,7 +183,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
             {isKnownIp(log.client_ip) ? compactIp(log.client_ip) : '-- Chưa có IP'}
           </span>
           <span className="min-w-0 truncate text-[10px] font-sans font-medium text-[#86868B]">
-            Chưa có thông tin ISP
+            Đang chờ quét thủ công để tra ISP
           </span>
         </div>
       );
@@ -245,7 +245,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
       unsupported: 'Trình duyệt không hỗ trợ WebRTC',
       private_only: 'WebRTC chỉ trả IP nội bộ',
       hidden: 'WebRTC bị trình duyệt ẩn',
-      not_available: full ? 'WebRTC không khả dụng (VPN/trình duyệt chặn hoặc đơn đồng bộ Sapo)' : 'WebRTC không khả dụng',
+      not_available: full ? 'Không phát hiện IP WebRTC (trình duyệt/VPN không công khai hoặc đơn đồng bộ Sapo)' : 'Không phát hiện IP WebRTC',
       error: 'Không thể kiểm tra WebRTC'
     };
     const status = log.webrtc_status || 'not_available';

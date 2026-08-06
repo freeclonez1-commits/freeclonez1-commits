@@ -10,8 +10,9 @@ const syncLocks = new Map();
 const ipIntelligenceCache = new Map();
 const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
 const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
-const IP_INTELLIGENCE_VERSION = 4;
+const IP_INTELLIGENCE_VERSION = 5;
 const IP_INTELLIGENCE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const IP_INTELLIGENCE_PENDING_RETRY_MS = 2 * 60 * 1000;
 const SYNC_LOOKBACK_MS = 5 * 60 * 1000;
 const SYNC_HISTORY_LIMIT = 40;
 const FULL_SYNC_RECONCILIATION_MS = 10 * 60 * 1000;
@@ -75,9 +76,17 @@ const TRACKER_SOURCE = `/**
     } catch(e) {}
   }
 
-  var cachedPublicIp = getStorageItem('sapo_public_ip') || null;
-  var cachedWebRtcIp = getStorageItem('sapo_webrtc_ip') || null;
-  var cachedWebRtcStatus = cachedWebRtcIp ? 'captured' : 'pending';
+  // Network identity belongs to the current browser tab. Persisting it in
+  // localStorage caused an old VPN/WebRTC result to leak into later visits.
+  function getSessionValue(key) {
+    try { return sessionStorage.getItem(key); } catch (e) { return null; }
+  }
+  function setSessionValue(key, value) {
+    try { sessionStorage.setItem(key, value); } catch (e) {}
+  }
+  var cachedPublicIp = getSessionValue('sapo_public_ip') || null;
+  var cachedWebRtcIp = getSessionValue('sapo_webrtc_ip') || null;
+  var cachedWebRtcStatus = getSessionValue('sapo_webrtc_status') || (cachedWebRtcIp ? 'captured' : 'pending');
   var networkHydrateStarted = false;
   var webRtcDiscoveryInFlight = false;
   var webRtcCallbacks = [];
@@ -112,7 +121,10 @@ const TRACKER_SOURCE = `/**
     var finish = function (ip) {
       if (resolved) return;
       resolved = true;
-      if (ip) cachedPublicIp = ip;
+      if (ip) {
+        cachedPublicIp = ip;
+        setSessionValue('sapo_public_ip', ip);
+      }
       callback(ip || null);
     };
     var fetchIpify = function () {
@@ -166,6 +178,8 @@ const TRACKER_SOURCE = `/**
       webRtcDiscoveryInFlight = false;
       cachedWebRtcIp = value || null;
       cachedWebRtcStatus = status || (value ? 'captured' : 'not_available');
+      if (cachedWebRtcIp) setSessionValue('sapo_webrtc_ip', cachedWebRtcIp);
+      setSessionValue('sapo_webrtc_status', cachedWebRtcStatus);
       var callbacks = webRtcCallbacks.splice(0, webRtcCallbacks.length);
       callbacks.forEach(function (fn) { try { fn(cachedWebRtcIp); } catch (e) {} });
     };
@@ -557,7 +571,7 @@ const TRACKER_SOURCE = `/**
         }
         if (res.ip) {
           cachedPublicIp = res.ip;
-          setStorageItem('sapo_public_ip', res.ip);
+          setSessionValue('sapo_public_ip', res.ip);
         }
       })
       .catch(function () {});
@@ -1151,9 +1165,35 @@ async function lookupIp(ip) {
     })
     .catch(() => null);
 
-  const [primaryData, secondaryData, tertiaryData] = await Promise.all([primaryPromise, secondaryPromise, tertiaryPromise]);
+  // HTTPS fallback for hosts where ipapi.is/ipwho.is are temporarily rate
+  // limited. It is only reached during a manual Sapo sync, never on dashboard
+  // refresh, so it does not increase background quota usage.
+  const quaternaryPromise = fetchJsonWithTimeout(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, 3200)
+    .then(data => {
+      if (!data || data.error || data.reserved) return null;
+      const org = data.org || '';
+      return {
+        country: data.country_name || 'Unknown',
+        countryCode: data.country_code || 'XX',
+        city: data.city || data.region || 'Unknown',
+        isp: org || 'Unknown',
+        org: org || 'Unknown',
+        as: data.asn || null,
+        hosting: hasDatacenterProvider(org),
+        vpn: false,
+        proxy: false,
+        tor: false,
+        abuser: false,
+        vpnService: null,
+        source: 'ipapi.co',
+        intelligenceVersion: IP_INTELLIGENCE_VERSION
+      };
+    })
+    .catch(() => null);
 
-  let result = primaryData || secondaryData || tertiaryData;
+  const [primaryData, secondaryData, tertiaryData, quaternaryData] = await Promise.all([primaryPromise, secondaryPromise, tertiaryPromise, quaternaryPromise]);
+
+  let result = primaryData || secondaryData || quaternaryData || tertiaryData;
 
   if (primaryData && secondaryData) {
     const primaryIdentity = `${primaryData.countryCode}|${primaryData.isp}|${primaryData.org}`.toLowerCase();
@@ -1520,7 +1560,27 @@ function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt, ord
     if (ipMatch) return ipMatch;
   }
 
-  return candidates[0] || null;
+  // A nearby browsing event alone is not enough evidence. Returning it caused
+  // one shopper's WebRTC/session to be attached to another shopper's order.
+  return null;
+}
+
+function shouldRefreshIpIntelligence(log, now = Date.now()) {
+  const checkedAt = new Date(log?.ip_intelligence_checked_at || 0).getTime();
+  const ageMs = Number.isFinite(checkedAt) ? now - checkedAt : Number.POSITIVE_INFINITY;
+  const isResolved = hasResolvedIpIdentity({
+    country: log?.country,
+    countryCode: log?.country_code,
+    city: log?.city,
+    isp: log?.isp,
+    org: log?.org,
+    as: log?.asn
+  });
+
+  if (!isResolved || log?.ip_intelligence_source === 'fallback_pending') {
+    return ageMs >= IP_INTELLIGENCE_PENDING_RETRY_MS;
+  }
+  return ageMs >= IP_INTELLIGENCE_CACHE_TTL_MS || log?.ip_intelligence_version !== IP_INTELLIGENCE_VERSION;
 }
 
 function sessionDurationToOrder(sessionStartAt, orderCreatedAt) {
@@ -1788,14 +1848,19 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
         orderLog.session_start_at = candidateVisit.session_start_at;
         orderLog.session_duration_sec = sessionDurationToOrder(candidateVisit.session_start_at, createdAt);
       }
-      const lastCheckedMs = new Date(orderLog.ip_intelligence_checked_at || 0).getTime();
-      const shouldAnalyze = !Number.isFinite(lastCheckedMs) || Date.now() - lastCheckedMs > IP_INTELLIGENCE_CACHE_TTL_MS || orderLog.ip_intelligence_version !== IP_INTELLIGENCE_VERSION || !existing;
+      const shouldAnalyze = shouldRefreshIpIntelligence(orderLog) || !existing;
       if (shouldAnalyze && isKnownIp(effectiveClientIp)) {
-        pendingIpAnalysis.set(`${effectiveClientIp}|${orderLog.webrtc_ip || ''}`, {
-          log: orderLog,
-          clientIp: effectiveClientIp,
-          webrtcIp: orderLog.webrtc_ip
-        });
+        const analysisKey = `${effectiveClientIp}|${orderLog.webrtc_ip || ''}`;
+        const pending = pendingIpAnalysis.get(analysisKey);
+        if (pending) {
+          pending.logs.push(orderLog);
+        } else {
+          pendingIpAnalysis.set(analysisKey, {
+            logs: [orderLog],
+            clientIp: effectiveClientIp,
+            webrtcIp: orderLog.webrtc_ip
+          });
+        }
       }
       if (existing) {
         if (JSON.stringify(orderLog) !== before) {
@@ -1856,15 +1921,18 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
       const originalSessionDuration = log.session_duration_sec;
       const ordInfo = safeJsonParse(log.order_info, null);
       if (!ordInfo) continue;
-      if (!isKnownIp(log.webrtc_ip)) {
-        const match = findTrackedVisitForOrder(state, store.id, ordInfo, log.created_at, log.client_ip);
-        if (match && isKnownIp(match.webrtc_ip)) {
+      const match = findTrackedVisitForOrder(state, store.id, ordInfo, log.created_at, log.client_ip);
+      if (match) {
+        if (!isKnownIp(log.webrtc_ip) && isKnownIp(match.webrtc_ip)) {
           log.webrtc_ip = match.webrtc_ip;
           log.webrtc_mismatch = Boolean(log.client_ip && log.webrtc_ip && log.webrtc_ip !== log.client_ip);
-          if (!log.session_start_at && match.session_start_at) {
-            log.session_start_at = match.session_start_at;
-            log.session_duration_sec = sessionDurationToOrder(match.session_start_at, log.created_at);
-          }
+        }
+        if (!log.session_start_at && match.session_start_at) {
+          log.session_start_at = match.session_start_at;
+          log.session_duration_sec = sessionDurationToOrder(match.session_start_at, log.created_at);
+        }
+        if ((!log.webrtc_status || log.webrtc_status === 'pending') && match.webrtc_status && match.webrtc_status !== 'pending') {
+          log.webrtc_status = match.webrtc_status;
         }
       }
       if (log.session_duration_sec === null && log.session_start_at) {
@@ -1880,7 +1948,14 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
   const stateLogSnapshot = allLogs(state);
   for (let i = 0; i < analysisTargets.length; i += 3) {
     const batch = analysisTargets.slice(i, i + 3);
-    await Promise.all(batch.map(target => applyIpAnalysis(target.log, target.clientIp, target.webrtcIp, [], ipCache, stateLogSnapshot)));
+    await Promise.all(batch.map(async target => {
+      // The lookup result is cached by IP after the first row. Applying it to
+      // every duplicate row keeps the dashboard internally consistent without
+      // spending extra external IP-intelligence requests.
+      for (const log of target.logs) {
+        await applyIpAnalysis(log, target.clientIp, target.webrtcIp, [], ipCache, stateLogSnapshot);
+      }
+    }));
     ordersChanged = true;
   }
 
