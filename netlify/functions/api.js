@@ -910,9 +910,18 @@ function hasDatacenterProvider(...values) {
   return DATACENTER_PROVIDER_WORDS.some(word => text.includes(word));
 }
 
+function isForeignIp(countryCode, country) {
+  const code = String(countryCode || '').toUpperCase().trim();
+  const name = String(country || '').toLowerCase().trim();
+  if (!code && !name) return false;
+  if (code === 'VN' || name === 'vietnam' || name === 'việt nam' || code === 'XX' || name === 'unknown') return false;
+  return true;
+}
+
 function effectiveRiskLevel(row) {
-  const detectedRisk = row?.is_vpn || row?.is_datacenter || row?.is_proxy || row?.is_tor || row?.is_abuser || hasDatacenterProvider(row?.isp, row?.org);
-  return detectedRisk ? 'HIGH_RISK' : row?.risk_level;
+  const isForeign = isForeignIp(row?.country_code, row?.country);
+  const detectedRisk = isForeign || row?.is_vpn || row?.is_datacenter || row?.is_proxy || row?.is_tor || row?.is_abuser || hasDatacenterProvider(row?.isp, row?.org);
+  return detectedRisk ? 'HIGH_RISK' : (row?.risk_level || 'CLEAN');
 }
 
 function getNextId(state) {
@@ -1160,7 +1169,12 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
     }
   }
 
+  const countryCode = String(ipData.countryCode || '').toUpperCase().trim();
+  const countryName = String(ipData.country || '').toLowerCase().trim();
+  const isForeignCountry = isForeignIp(countryCode, countryName);
+
   const riskReasons = [];
+  if (isForeignCountry) riskReasons.push(`Foreign IP location detected (${ipData.country || countryCode})`);
   if (isVpn) riskReasons.push(ipData.vpnService ? `${ipData.vpnService} VPN detected` : 'VPN/Proxy detected');
   if (isDatacenter) riskReasons.push('Datacenter/hosting IP detected');
   if (isTor) riskReasons.push('Tor exit node detected');
@@ -1168,7 +1182,7 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
   if (webrtcMismatch) riskReasons.push('WebRTC IP mismatch detected');
   return {
     ipData,
-    isVpn,
+    isVpn: isVpn || isForeignCountry,
     isDatacenter,
     isTor,
     isAbuser,

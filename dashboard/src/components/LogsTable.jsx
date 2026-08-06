@@ -110,6 +110,14 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
     return <Monitor className="w-3.5 h-3.5" />;
   };
 
+  const isForeignIpLog = (log) => {
+    const code = String(log.country_code || '').toUpperCase().trim();
+    const name = String(log.country || '').toLowerCase().trim();
+    if (!code && !name) return false;
+    if (code === 'VN' || name === 'vietnam' || name === 'việt nam' || code === 'XX' || name === 'unknown') return false;
+    return true;
+  };
+
   const riskPresentation = (log) => {
     if (isUnknownLog(log)) return { label: 'ĐANG KIỂM TRA IP', mobileLabel: 'ĐANG KIỂM TRA' };
     if (log.webrtc_mismatch) return { label: 'LỆCH IP WEBRTC', mobileLabel: 'LỆCH WEBRTC' };
@@ -118,6 +126,8 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
     if (log.is_datacenter && log.is_abuser) return { label: 'IP DATACENTER RỦI RO', mobileLabel: 'DATACENTER RỦI RO' };
     if (log.is_datacenter) return { label: 'IP DATACENTER', mobileLabel: 'DATACENTER' };
     if (log.is_abuser) return { label: 'IP CÓ RỦI RO', mobileLabel: 'IP RỦI RO' };
+    if (isForeignIpLog(log)) return { label: `IP NƯỚC NGOÀI (${log.country || log.country_code})`, mobileLabel: `IP ${log.country_code || 'NGOÀI'}` };
+    if (log.risk_level === 'HIGH_RISK') return { label: 'FAKE IP / VPN', mobileLabel: 'FAKE IP' };
     return { label: 'CẦN KIỂM TRA', mobileLabel: 'CẦN KIỂM TRA' };
   };
 
@@ -129,6 +139,7 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
       if (reason.includes('Abusive IP reputation')) return 'IP có danh tiếng rủi ro';
       if (reason.includes('Tor exit')) return 'IP là điểm thoát Tor';
       if (reason.includes('VPN')) return 'Phát hiện VPN/Proxy';
+      if (reason.includes('Foreign IP')) return 'IP ngoài Việt Nam (Tự động cảnh báo Fake IP)';
       return reason;
     });
   };
