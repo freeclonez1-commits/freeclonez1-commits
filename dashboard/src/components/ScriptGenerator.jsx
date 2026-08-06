@@ -17,7 +17,7 @@ export default function ScriptGenerator() {
     backendUrl: "${effectiveBackendUrl}"
   };
 </script>
-<script src="${effectiveBackendUrl}/client-tracker.js" async></script>`;
+<script src="${effectiveBackendUrl}/client-tracker.js"></script>`;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(codeSnippet);

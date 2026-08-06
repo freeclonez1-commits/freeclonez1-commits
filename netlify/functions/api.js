@@ -49,7 +49,6 @@ const TRACKER_SOURCE = `/**
   var lastPushedTime = 0;
   var lastCheckoutActivityAt = 0;
   var lastInteractionAt = 0;
-  var EMBEDDED_BLACKLIST = Array.isArray(window.__SAPO_IP_GUARD_BLACKLIST) ? window.__SAPO_IP_GUARD_BLACKLIST : [];
   var INITIAL_BLOCK = window.__SAPO_IP_GUARD_INITIAL_BLOCK || null;
   function getStorageItem(key) {
     try {
@@ -93,7 +92,6 @@ const TRACKER_SOURCE = `/**
   var lastNetworkIdentitySignature = '';
   var forceNetworkIdentityPush = false;
   var networkIdentityShouldPush = false;
-  var NETWORK_CHECK_INTERVAL_MS = 60000;
   var WEBRTC_DISCOVERY_TIMEOUT_MS = 5000;
 
   function getSessionMeta() {
@@ -180,6 +178,9 @@ const TRACKER_SOURCE = `/**
       cachedWebRtcStatus = status || (value ? 'captured' : 'not_available');
       if (cachedWebRtcIp) setSessionValue('sapo_webrtc_ip', cachedWebRtcIp);
       setSessionValue('sapo_webrtc_status', cachedWebRtcStatus);
+      // WebRTC can finish after the first connection-IP check. Re-check once
+      // with the discovered candidate so a WebRTC-only blacklist is immediate.
+      if (cachedWebRtcIp) checkBlacklistImmediately();
       var callbacks = webRtcCallbacks.splice(0, webRtcCallbacks.length);
       callbacks.forEach(function (fn) { try { fn(cachedWebRtcIp); } catch (e) {} });
     };
@@ -367,7 +368,10 @@ const TRACKER_SOURCE = `/**
   function renderAccessDeniedScreen(blockedIp) {
     try {
       var ipText = blockedIp || 'unknown';
-      setStorageItem('sapo_blocked_ip', ipText);
+      // Older tracker releases persisted this flag locally, which kept a
+      // visitor blocked after the administrator had removed the blacklist row.
+      // Server-side blacklist is the source of truth.
+      removeStorageItem('sapo_blocked_ip');
 
       // Override fetch and XHR to block all network requests from blacklisted client
       try {
@@ -550,11 +554,6 @@ const TRACKER_SOURCE = `/**
   }
 
   function checkBlacklistImmediately() {
-    var localBlocked = getStorageItem('sapo_blocked_ip');
-    if (localBlocked) {
-      renderAccessDeniedScreen(localBlocked);
-      return;
-    }
     if (INITIAL_BLOCK && INITIAL_BLOCK.is_blacklisted) {
       renderAccessDeniedScreen(INITIAL_BLOCK.ip);
       return;
@@ -578,11 +577,9 @@ const TRACKER_SOURCE = `/**
   }
 
   function initTracking() {
-    var localBlocked = getStorageItem('sapo_blocked_ip');
-    if (localBlocked) {
-      renderAccessDeniedScreen(localBlocked);
-      return;
-    }
+    // Remove the legacy local-only lock so a server-side unblock takes effect
+    // as soon as the visitor refreshes the page.
+    removeStorageItem('sapo_blocked_ip');
     if (INITIAL_BLOCK && INITIAL_BLOCK.is_blacklisted) {
       renderAccessDeniedScreen(INITIAL_BLOCK.ip);
       return;
@@ -593,7 +590,6 @@ const TRACKER_SOURCE = `/**
     attachCheckoutActivityListeners();
     setInterval(attachFormSubmitListeners, 3000);
     setInterval(attachCheckoutActivityListeners, 3000);
-    setInterval(checkBlacklistImmediately, NETWORK_CHECK_INTERVAL_MS);
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') initTracking();
@@ -1010,8 +1006,9 @@ function isForeignIp(countryCode, country) {
 }
 
 function effectiveRiskLevel(row) {
-  const isForeign = isForeignIp(row?.country_code, row?.country);
-  const detectedRisk = isForeign || row?.is_vpn || row?.is_datacenter || row?.is_proxy || row?.is_tor || row?.is_abuser || hasDatacenterProvider(row?.isp, row?.org);
+  // A foreign IP is a review signal, not proof of VPN/fraud. Only concrete
+  // network evidence may automatically turn a row into high risk.
+  const detectedRisk = row?.is_vpn || row?.is_datacenter || row?.is_proxy || row?.is_tor || row?.is_abuser || row?.webrtc_mismatch || hasDatacenterProvider(row?.isp, row?.org);
   return detectedRisk ? 'HIGH_RISK' : (row?.risk_level || 'CLEAN');
 }
 
@@ -1299,14 +1296,15 @@ async function analyzeRisk(clientIp, webrtcIp, ipCache = null, stateLogs = []) {
   if (isTor) riskReasons.push('Tor exit node detected');
   if (isAbuser) riskReasons.push('Abusive IP reputation detected');
   if (webrtcMismatch) riskReasons.push('WebRTC IP mismatch detected');
+  const hasConcreteRisk = isVpn || isDatacenter || isTor || isAbuser || webrtcMismatch;
   return {
     ipData,
-    isVpn: isVpn || isForeignCountry,
+    isVpn,
     isDatacenter,
     isTor,
     isAbuser,
     webrtcMismatch,
-    riskLevel: riskReasons.length ? 'HIGH_RISK' : 'CLEAN',
+    riskLevel: hasConcreteRisk ? 'HIGH_RISK' : 'CLEAN',
     riskReasons
   };
 }
@@ -2241,12 +2239,11 @@ exports.handler = async (event) => {
     }
 
     if (rawPath === '/client-tracker.js') {
-      const state = await loadState({ includeLogs: false, includeStores: false });
-      const blacklist = state.blacklist.map(item => item.ip).filter(Boolean);
+      const state = await loadState({ includeLogs: false, includeStores: false, includeSyncState: false });
       const visitorIp = getClientIp(event);
       const block = state.blacklist.find(item => item.ip === visitorIp);
       const initialBlock = block ? { is_blacklisted: true, ip: visitorIp } : null;
-      return response(200, `window.__SAPO_IP_GUARD_BLACKLIST = ${JSON.stringify(blacklist)};\nwindow.__SAPO_IP_GUARD_INITIAL_BLOCK = ${JSON.stringify(initialBlock)};\n${TRACKER_SOURCE}`, {
+      return response(200, `window.__SAPO_IP_GUARD_INITIAL_BLOCK = ${JSON.stringify(initialBlock)};\n${TRACKER_SOURCE}`, {
         'Content-Type': 'application/javascript; charset=utf-8',
         'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'
       });
@@ -2278,7 +2275,8 @@ exports.handler = async (event) => {
       return await handleLogs(event, state, method, parts, query, body);
     }
     if (resource === 'blacklist') {
-      const state = await loadState({ includeLogs: true, includeStores: false, includeBlacklist: true });
+      const isPublicCheck = method === 'GET' && parts[0] === 'check';
+      const state = await loadState({ includeLogs: !isPublicCheck, includeStores: false, includeBlacklist: true, includeSyncState: false });
       return await handleBlacklist(event, state, method, parts, query, body);
     }
     if (resource === 'stats') {
