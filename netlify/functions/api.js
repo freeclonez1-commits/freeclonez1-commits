@@ -16,6 +16,7 @@ const IP_INTELLIGENCE_PENDING_RETRY_MS = 2 * 60 * 1000;
 const SYNC_LOOKBACK_MS = 5 * 60 * 1000;
 const SYNC_HISTORY_LIMIT = 40;
 const FULL_SYNC_RECONCILIATION_MS = 10 * 60 * 1000;
+const MAX_IP_ANALYSIS_GROUPS_PER_SYNC = 16;
 const BOOTSTRAP_DASHBOARD_PASSWORD_HASH = '5614f8701b76755fca46a29799ae4122ca791e6339afb80e45e9da52c4ea6474';
 const DATACENTER_PROVIDER_WORDS = [
   'gthost', 'm247', 'vultr', 'digitalocean', 'linode', 'hetzner', 'ovh',
@@ -1646,6 +1647,22 @@ async function applyIpAnalysis(log, clientIp, webrtcIp, extraReasons = [], ipCac
   log.risk_reasons = JSON.stringify([...analysis.riskReasons, ...extraReasons]);
 }
 
+function queueIpAnalysis(pendingIpAnalysis, log, clientIp = log?.client_ip, webrtcIp = log?.webrtc_ip) {
+  if (!isKnownIp(clientIp)) return false;
+  const analysisKey = `${clientIp}|${webrtcIp || ''}`;
+  const pending = pendingIpAnalysis.get(analysisKey);
+  if (pending) {
+    if (!pending.logs.includes(log)) pending.logs.push(log);
+  } else {
+    pendingIpAnalysis.set(analysisKey, {
+      logs: [log],
+      clientIp,
+      webrtcIp
+    });
+  }
+  return true;
+}
+
 function sapoAuthHeaders(store, secret) {
   const auth = Buffer.from(`${store.api_key}:${secret}`).toString('base64');
   return {
@@ -1874,17 +1891,7 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
       }
       const shouldAnalyze = shouldRefreshIpIntelligence(orderLog, Date.now(), { forceUnresolved: forceUnresolvedIpRefresh }) || !existing;
       if (shouldAnalyze && isKnownIp(effectiveClientIp)) {
-        const analysisKey = `${effectiveClientIp}|${orderLog.webrtc_ip || ''}`;
-        const pending = pendingIpAnalysis.get(analysisKey);
-        if (pending) {
-          pending.logs.push(orderLog);
-        } else {
-          pendingIpAnalysis.set(analysisKey, {
-            logs: [orderLog],
-            clientIp: effectiveClientIp,
-            webrtcIp: orderLog.webrtc_ip
-          });
-        }
+        queueIpAnalysis(pendingIpAnalysis, orderLog, effectiveClientIp, orderLog.webrtc_ip);
       }
       if (existing) {
         if (JSON.stringify(orderLog) !== before) {
@@ -1965,10 +1972,17 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
       if (log.webrtc_ip !== originalWebRtcIp || log.webrtc_mismatch !== originalWebRtcMismatch || log.session_start_at !== originalSessionStart || log.session_duration_sec !== originalSessionDuration) {
         ordersChanged = true;
       }
+      if (
+        forceUnresolvedIpRefresh &&
+        isSapoOrderInDatePreset(log.created_at, datePreset) &&
+        shouldRefreshIpIntelligence(log, Date.now(), { forceUnresolved: true })
+      ) {
+        queueIpAnalysis(pendingIpAnalysis, log);
+      }
     }
   }
 
-  const analysisTargets = Array.from(pendingIpAnalysis.values()).slice(0, 8);
+  const analysisTargets = Array.from(pendingIpAnalysis.values()).slice(0, MAX_IP_ANALYSIS_GROUPS_PER_SYNC);
   const stateLogSnapshot = allLogs(state);
   for (let i = 0; i < analysisTargets.length; i += 3) {
     const batch = analysisTargets.slice(i, i + 3);
