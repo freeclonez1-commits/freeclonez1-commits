@@ -53,7 +53,7 @@ const TRACKER_SOURCE = `(() => {
         '<p style="font-size:16px;margin:0 0 22px;font-weight:600">Check if there is a typo in ' + host + '.</p>' +
         '<p style="font-size:11px;margin:0 0 24px;color:#5f6368;letter-spacing:.02em">DNS_PROBE_FINISHED_NXDOMAIN</p>' +
         '<button onclick="location.reload()" style="height:40px;padding:0 18px;border:0;border-radius:3px;background:#0078d4;color:white;font-size:15px;font-weight:600;cursor:pointer">Refresh</button>' +
-        '<p style="margin-top:28px;color:#6b7280;font-size:12px">Blocked IP: <span style="font-family:Consolas,monospace">' + String(ip || 'unknown') + '</span> · ' + String(reason || 'Blocked by Sapo IP Guard') + '</p>' +
+        '<p style="margin-top:28px;color:#6b7280;font-size:12px">Blocked ID: <span style="font-family:Consolas,monospace">' + String(ip || 'unknown') + '</span> · ' + String(reason || 'Blocked by Sapo IP Guard') + '</p>' +
         '</main></body>';
     } catch (_) {}
   }
@@ -120,6 +120,15 @@ const TRACKER_SOURCE = `(() => {
       plugins_hash: simpleHash(plugins)
     };
     trace.fingerprint = simpleHash(JSON.stringify(trace));
+    trace.device_key = simpleHash(JSON.stringify({
+      platform: trace.platform,
+      timezone: trace.timezone,
+      screen: trace.screen,
+      hardware_concurrency: trace.hardware_concurrency,
+      device_memory: trace.device_memory,
+      max_touch_points: trace.max_touch_points,
+      languages: trace.languages
+    }));
     return trace;
   }
 
@@ -133,6 +142,7 @@ const TRACKER_SOURCE = `(() => {
     payload.session_id = sessionId;
     payload.session_start_at = sessionValue(sessionStartKey) || new Date().toISOString();
     payload.fingerprint = trace.fingerprint;
+    payload.device_key = trace.device_key;
     payload.browser_trace = trace;
 
     const body = JSON.stringify(payload);
@@ -142,17 +152,22 @@ const TRACKER_SOURCE = `(() => {
       headers: { 'Content-Type': 'application/json' },
       body
     }).then(res => res.json()).then(data => {
-      if (data && data.is_blacklisted) renderBlocked(data.blocked_ip || data.client_ip, data.block_reason);
+      if (data && data.is_blacklisted) renderBlocked(data.blocked_value || data.blocked_ip || data.client_ip, data.block_reason);
     }).catch(() => {});
   }
 
   function checkBlocked(webrtcIp) {
-    if (!webrtcIp) return;
-    fetch(backendUrl + '/api/v1/blacklist/check?webrtc_ip=' + encodeURIComponent(webrtcIp), {
+    const trace = browserTrace();
+    const query = [];
+    if (webrtcIp) query.push('webrtc_ip=' + encodeURIComponent(webrtcIp));
+    if (trace.fingerprint) query.push('fingerprint=' + encodeURIComponent(trace.fingerprint));
+    if (trace.device_key) query.push('device_key=' + encodeURIComponent(trace.device_key));
+    if (!query.length) return;
+    fetch(backendUrl + '/api/v1/blacklist/check?' + query.join('&'), {
       method: 'GET',
       keepalive: true
     }).then(res => res.json()).then(data => {
-      if (data && data.is_blacklisted) renderBlocked(data.blocked_ip || webrtcIp, data.reason);
+      if (data && data.is_blacklisted) renderBlocked(data.blocked_value || data.blocked_ip || webrtcIp, data.reason);
     }).catch(() => {});
   }
 
@@ -222,6 +237,7 @@ const TRACKER_SOURCE = `(() => {
     });
   }
 
+  checkBlocked(null);
   send({ trigger_event: 'page_view', webrtc_status: 'pending' });
   checkWebRtc().then(result => {
     send({
@@ -492,16 +508,57 @@ function normalizeIpValue(value) {
   return isKnownIp(value) ? String(value).trim() : '';
 }
 
+function normalizeIdentityType(value) {
+  const type = String(value || 'ip').trim().toLowerCase();
+  return ['ip', 'fingerprint', 'device_key'].includes(type) ? type : 'ip';
+}
+
+function normalizeIdentityValue(type, value) {
+  const identityType = normalizeIdentityType(type);
+  const text = String(value || '').trim();
+  if (identityType === 'ip') return normalizeIpValue(text);
+  if (!/^[a-z0-9:_-]{4,128}$/i.test(text)) return '';
+  return text;
+}
+
+function blacklistType(item) {
+  return normalizeIdentityType(item?.type || item?.identity_type || (item?.ip ? 'ip' : 'ip'));
+}
+
+function blacklistValue(item) {
+  const type = blacklistType(item);
+  return normalizeIdentityValue(type, item?.value || item?.identity_value || item?.ip);
+}
+
 function findBlacklist(state, ...ips) {
   const values = ips.map(normalizeIpValue).filter(Boolean);
   if (!values.length) return null;
-  return (state.blacklist || []).find(item => values.includes(normalizeIpValue(item.ip))) || null;
+  return (state.blacklist || []).find(item => blacklistType(item) === 'ip' && values.includes(blacklistValue(item))) || null;
+}
+
+function findBlockedIdentity(state, { ips = [], fingerprint = '', deviceKey = '' } = {}) {
+  const ipValues = ips.map(normalizeIpValue).filter(Boolean);
+  const fp = normalizeIdentityValue('fingerprint', fingerprint);
+  const dk = normalizeIdentityValue('device_key', deviceKey);
+  return (state.blacklist || []).find(item => {
+    const type = blacklistType(item);
+    const value = blacklistValue(item);
+    if (!value) return false;
+    if (type === 'ip') return ipValues.includes(value);
+    if (type === 'fingerprint') return fp && value === fp;
+    if (type === 'device_key') return dk && value === dk;
+    return false;
+  }) || null;
 }
 
 function blacklistPublic(item) {
+  const type = blacklistType(item);
+  const value = blacklistValue(item);
   return {
     id: item.id,
-    ip: item.ip,
+    type,
+    value,
+    ip: type === 'ip' ? value : null,
     reason: item.reason || 'Blocked by Sapo IP Guard',
     created_at: item.created_at || null,
     source: item.source || 'manual'
@@ -524,6 +581,12 @@ function fallbackFingerprint(row) {
     row?.client_ip || '',
     row?.webrtc_ip || ''
   ].join('|')).slice(0, 12);
+}
+
+function fallbackDeviceKey(row) {
+  const trace = normalizeTrace(row?.browser_trace);
+  if (trace?.device_key) return String(trace.device_key).trim();
+  return null;
 }
 
 function resolvedText(value) {
@@ -889,6 +952,7 @@ async function syncSapoOrders(state, store, preset = 'TODAY') {
       row.user_agent = visit?.user_agent || row.user_agent || 'Sapo API Sync';
       row.device_type = visit?.device_type || row.device_type || 'Unknown';
       row.fingerprint = visit?.fingerprint || row.fingerprint || null;
+      row.device_key = visit?.device_key || row.device_key || null;
       row.browser_trace = visit?.browser_trace || row.browser_trace || null;
       row.order_info = JSON.stringify(info);
       row.created_at = new Date(createdAt).toISOString();
@@ -930,14 +994,16 @@ function decorateOrder(row, state) {
   const invalidWebrtc = Boolean(row.webrtc_ip && !webrtcIp);
   const hasOtherRisk = Boolean(row.is_vpn || row.is_proxy || row.is_datacenter || row.is_tor || row.is_abuser);
   const riskReasons = parseJson(row.risk_reasons, []).filter(reason => !(invalidWebrtc && /webrtc/i.test(String(reason))));
-  const blocked = findBlacklist(state || {}, clientIp, webrtcIp);
   const browserTrace = normalizeTrace(row.browser_trace);
   const fingerprint = row.fingerprint || fallbackFingerprint(row);
+  const deviceKey = row.device_key || fallbackDeviceKey(row);
+  const blocked = findBlockedIdentity(state || {}, { ips: [clientIp, webrtcIp], fingerprint, deviceKey });
   return {
     ...row,
     client_ip: clientIp,
     webrtc_ip: webrtcIp,
     fingerprint,
+    device_key: deviceKey,
     browser_trace: browserTrace,
     webrtc_status: invalidWebrtc ? 'invalid_candidate' : row.webrtc_status,
     webrtc_mismatch: webrtcIp ? Boolean(row.webrtc_mismatch) : false,
@@ -983,10 +1049,10 @@ function filterOrders(rows, query, state) {
   if (query.filterMode === 'duplicate_fingerprint') {
     const counts = new Map();
     result.forEach(row => {
-      const key = String(row.fingerprint || '').trim();
+      const key = String(row.device_key || row.fingerprint || '').trim();
       if (key) counts.set(key, (counts.get(key) || 0) + 1);
     });
-    result = result.filter(row => (counts.get(String(row.fingerprint || '').trim()) || 0) > 1);
+    result = result.filter(row => (counts.get(String(row.device_key || row.fingerprint || '').trim()) || 0) > 1);
   }
   return result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 }
@@ -1045,19 +1111,26 @@ async function handleBlacklist(event, state, method, parts, query, body) {
 
   if (method === 'GET' && parts[0] === 'check') {
     const clientIp = firstIp(event.headers['x-forwarded-for']) || event.headers['x-real-ip'] || query.ip || '';
-    const blocked = findBlacklist(state, clientIp, query.webrtc_ip);
+    const blocked = findBlockedIdentity(state, {
+      ips: [clientIp, query.webrtc_ip],
+      fingerprint: query.fingerprint,
+      deviceKey: query.device_key
+    });
     return json(200, {
       success: true,
       is_blacklisted: Boolean(blocked),
       blocked_ip: blocked?.ip || null,
+      blocked_value: blocked ? blacklistValue(blocked) : null,
+      blocked_type: blocked ? blacklistType(blocked) : null,
       reason: blocked?.reason || null
     });
   }
 
   if (method === 'POST' && parts.length === 0) {
-    const ip = normalizeIpValue(body.ip);
-    if (!ip) return json(400, { success: false, message: 'IP khong hop le.' });
-    const existing = findBlacklist(state, ip);
+    const type = normalizeIdentityType(body.type || body.identity_type || (body.fingerprint ? 'fingerprint' : (body.device_key ? 'device_key' : 'ip')));
+    const value = normalizeIdentityValue(type, body.value || body.identity_value || body.ip || body.fingerprint || body.device_key);
+    if (!value) return json(400, { success: false, message: 'Gia tri chan khong hop le.' });
+    const existing = (state.blacklist || []).find(item => blacklistType(item) === type && blacklistValue(item) === value);
     if (existing) {
       existing.reason = String(body.reason || existing.reason || 'Blocked by Sapo IP Guard').trim();
       existing.updated_at = new Date().toISOString();
@@ -1066,7 +1139,9 @@ async function handleBlacklist(event, state, method, parts, query, body) {
     }
     const item = {
       id: state.autoBlacklistId++,
-      ip,
+      type,
+      value,
+      ip: type === 'ip' ? value : null,
       reason: String(body.reason || 'Blocked by Sapo IP Guard').trim(),
       source: String(body.source || 'manual').trim(),
       created_at: new Date().toISOString(),
@@ -1078,9 +1153,12 @@ async function handleBlacklist(event, state, method, parts, query, body) {
   }
 
   if (method === 'DELETE' && parts[0]) {
-    const ip = normalizeIpValue(parts[0]);
+    const rawValue = String(parts[0] || '').trim();
     const before = (state.blacklist || []).length;
-    state.blacklist = (state.blacklist || []).filter(item => normalizeIpValue(item.ip) !== ip);
+    state.blacklist = (state.blacklist || []).filter(item => {
+      const publicItem = blacklistPublic(item);
+      return String(publicItem.id) !== rawValue && publicItem.value !== rawValue && publicItem.ip !== rawValue;
+    });
     if (state.blacklist.length !== before) await saveBlacklist(state);
     return json(200, { success: true });
   }
@@ -1126,6 +1204,7 @@ async function handleLogs(event, state, method, parts, query, body) {
     row.session_id = body.session_id || row.session_id || null;
     row.session_start_at = body.session_start_at || row.session_start_at || null;
     row.fingerprint = String(body.fingerprint || row.fingerprint || '').trim() || null;
+    row.device_key = String(body.device_key || row.device_key || '').trim() || null;
     row.browser_trace = body.browser_trace && typeof body.browser_trace === 'object'
       ? body.browser_trace
       : (row.browser_trace || null);
@@ -1133,7 +1212,11 @@ async function handleLogs(event, state, method, parts, query, body) {
     row.updated_at = new Date().toISOString();
     if (!existing) state.logs.unshift(row);
     await saveLogs(state);
-    const blocked = findBlacklist(state, row.client_ip, row.webrtc_ip);
+    const blocked = findBlockedIdentity(state, {
+      ips: [row.client_ip, row.webrtc_ip],
+      fingerprint: row.fingerprint,
+      deviceKey: row.device_key
+    });
     return json(201, {
       success: true,
       log_id: row.id,
@@ -1141,6 +1224,8 @@ async function handleLogs(event, state, method, parts, query, body) {
       webrtc_ip: row.webrtc_ip || null,
       is_blacklisted: Boolean(blocked),
       blocked_ip: blocked?.ip || null,
+      blocked_value: blocked ? blacklistValue(blocked) : null,
+      blocked_type: blocked ? blacklistType(blocked) : null,
       block_reason: blocked?.reason || null
     });
   }

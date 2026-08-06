@@ -341,6 +341,7 @@ function OrderDetail({ order, onClose, onBlockOrder, onUnblockOrder }) {
             <div className="text-xs font-bold uppercase text-[#6E6E73] mb-3">Dau vet trinh duyet</div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Info label="Fingerprint" value={shortId(order.fingerprint)} mono />
+              <Info label="Device key" value={shortId(order.device_key)} mono />
               <Info label="Session" value={shortId(order.session_id)} mono />
               <Info label="Timezone" value={trace.timezone || '--'} />
               <Info label="Ngon ngu / Platform" value={[trace.language, trace.platform].filter(Boolean).join(' / ') || '--'} />
@@ -403,7 +404,7 @@ function BlacklistPanel({ blacklist, onAddIp, onRemoveIp }) {
       <div className="p-5 border-b border-[#DADCE0] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-extrabold text-[#202124]">Danh sach den</h2>
-          <p className="text-sm text-[#5F6368] mt-1">IP trong danh sach nay se bi tracker chan khi truy cap shop.</p>
+          <p className="text-sm text-[#5F6368] mt-1">Danh sach nay co the chan IP, fingerprint va device key cua may.</p>
         </div>
         <form onSubmit={submit} className="grid grid-cols-1 sm:grid-cols-[180px_1fr_auto] gap-2 w-full lg:max-w-2xl">
           <input
@@ -428,7 +429,8 @@ function BlacklistPanel({ blacklist, onAddIp, onRemoveIp }) {
         <table className="w-full min-w-[760px] text-sm">
           <thead className="bg-[#F8FAFD] text-[#5F6368]">
             <tr>
-              <th className="text-left p-3 font-extrabold">IP</th>
+              <th className="text-left p-3 font-extrabold">Loai</th>
+              <th className="text-left p-3 font-extrabold">Gia tri</th>
               <th className="text-left p-3 font-extrabold">Ly do</th>
               <th className="text-left p-3 font-extrabold">Nguon</th>
               <th className="text-left p-3 font-extrabold">Thoi gian</th>
@@ -438,18 +440,19 @@ function BlacklistPanel({ blacklist, onAddIp, onRemoveIp }) {
           <tbody>
             {!blacklist.length && (
               <tr>
-                <td colSpan="5" className="p-10 text-center text-[#5F6368] font-bold">Chua co IP nao bi chan.</td>
+                <td colSpan="6" className="p-10 text-center text-[#5F6368] font-bold">Chua co dinh danh nao bi chan.</td>
               </tr>
             )}
             {blacklist.map(item => (
-              <tr key={item.id || item.ip} className="border-t border-[#DADCE0]">
-                <td className="p-3 font-mono font-extrabold text-[#D93025]">{item.ip}</td>
+              <tr key={item.id || item.value || item.ip} className="border-t border-[#DADCE0]">
+                <td className="p-3 font-extrabold text-[#D93025]">{item.type || 'ip'}</td>
+                <td className="p-3 font-mono font-extrabold text-[#D93025]">{item.value || item.ip}</td>
                 <td className="p-3 text-[#3C4043]">{item.reason || '--'}</td>
                 <td className="p-3 text-[#5F6368]">{item.source || 'manual'}</td>
                 <td className="p-3 font-mono text-[#5F6368]">{formatDate(item.created_at)}</td>
                 <td className="p-3 text-right">
                   <button
-                    onClick={() => onRemoveIp(item.ip)}
+                    onClick={() => onRemoveIp(item.value || item.ip || item.id)}
                     className="h-9 px-3 rounded-lg bg-[#F1F3F4] text-[#3C4043] font-extrabold inline-flex items-center gap-2"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -559,24 +562,30 @@ export default function App() {
 
   const blockOrder = async (order) => {
     const ips = [order.client_ip, order.webrtc_ip].filter(value => value && !['unknown', '--', 'not_available'].includes(String(value).toLowerCase()));
-    if (!ips.length) {
-      notify('Don nay chua co IP hop le de chan.', 'error');
+    const targets = [
+      ...[...new Set(ips)].map(ip => ({ type: 'ip', value: ip })),
+      order.fingerprint ? { type: 'fingerprint', value: order.fingerprint } : null,
+      order.device_key ? { type: 'device_key', value: order.device_key } : null
+    ].filter(Boolean);
+    if (!targets.length) {
+      notify('Don nay chua co IP/dau vet hop le de chan.', 'error');
       return;
     }
     try {
-      await Promise.all([...new Set(ips)].map(ip => addToBlacklist(ip, `Chan tu don ${order.order_info?.order_id || order.id}`)));
-      notify(`Da chan ${new Set(ips).size} IP. Lan truy cap tiep theo se bi chan ngay.`);
+      await Promise.all(targets.map(target => addToBlacklist(target, `Chan tu don ${order.order_info?.order_id || order.id}`)));
+      notify(`Da chan ${targets.length} dinh danh: IP + dau vet may. Doi IP van se bi chan neu trung dau vet.`);
       await Promise.all([loadBlacklist(), loadOrders(pagination.page)]);
     } catch (err) {
-      notify(err.response?.data?.message || 'Khong chan duoc IP.', 'error');
+      notify(err.response?.data?.message || 'Khong chan duoc dinh danh.', 'error');
     }
   };
 
   const unblockOrder = async (order) => {
     const ips = [order.client_ip, order.webrtc_ip].filter(value => value && !['unknown', '--', 'not_available'].includes(String(value).toLowerCase()));
+    const identities = [...ips, order.fingerprint, order.device_key].filter(Boolean);
     try {
-      await Promise.all([...new Set(ips)].map(removeFromBlacklist));
-      notify('Da bo chan IP cua don nay.');
+      await Promise.all([...new Set(identities)].map(removeFromBlacklist));
+      notify('Da bo chan IP/dau vet cua don nay.');
       await Promise.all([loadBlacklist(), loadOrders(pagination.page)]);
     } catch (err) {
       notify(err.response?.data?.message || 'Khong bo chan duoc IP.', 'error');
@@ -816,7 +825,7 @@ export default function App() {
                           <div className="font-extrabold text-[#1A73E8]">{info.order_id || order.id}</div>
                           <div className="font-bold">{info.customer_name || '--'}</div>
                           <div className="text-xs text-[#5F6368]">{info.phone || '--'}</div>
-                          <div className="mt-1 text-[11px] font-mono text-[#5F6368]">FP: {shortId(order.fingerprint)}</div>
+                          <div className="mt-1 text-[11px] font-mono text-[#5F6368]">DK: {shortId(order.device_key || order.fingerprint)}</div>
                         </td>
                         <td className="p-3">
                           <div className={cn('inline-flex max-w-[260px] items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order) ? 'bg-[#FCE8E6] text-[#D93025]' : 'bg-[#F1F3F4]')}>

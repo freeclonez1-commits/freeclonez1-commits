@@ -57,8 +57,11 @@ export async function getBlacklist() {
   return res.data;
 }
 
-export async function addToBlacklist(ip, reason = 'Blocked from dashboard') {
-  const res = await axios.post(`${API_BASE}/blacklist`, { ip, reason, source: 'dashboard' }, adminConfig());
+export async function addToBlacklist(target, reason = 'Blocked from dashboard') {
+  const payload = typeof target === 'object' && target !== null
+    ? { ...target, reason, source: 'dashboard' }
+    : { ip: target, reason, source: 'dashboard' };
+  const res = await axios.post(`${API_BASE}/blacklist`, payload, adminConfig());
   return res.data;
 }
 
