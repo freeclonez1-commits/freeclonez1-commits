@@ -298,26 +298,9 @@ export default function App() {
     if (activeTab === 'blacklist') refreshBlacklist();
   }, [activeTab, fetchData, refreshBlacklist]);
 
-  // Refresh silently so the visible table does not flicker while data is unchanged.
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (activeTab === 'logs' && document.visibilityState === 'visible' && !syncInFlightRef.current) {
-        refreshLogsOnly(null, { background: true });
-      }
-    }, 15000);
-    return () => clearInterval(interval);
-  }, [activeTab, refreshLogsOnly]);
-
-  // Only Today needs live Sapo sync. Historical ranges are refreshed on demand.
-  useEffect(() => {
-    if (syncPresetFromFilters(filters) !== 'TODAY') return undefined;
-    const interval = setInterval(() => {
-      if (activeTab === 'logs' && document.visibilityState === 'visible') {
-        runOrderSync('TODAY', { quiet: true, backgroundRefresh: true, incremental: true });
-      }
-    }, 30000);
-    return () => clearInterval(interval);
-  }, [activeTab, filters, runOrderSync, syncPresetFromFilters]);
+  // Manual mode: avoid background polling/Sapo sync so Supabase/API quota is used
+  // only for explicit user actions such as opening the dashboard, changing filters,
+  // or pressing "Đồng bộ đơn Sapo".
 
   // Sync Sapo Orders Handler
   const handleSyncOrders = async () => {
@@ -334,11 +317,9 @@ export default function App() {
   const handleDatePresetSync = useCallback(async (preset, presetFilters) => {
     skipNextLogsRefreshRef.current = true;
     setFilters(presetFilters);
-    if (preset !== 'ALL') {
-      await runOrderSync(preset, { quiet: true, refresh: false });
-    }
+    // Date buttons only filter saved dashboard data. They no longer call Sapo.
     await refreshLogsOnly(presetFilters);
-  }, [runOrderSync, refreshLogsOnly]);
+  }, [refreshLogsOnly]);
 
   const handleTestStoreConnection = async (id) => {
     try {

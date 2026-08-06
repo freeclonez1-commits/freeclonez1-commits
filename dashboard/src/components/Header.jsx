@@ -55,7 +55,7 @@ export default function Header({ stores, selectedStoreId, onSelectStore, onSyncO
           onClick={onSyncOrders}
           disabled={isSyncing}
           className="shrink-0 flex items-center gap-2 px-3 md:px-4 py-1.5 text-xs font-bold bg-[#34C759] hover:bg-[#2FB34F] active:scale-95 text-white rounded-full shadow-sm transition-all cursor-pointer disabled:opacity-50"
-          title="Đồng bộ tất cả đơn hàng đã tạo trên Sapo hôm nay"
+          title="Chỉ khi bấm nút này dashboard mới gọi Sapo để quét đơn mới"
         >
           <DownloadCloud className={`w-3.5 h-3.5 ${isSyncing ? 'animate-bounce' : ''}`} />
           <span>{isSyncing ? 'Đang đồng bộ...' : 'Đồng bộ đơn Sapo'}</span>

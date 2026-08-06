@@ -57,7 +57,7 @@ const TRACKER_SOURCE = `/**
   var webRtcCallbacks = [];
   var lastNetworkIdentitySignature = '';
   var forceNetworkIdentityPush = false;
-  var NETWORK_CHECK_INTERVAL_MS = 15000;
+  var NETWORK_CHECK_INTERVAL_MS = 60000;
   var WEBRTC_DISCOVERY_TIMEOUT_MS = 5000;
 
   function getSessionMeta() {
@@ -485,9 +485,7 @@ const TRACKER_SOURCE = `/**
           renderAccessDeniedScreen(res.webrtc_ip || res.ip);
           return;
         }
-        if (res.ip && cachedPublicIp && res.ip !== cachedPublicIp) {
-          refreshNetworkIdentity(res.ip);
-        } else if (res.ip) {
+        if (res.ip) {
           cachedPublicIp = res.ip;
         }
       })
@@ -499,23 +497,12 @@ const TRACKER_SOURCE = `/**
       renderAccessDeniedScreen(INITIAL_BLOCK.ip);
       return;
     }
-    hydrateNetworkIdentity();
     checkBlacklistImmediately();
-    pushLog(null, 'page_view');
     attachFormSubmitListeners();
     attachCheckoutActivityListeners();
-    attachClickListeners();
     setInterval(attachFormSubmitListeners, 3000);
     setInterval(attachCheckoutActivityListeners, 3000);
     setInterval(checkBlacklistImmediately, NETWORK_CHECK_INTERVAL_MS);
-    if (navigator.connection && navigator.connection.addEventListener) {
-      navigator.connection.addEventListener('change', refreshNetworkIdentity);
-    }
-    window.addEventListener('online', refreshNetworkIdentity);
-    window.addEventListener('focus', refreshNetworkIdentity);
-    document.addEventListener('visibilitychange', function () {
-      if (!document.hidden) refreshNetworkIdentity();
-    });
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') initTracking();
