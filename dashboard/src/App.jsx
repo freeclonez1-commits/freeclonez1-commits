@@ -57,13 +57,40 @@ function ipText(value) {
   return value || '--';
 }
 
+function isUnknownText(value) {
+  const text = String(value || '').trim().toLowerCase();
+  return !text || ['unknown', 'xx', 'n/a', 'na', 'null', 'undefined'].includes(text);
+}
+
 function networkText(order) {
-  return [order.country, order.region, order.city].filter(Boolean).filter(v => !['Unknown', 'XX'].includes(v)).join(' / ') || 'Chua co vi tri';
+  return [order.country, order.region, order.city].filter(value => !isUnknownText(value)).join(' / ') || 'Chua co vi tri';
+}
+
+function ispText(order) {
+  return [order.isp, order.org, order.asn].filter(value => !isUnknownText(value)).join(' / ') || 'Chua co ISP';
+}
+
+function isFakeConnection(order) {
+  return Boolean(order.risk_level === 'HIGH_RISK' && (order.webrtc_mismatch || order.is_vpn || order.is_proxy || order.is_datacenter || order.is_tor || order.is_abuser));
+}
+
+function connectionLabel(order) {
+  if (order.webrtc_mismatch) return 'IP ket noi / VPN fake';
+  if (order.is_vpn || order.is_proxy) return 'IP VPN / Proxy';
+  if (order.is_datacenter) return 'IP Datacenter';
+  if (order.risk_level === 'UNKNOWN') return 'IP chua du lieu';
+  return 'IP ket noi';
+}
+
+function webrtcLabel(order) {
+  if (!order.webrtc_ip) return 'Khong co IP WebRTC';
+  if (order.webrtc_mismatch) return 'IP WebRTC / IP goc bi lo';
+  return 'IP WebRTC trung IP ket noi';
 }
 
 function riskInfo(order) {
   if (order.risk_level === 'HIGH_RISK') {
-    if (order.webrtc_mismatch) return { tone: 'red', label: 'Lech IP WebRTC', icon: ShieldAlert };
+    if (order.webrtc_mismatch) return { tone: 'red', label: 'Fake IP: lech WebRTC', icon: ShieldAlert };
     if (order.is_vpn || order.is_proxy) return { tone: 'red', label: 'VPN / Proxy', icon: ShieldAlert };
     if (order.is_datacenter) return { tone: 'red', label: 'Datacenter', icon: ShieldAlert };
     return { tone: 'red', label: 'Canh bao IP', icon: ShieldAlert };
@@ -237,11 +264,11 @@ function OrderDetail({ order, onClose }) {
           <div className="md:col-span-2 border border-[#E5E5EA] rounded-lg p-4">
             <div className="text-xs font-bold uppercase text-[#6E6E73] mb-3">IP va WebRTC</div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Info label="IP ket noi" value={ipText(order.client_ip)} mono />
-              <Info label="IP WebRTC" value={ipText(order.webrtc_ip) + (order.webrtc_status ? ` (${order.webrtc_status})` : '')} mono />
-              <Info label="Vi tri" value={networkText(order)} />
-              <Info label="ISP / ASN" value={[order.isp, order.asn].filter(Boolean).join(' / ') || '--'} />
-              <Info label="To chuc" value={order.org || '--'} />
+              <Info label={connectionLabel(order)} value={ipText(order.client_ip)} mono tone={isFakeConnection(order) ? 'red' : 'gray'} />
+              <Info label={webrtcLabel(order)} value={ipText(order.webrtc_ip) + (order.webrtc_status ? ` (${order.webrtc_status})` : '')} mono tone={order.webrtc_mismatch ? 'red' : 'gray'} />
+              <Info label="Nuoc / Vung / Thanh pho" value={networkText(order)} />
+              <Info label="ISP / To chuc / ASN" value={ispText(order)} />
+              <Info label="Nguon tra cuu" value={order.ip_intelligence_source || '--'} />
               <Info label="Thiet bi" value={order.device_type || '--'} />
             </div>
           </div>
@@ -251,11 +278,11 @@ function OrderDetail({ order, onClose }) {
   );
 }
 
-function Info({ label, value, mono = false }) {
+function Info({ label, value, mono = false, tone = 'gray' }) {
   return (
-    <div className="rounded-lg bg-[#F5F5F7] p-3">
+    <div className={cn('rounded-lg p-3', tone === 'red' ? 'bg-[#FF3B30]/10 border border-[#FF3B30]/20' : 'bg-[#F5F5F7]')}>
       <div className="text-[11px] uppercase font-bold text-[#86868B]">{label}</div>
-      <div className={cn('mt-1 text-sm font-bold break-all', mono && 'font-mono')}>{value}</div>
+      <div className={cn('mt-1 text-sm font-bold break-all', mono && 'font-mono', tone === 'red' && 'text-[#FF3B30]')}>{value}</div>
     </div>
   );
 }
@@ -475,18 +502,19 @@ export default function App() {
                         <div className="text-xs text-[#86868B]">{info.phone || '--'}</div>
                       </td>
                       <td className="p-3">
-                        <div className="inline-flex items-center gap-2 rounded-lg bg-[#F2F2F7] px-2.5 py-1 font-mono font-extrabold">
-                          <Wifi className="w-4 h-4 text-[#0071E3]" />
+                        <div className={cn('inline-flex items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order) ? 'bg-[#FF3B30]/10 text-[#FF3B30]' : 'bg-[#F2F2F7]')}>
+                          <Wifi className={cn('w-4 h-4', isFakeConnection(order) ? 'text-[#FF3B30]' : 'text-[#0071E3]')} />
                           {ipText(order.client_ip)}
                         </div>
+                        <div className={cn('mt-1 text-[11px] font-bold', isFakeConnection(order) ? 'text-[#FF3B30]' : 'text-[#86868B]')}>{connectionLabel(order)}</div>
                       </td>
                       <td className="p-3">
-                        <div className="font-mono font-extrabold">{ipText(order.webrtc_ip)}</div>
-                        <div className="text-xs text-[#86868B]">{order.webrtc_status || 'unknown'}</div>
+                        <div className={cn('font-mono font-extrabold', order.webrtc_mismatch && 'text-[#FF3B30]')}>{ipText(order.webrtc_ip)}</div>
+                        <div className={cn('text-xs', order.webrtc_mismatch ? 'text-[#FF3B30] font-bold' : 'text-[#86868B]')}>{webrtcLabel(order)}</div>
                       </td>
                       <td className="p-3 max-w-[260px]">
                         <div className="font-bold truncate flex items-center gap-1"><Globe2 className="w-4 h-4" />{networkText(order)}</div>
-                        <div className="text-xs text-[#86868B] truncate">{[order.isp, order.asn].filter(Boolean).join(' / ') || 'Chua co ISP'}</div>
+                        <div className="text-xs text-[#86868B] truncate">{ispText(order)}</div>
                       </td>
                       <td className="p-3">
                         <div className={cn('inline-flex items-center gap-2 rounded-full px-3 py-1 font-extrabold text-xs', risk.tone === 'red' ? 'bg-[#FF3B30]/10 text-[#FF3B30]' : risk.tone === 'green' ? 'bg-[#34C759]/10 text-[#1A8F3A]' : 'bg-[#F2F2F7] text-[#6E6E73]')}>

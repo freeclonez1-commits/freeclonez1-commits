@@ -6,11 +6,13 @@ const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
 const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
 const BOOTSTRAP_DASHBOARD_PASSWORD_HASH = '5614f8701b76755fca46a29799ae4122ca791e6339afb80e45e9da52c4ea6474';
 const MAX_IP_LOOKUPS_PER_SYNC = 30;
+const IP_INTELLIGENCE_VERSION = 2;
 const DATACENTER_WORDS = [
   'datacenter', 'data center', 'hosting', 'host', 'cloud', 'server', 'vps',
   'vpn', 'proxy', 'gthost', 'm247', 'ovh', 'hetzner', 'digitalocean',
   'linode', 'vultr', 'aws', 'amazon', 'google cloud', 'azure', 'datacamp',
-  'cloudflare', 'iomart', 'rapidswitch', 'purevoltage', 'ip transit'
+  'cloudflare', 'iomart', 'rapidswitch', 'purevoltage', 'ip transit',
+  'globaltelehost', 'globaltehost', 'colo', 'colocation'
 ];
 
 const memoryIpCache = new Map();
@@ -438,8 +440,29 @@ function normalizeIpWho(data) {
   };
 }
 
-function mergeIpData(primary, secondary) {
-  const sources = [primary, secondary].filter(hasIpIdentity);
+function normalizeIpApiCom(data) {
+  if (!data || data.status !== 'success') return null;
+  const isp = data.isp || data.org || 'Unknown';
+  const org = data.org || data.isp || 'Unknown';
+  return {
+    country: data.country || 'Unknown',
+    countryCode: data.countryCode || 'XX',
+    region: data.regionName || data.region || 'Unknown',
+    city: data.city || 'Unknown',
+    isp,
+    org,
+    as: data.as || null,
+    hosting: Boolean(data.hosting || hasDatacenterProvider(isp, org, data.as)),
+    vpn: Boolean(data.proxy),
+    proxy: Boolean(data.proxy),
+    tor: false,
+    abuser: false,
+    source: 'ip-api.com'
+  };
+}
+
+function mergeIpData(...items) {
+  const sources = items.filter(hasIpIdentity);
   if (!sources.length) {
     return {
       country: 'Unknown',
@@ -457,7 +480,7 @@ function mergeIpData(primary, secondary) {
       source: 'unknown'
     };
   }
-  const base = secondary && hasIpIdentity(secondary) ? secondary : sources[0];
+  const base = sources.find(item => item.source === 'ipwho.is') || sources[0];
   return {
     ...base,
     country: resolvedText(base.country) ? base.country : sources[0].country,
@@ -467,27 +490,29 @@ function mergeIpData(primary, secondary) {
     isp: resolvedText(base.isp) ? base.isp : sources[0].isp,
     org: resolvedText(base.org) ? base.org : sources[0].org,
     as: resolvedText(base.as) ? base.as : sources[0].as,
-    hosting: Boolean(primary?.hosting || secondary?.hosting || hasDatacenterProvider(base.isp, base.org, base.as)),
-    vpn: Boolean(primary?.vpn || secondary?.vpn),
-    proxy: Boolean(primary?.proxy || secondary?.proxy),
-    tor: Boolean(primary?.tor || secondary?.tor),
-    abuser: Boolean(primary?.abuser || secondary?.abuser),
-    source: [primary?.source, secondary?.source].filter(Boolean).join('+') || base.source
+    hosting: Boolean(sources.some(item => item.hosting) || hasDatacenterProvider(base.isp, base.org, base.as)),
+    vpn: Boolean(sources.some(item => item.vpn)),
+    proxy: Boolean(sources.some(item => item.proxy)),
+    tor: Boolean(sources.some(item => item.tor)),
+    abuser: Boolean(sources.some(item => item.abuser)),
+    source: sources.map(item => item.source).filter(Boolean).join('+') || base.source
   };
 }
 
 async function lookupIp(ip) {
   if (!isKnownIp(ip)) return null;
   const cached = memoryIpCache.get(ip);
-  if (cached && cached.expiresAt > Date.now()) return cached.data;
+  if (cached && cached.expiresAt > Date.now() && hasIpIdentity(cached.data)) return cached.data;
+  if (cached) memoryIpCache.delete(ip);
 
   const key = process.env.IPAPI_IS_KEY ? `&key=${encodeURIComponent(process.env.IPAPI_IS_KEY)}` : '';
-  const [ipapi, ipwho] = await Promise.all([
-    fetchJson(`https://api.ipapi.is/?q=${encodeURIComponent(ip)}${key}`, 2200).then(normalizeIpApiIs),
-    fetchJson(`https://ipwho.is/${encodeURIComponent(ip)}`, 2200).then(normalizeIpWho)
+  const [ipapi, ipwho, ipApiCom] = await Promise.all([
+    fetchJson(`https://api.ipapi.is/?q=${encodeURIComponent(ip)}${key}`, 4500).then(normalizeIpApiIs),
+    fetchJson(`https://ipwho.is/${encodeURIComponent(ip)}`, 4500).then(normalizeIpWho),
+    fetchJson(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,regionName,city,isp,org,as,hosting,proxy`, 4500).then(normalizeIpApiCom)
   ]);
-  const data = mergeIpData(ipapi, ipwho);
-  memoryIpCache.set(ip, { data, expiresAt: Date.now() + 6 * 60 * 60 * 1000 });
+  const data = mergeIpData(ipapi, ipwho, ipApiCom);
+  if (hasIpIdentity(data)) memoryIpCache.set(ip, { data, expiresAt: Date.now() + 6 * 60 * 60 * 1000 });
   return data;
 }
 
@@ -534,6 +559,7 @@ function applyIp(order, ipData, clientIp, webrtcIp) {
   order.risk_level = risk.risk_level;
   order.risk_reasons = JSON.stringify(risk.risk_reasons);
   order.ip_intelligence_source = ipData?.source || 'unknown';
+  order.ip_intelligence_version = IP_INTELLIGENCE_VERSION;
   order.ip_intelligence_checked_at = new Date().toISOString();
 }
 
@@ -622,7 +648,8 @@ async function enrichOrders(orders) {
       org: order.org,
       as: order.asn
     });
-    if (!stale && order.ip_intelligence_checked_at) continue;
+    const oldVersion = Number(order.ip_intelligence_version || 0) !== IP_INTELLIGENCE_VERSION;
+    if (!stale && !oldVersion && order.ip_intelligence_checked_at) continue;
     const key = `${order.client_ip}|${order.webrtc_ip || ''}`;
     if (!groups.has(key)) groups.set(key, { clientIp: order.client_ip, webrtcIp: order.webrtc_ip, orders: [] });
     groups.get(key).orders.push(order);
