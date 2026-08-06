@@ -1399,17 +1399,27 @@ function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt, ord
   const orderPhone = normalizeContact(orderInfo?.phone);
   const orderEmail = normalizeContact(orderInfo?.email);
   const orderIp = isKnownIp(orderClientIp) ? orderClientIp : null;
+  const targetOrderId = String(orderInfo?.order_id || '').toLowerCase();
 
-  // Filter candidate browsing logs from tracker (not sapo_sync) within 15 mins prior to order creation for the same store
+  // Filter candidate browsing logs from tracker (excluding sapo_sync) for the same store
   const candidates = state.logs.filter(log => {
     if (log.trigger_event === 'sapo_sync') return false;
-    if (hasOrderInfo(log.order_info)) return false;
     if (storeId && log.store_id && log.store_id !== storeId) return false;
+    
+    // If the log has an order_id bound to it, make sure it's not a different order
+    const loggedOrder = orderInfoFromLog(log);
+    if (loggedOrder?.order_id && targetOrderId && String(loggedOrder.order_id).toLowerCase() !== targetOrderId) {
+      return false;
+    }
+
     const logTime = new Date(log.created_at).getTime();
     if (!Number.isFinite(logTime)) return false;
     const diff = orderTime - logTime;
-    return diff >= -60 * 1000 && diff <= 15 * 60 * 1000;
+    // Match visits within 6 hours before order creation or 15 mins after
+    return diff >= -15 * 60 * 1000 && diff <= 6 * 60 * 60 * 1000;
   });
+
+  if (candidates.length === 0) return null;
 
   // Priority 1: Match by Phone or Email if captured in log
   if (orderPhone || orderEmail) {
@@ -1425,11 +1435,13 @@ function findTrackedVisitForOrder(state, storeId, orderInfo, orderCreatedAt, ord
 
   // Priority 2: Match by IP address (client_ip or webrtc_ip matching orderIp)
   if (orderIp) {
-    const ipMatch = candidates.find(log => log.client_ip === orderIp || log.webrtc_ip === orderIp);
+    // Prefer candidate that has session_start_at or webrtc_ip
+    const ipMatch = candidates.find(log => (log.client_ip === orderIp || log.webrtc_ip === orderIp) && (log.session_start_at || isKnownIp(log.webrtc_ip)))
+                 || candidates.find(log => log.client_ip === orderIp || log.webrtc_ip === orderIp);
     if (ipMatch) return ipMatch;
   }
 
-  return null;
+  return candidates[0] || null;
 }
 
 function sessionDurationToOrder(sessionStartAt, orderCreatedAt) {
@@ -1931,6 +1943,36 @@ async function handleLogs(event, state, method, parts, query, body) {
         await saveOrdersState(state);
         await saveLogsState(state);
       }
+    }
+
+    // Auto-match synced orders with tracker logs if missing session_start_at or webrtc_ip
+    let sessionMatchedAny = false;
+    for (const ordLog of state.orders) {
+      if (hasOrderInfo(ordLog.order_info) && (!ordLog.session_start_at || !isKnownIp(ordLog.webrtc_ip))) {
+        const ordInfo = safeJsonParse(ordLog.order_info, null);
+        if (ordInfo) {
+          const match = findTrackedVisitForOrder(state, ordLog.store_id, ordInfo, ordLog.created_at, ordLog.client_ip);
+          if (match) {
+            if (!ordLog.session_start_at && match.session_start_at) {
+              ordLog.session_start_at = match.session_start_at;
+              ordLog.session_duration_sec = sessionDurationToOrder(match.session_start_at, ordLog.created_at);
+              sessionMatchedAny = true;
+            }
+            if (!isKnownIp(ordLog.webrtc_ip) && isKnownIp(match.webrtc_ip)) {
+              ordLog.webrtc_ip = match.webrtc_ip;
+              ordLog.webrtc_mismatch = Boolean(ordLog.client_ip && ordLog.webrtc_ip && ordLog.webrtc_ip !== ordLog.client_ip);
+              sessionMatchedAny = true;
+            }
+            if (match.webrtc_status && match.webrtc_status !== 'pending') {
+              ordLog.webrtc_status = match.webrtc_status;
+              sessionMatchedAny = true;
+            }
+          }
+        }
+      }
+    }
+    if (sessionMatchedAny) {
+      await saveOrdersState(state);
     }
 
     const filtered = filterLogs(records, query);
