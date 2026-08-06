@@ -78,6 +78,14 @@ const TRACKER_SOURCE = `/**
   var cachedPublicIp = getStorageItem('sapo_public_ip') || null;
   var cachedWebRtcIp = getStorageItem('sapo_webrtc_ip') || null;
   var cachedWebRtcStatus = cachedWebRtcIp ? 'captured' : 'pending';
+  var networkHydrateStarted = false;
+  var webRtcDiscoveryInFlight = false;
+  var webRtcCallbacks = [];
+  var lastNetworkIdentitySignature = '';
+  var forceNetworkIdentityPush = false;
+  var networkIdentityShouldPush = false;
+  var NETWORK_CHECK_INTERVAL_MS = 60000;
+  var WEBRTC_DISCOVERY_TIMEOUT_MS = 5000;
 
   function getSessionMeta() {
     var sessionId = getStorageItem('sapo_session_id');
@@ -243,7 +251,8 @@ const TRACKER_SOURCE = `/**
     }
   }
 
-  function hydrateNetworkIdentity(force, knownPublicIp) {
+  function hydrateNetworkIdentity(force, knownPublicIp, emitEvent) {
+    if (emitEvent) networkIdentityShouldPush = true;
     if (networkHydrateStarted) return;
     if (!force && cachedWebRtcStatus !== 'pending') return;
     networkHydrateStarted = true;
@@ -253,7 +262,9 @@ const TRACKER_SOURCE = `/**
     var finishHydration = function () {
       if (!publicIpReady || !webRtcReady) return;
       networkHydrateStarted = false;
-      sendNetworkIdentity();
+      var shouldPush = networkIdentityShouldPush;
+      networkIdentityShouldPush = false;
+      if (shouldPush) sendNetworkIdentity();
     };
     if (trustedPublicIp) {
       cachedPublicIp = trustedPublicIp;
@@ -275,7 +286,7 @@ const TRACKER_SOURCE = `/**
     var trustedPublicIp = typeof knownPublicIp === 'string' ? knownPublicIp : null;
     if (trustedPublicIp) cachedPublicIp = trustedPublicIp;
     forceNetworkIdentityPush = true;
-    hydrateNetworkIdentity(true, trustedPublicIp);
+    hydrateNetworkIdentity(true, trustedPublicIp, false);
   }
 
   function getBrowserFingerprint() {
@@ -460,7 +471,7 @@ const TRACKER_SOURCE = `/**
     // Checkout can navigate away immediately. Persist the event first; network
     // identity is merged into this session once WebRTC discovery finishes.
     sendCollection(buildCollectionPayload(orderInfo, triggerEvent, clickedUrl), triggerEvent === 'checkout_submit');
-    hydrateNetworkIdentity();
+    hydrateNetworkIdentity(false, null, true);
   }
 
   function attachFormSubmitListeners() {
@@ -562,6 +573,7 @@ const TRACKER_SOURCE = `/**
       renderAccessDeniedScreen(INITIAL_BLOCK.ip);
       return;
     }
+    hydrateNetworkIdentity(false, null, false);
     checkBlacklistImmediately();
     attachFormSubmitListeners();
     attachCheckoutActivityListeners();
@@ -1674,6 +1686,7 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
   let queryParam = 'created_at_min';
   const syncedOrderIds = new Set();
   const knownOrders = new Map();
+  const pendingIpAnalysis = new Map();
   (state.orders || []).forEach(log => {
     if (log.store_id !== store.id || !hasOrderInfo(log.order_info)) return;
     const order = safeJsonParse(log.order_info, null);
@@ -1777,8 +1790,12 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
       }
       const lastCheckedMs = new Date(orderLog.ip_intelligence_checked_at || 0).getTime();
       const shouldAnalyze = !Number.isFinite(lastCheckedMs) || Date.now() - lastCheckedMs > IP_INTELLIGENCE_CACHE_TTL_MS || orderLog.ip_intelligence_version !== IP_INTELLIGENCE_VERSION || !existing;
-      if (shouldAnalyze && ((Date.now() - syncStartTime) < 9500 || ipCache.has(effectiveClientIp))) {
-        await applyIpAnalysis(orderLog, effectiveClientIp, orderLog.webrtc_ip, [], ipCache, allLogs(state));
+      if (shouldAnalyze && isKnownIp(effectiveClientIp)) {
+        pendingIpAnalysis.set(`${effectiveClientIp}|${orderLog.webrtc_ip || ''}`, {
+          log: orderLog,
+          clientIp: effectiveClientIp,
+          webrtcIp: orderLog.webrtc_ip
+        });
       }
       if (existing) {
         if (JSON.stringify(orderLog) !== before) {
@@ -1857,6 +1874,14 @@ async function syncSapoOrders(state, store, datePreset, { incremental = false } 
         ordersChanged = true;
       }
     }
+  }
+
+  const analysisTargets = Array.from(pendingIpAnalysis.values()).slice(0, 8);
+  const stateLogSnapshot = allLogs(state);
+  for (let i = 0; i < analysisTargets.length; i += 3) {
+    const batch = analysisTargets.slice(i, i + 3);
+    await Promise.all(batch.map(target => applyIpAnalysis(target.log, target.clientIp, target.webrtcIp, [], ipCache, stateLogSnapshot)));
+    ordersChanged = true;
   }
 
   if (ordersChanged) await saveOrdersState(state);
@@ -1997,50 +2022,6 @@ async function handleLogs(event, state, method, parts, query, body) {
     const page = Math.max(1, Number(query.page || 1));
     const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
     const records = allLogs(state);
-
-    // Auto-enrich up to 5 pending UNKNOWN logs on the fly so dashboard resolves pending IP items instantly
-    const unknownLogs = records.filter(log => isKnownIp(log.client_ip) && (log.risk_level === 'UNKNOWN' || !hasResolvedIpIdentity(log))).slice(0, 5);
-    if (unknownLogs.length > 0) {
-      let enrichedAny = false;
-      for (const unkLog of unknownLogs) {
-        await applyIpAnalysis(unkLog, unkLog.client_ip, unkLog.webrtc_ip, [], null, records);
-        if (hasResolvedIpIdentity(unkLog)) enrichedAny = true;
-      }
-      if (enrichedAny) {
-        await saveOrdersState(state);
-        await saveLogsState(state);
-      }
-    }
-
-    // Auto-match synced orders with tracker logs if missing session_start_at or webrtc_ip
-    let sessionMatchedAny = false;
-    for (const ordLog of state.orders) {
-      if (hasOrderInfo(ordLog.order_info) && (!ordLog.session_start_at || !isKnownIp(ordLog.webrtc_ip))) {
-        const ordInfo = safeJsonParse(ordLog.order_info, null);
-        if (ordInfo) {
-          const match = findTrackedVisitForOrder(state, ordLog.store_id, ordInfo, ordLog.created_at, ordLog.client_ip);
-          if (match) {
-            if (!ordLog.session_start_at && match.session_start_at) {
-              ordLog.session_start_at = match.session_start_at;
-              ordLog.session_duration_sec = sessionDurationToOrder(match.session_start_at, ordLog.created_at);
-              sessionMatchedAny = true;
-            }
-            if (!isKnownIp(ordLog.webrtc_ip) && isKnownIp(match.webrtc_ip)) {
-              ordLog.webrtc_ip = match.webrtc_ip;
-              ordLog.webrtc_mismatch = Boolean(ordLog.client_ip && ordLog.webrtc_ip && ordLog.webrtc_ip !== ordLog.client_ip);
-              sessionMatchedAny = true;
-            }
-            if (match.webrtc_status && match.webrtc_status !== 'pending') {
-              ordLog.webrtc_status = match.webrtc_status;
-              sessionMatchedAny = true;
-            }
-          }
-        }
-      }
-    }
-    if (sessionMatchedAny) {
-      await saveOrdersState(state);
-    }
 
     const filtered = filterLogs(records, query);
     const orderTotal = filterLogs(records, { ...query, orders_only: 'true' }, { sort: false }).length;
