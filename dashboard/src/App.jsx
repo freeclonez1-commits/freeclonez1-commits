@@ -3,19 +3,24 @@ import {
   AlertTriangle,
   Ban,
   Calendar,
-  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Clipboard,
+  Copy,
+  Database,
   Eye,
   Globe2,
   KeyRound,
+  ListFilter,
   Loader2,
   Plus,
   RefreshCw,
   Search,
+  Settings,
   ShieldAlert,
   ShieldCheck,
   Store,
+  Trash2,
   Wifi,
   X
 } from 'lucide-react';
@@ -165,6 +170,12 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
     ? `<script>\nwindow.SAPO_TRACKER_CONFIG = { apiKey: '${selectedStore.api_key}' };\n</script>\n<script src="${window.location.origin}/client-tracker.js"></script>`
     : '';
 
+  const copyTracker = async () => {
+    if (!trackerSnippet) return;
+    await navigator.clipboard?.writeText(trackerSnippet);
+    notice('Da copy ma nhung tracker.');
+  };
+
   const save = async () => {
     setSaving(true);
     try {
@@ -190,47 +201,53 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
   };
 
   return (
-    <section className="bg-white border border-[#E5E5EA] rounded-lg p-4 space-y-4">
+    <section className="bg-white border border-[#DADCE0] rounded-lg p-4 space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-extrabold uppercase text-[#6E6E73]">Cua hang Sapo</h2>
-          <p className="text-xs text-[#86868B] mt-1">Dung de quet don va gan tracker WebRTC.</p>
+          <h2 className="text-sm font-extrabold uppercase text-[#5F6368]">Cua hang Sapo</h2>
+          <p className="text-xs text-[#5F6368] mt-1">Dung de quet don va gan tracker WebRTC.</p>
         </div>
-        <Store className="w-5 h-5 text-[#0071E3]" />
+        <Store className="w-5 h-5 text-[#1A73E8]" />
       </div>
       <select
         value={selectedStoreId}
         onChange={(event) => setSelectedStoreId(event.target.value)}
-        className="w-full h-10 rounded-lg border border-[#D1D1D6] px-3 text-sm font-semibold"
+        className="w-full h-10 rounded-lg border border-[#DADCE0] px-3 text-sm font-semibold outline-none focus:border-[#1A73E8]"
       >
         {stores.map(store => <option key={store.id} value={store.id}>{store.store_name} - {store.mysapo_domain}</option>)}
         {!stores.length && <option value="">Chua co store</option>}
       </select>
 
       <div className="grid grid-cols-1 gap-2">
-        <input className="h-10 rounded-lg border border-[#D1D1D6] px-3 text-sm" placeholder="Ten store" value={form.store_name} onChange={e => setForm({ ...form, store_name: e.target.value })} />
-        <input className="h-10 rounded-lg border border-[#D1D1D6] px-3 text-sm" placeholder="ten-shop.mysapo.net" value={form.mysapo_domain} onChange={e => setForm({ ...form, mysapo_domain: e.target.value })} />
-        <input className="h-10 rounded-lg border border-[#D1D1D6] px-3 text-sm" placeholder="API key" value={form.api_key} onChange={e => setForm({ ...form, api_key: e.target.value })} />
-        <input className="h-10 rounded-lg border border-[#D1D1D6] px-3 text-sm" placeholder="API secret" value={form.api_secret} onChange={e => setForm({ ...form, api_secret: e.target.value })} />
+        <input className="h-10 rounded-lg border border-[#DADCE0] px-3 text-sm outline-none focus:border-[#1A73E8]" placeholder="Ten store" value={form.store_name} onChange={e => setForm({ ...form, store_name: e.target.value })} />
+        <input className="h-10 rounded-lg border border-[#DADCE0] px-3 text-sm outline-none focus:border-[#1A73E8]" placeholder="ten-shop.mysapo.net" value={form.mysapo_domain} onChange={e => setForm({ ...form, mysapo_domain: e.target.value })} />
+        <input className="h-10 rounded-lg border border-[#DADCE0] px-3 text-sm outline-none focus:border-[#1A73E8]" placeholder="API key" value={form.api_key} onChange={e => setForm({ ...form, api_key: e.target.value })} />
+        <input className="h-10 rounded-lg border border-[#DADCE0] px-3 text-sm outline-none focus:border-[#1A73E8]" placeholder="API secret" value={form.api_secret} onChange={e => setForm({ ...form, api_secret: e.target.value })} />
       </div>
       <div className="flex gap-2">
-        <button onClick={save} disabled={saving} className="flex-1 h-10 rounded-lg bg-[#0071E3] text-white font-bold text-sm flex items-center justify-center gap-2">
+        <button onClick={save} disabled={saving} className="flex-1 h-10 rounded-lg bg-[#1A73E8] text-white font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-60">
           {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
           {selectedStore ? 'Cap nhat' : 'Them store'}
         </button>
         {selectedStore && (
-          <button onClick={() => testStoreConnection(selectedStore.id).then(res => notice(`Ket noi OK: ${res.order_count || 0} don`)).catch(err => notice(err.response?.data?.message || 'Test loi', 'error'))} className="h-10 px-3 rounded-lg bg-[#F2F2F7] font-bold text-sm">
+          <button onClick={() => testStoreConnection(selectedStore.id).then(res => notice(`Ket noi OK: ${res.order_count || 0} don`)).catch(err => notice(err.response?.data?.message || 'Test loi', 'error'))} className="h-10 px-3 rounded-lg bg-[#F1F3F4] font-bold text-sm">
             Test
           </button>
         )}
       </div>
       {selectedStore && (
         <div className="space-y-2">
-          <div className="text-xs font-bold text-[#6E6E73]">Ma nhung tracker</div>
-          <textarea readOnly value={trackerSnippet} className="w-full h-28 rounded-lg border border-[#D1D1D6] p-3 text-xs font-mono bg-[#F5F5F7]" />
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-bold text-[#5F6368]">Ma nhung tracker</div>
+            <button onClick={copyTracker} className="h-8 px-2 rounded-lg bg-[#E8F0FE] text-[#1A73E8] text-xs font-extrabold inline-flex items-center gap-1">
+              <Copy className="w-3.5 h-3.5" />
+              Copy
+            </button>
+          </div>
+          <textarea readOnly value={trackerSnippet} className="w-full h-28 rounded-lg border border-[#DADCE0] p-3 text-xs font-mono bg-[#F8FAFD]" />
           <button
             onClick={() => deleteStore(selectedStore.id).then(onStoresChanged)}
-            className="text-xs font-bold text-[#FF3B30]"
+            className="text-xs font-bold text-[#D93025]"
           >
             Xoa store nay
           </button>
@@ -304,6 +321,106 @@ function Info({ label, value, mono = false, tone = 'gray' }) {
   );
 }
 
+function StatCard({ icon: Icon, label, value, tone = 'blue' }) {
+  const tones = {
+    blue: 'bg-[#E8F0FE] text-[#1A73E8]',
+    red: 'bg-[#FCE8E6] text-[#D93025]',
+    green: 'bg-[#E6F4EA] text-[#188038]',
+    gray: 'bg-[#F1F3F4] text-[#3C4043]'
+  };
+  return (
+    <div className="rounded-lg border border-[#DADCE0] bg-white p-4">
+      <div className="flex items-center gap-3">
+        <div className={cn('w-10 h-10 rounded-lg flex items-center justify-center', tones[tone])}>
+          <Icon className="w-5 h-5" />
+        </div>
+        <div>
+          <div className="text-xs font-bold uppercase text-[#5F6368]">{label}</div>
+          <div className="text-2xl font-extrabold tracking-normal text-[#202124]">{value}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BlacklistPanel({ blacklist, onAddIp, onRemoveIp }) {
+  const [manualIp, setManualIp] = useState('');
+  const [reason, setReason] = useState('');
+
+  const submit = async (event) => {
+    event.preventDefault();
+    await onAddIp(manualIp, reason || 'Chan thu cong tu dashboard');
+    setManualIp('');
+    setReason('');
+  };
+
+  return (
+    <section className="bg-white border border-[#DADCE0] rounded-lg overflow-hidden">
+      <div className="p-5 border-b border-[#DADCE0] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-extrabold text-[#202124]">Danh sach den</h2>
+          <p className="text-sm text-[#5F6368] mt-1">IP trong danh sach nay se bi tracker chan khi truy cap shop.</p>
+        </div>
+        <form onSubmit={submit} className="grid grid-cols-1 sm:grid-cols-[180px_1fr_auto] gap-2 w-full lg:max-w-2xl">
+          <input
+            value={manualIp}
+            onChange={(event) => setManualIp(event.target.value)}
+            placeholder="Nhap IP can chan"
+            className="h-10 rounded-lg border border-[#DADCE0] px-3 text-sm outline-none focus:border-[#1A73E8]"
+          />
+          <input
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="Ly do"
+            className="h-10 rounded-lg border border-[#DADCE0] px-3 text-sm outline-none focus:border-[#1A73E8]"
+          />
+          <button className="h-10 px-4 rounded-lg bg-[#D93025] text-white font-extrabold inline-flex items-center justify-center gap-2">
+            <Ban className="w-4 h-4" />
+            Them
+          </button>
+        </form>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[760px] text-sm">
+          <thead className="bg-[#F8FAFD] text-[#5F6368]">
+            <tr>
+              <th className="text-left p-3 font-extrabold">IP</th>
+              <th className="text-left p-3 font-extrabold">Ly do</th>
+              <th className="text-left p-3 font-extrabold">Nguon</th>
+              <th className="text-left p-3 font-extrabold">Thoi gian</th>
+              <th className="text-right p-3 font-extrabold">Hanh dong</th>
+            </tr>
+          </thead>
+          <tbody>
+            {!blacklist.length && (
+              <tr>
+                <td colSpan="5" className="p-10 text-center text-[#5F6368] font-bold">Chua co IP nao bi chan.</td>
+              </tr>
+            )}
+            {blacklist.map(item => (
+              <tr key={item.id || item.ip} className="border-t border-[#DADCE0]">
+                <td className="p-3 font-mono font-extrabold text-[#D93025]">{item.ip}</td>
+                <td className="p-3 text-[#3C4043]">{item.reason || '--'}</td>
+                <td className="p-3 text-[#5F6368]">{item.source || 'manual'}</td>
+                <td className="p-3 font-mono text-[#5F6368]">{formatDate(item.created_at)}</td>
+                <td className="p-3 text-right">
+                  <button
+                    onClick={() => onRemoveIp(item.ip)}
+                    className="h-9 px-3 rounded-lg bg-[#F1F3F4] text-[#3C4043] font-extrabold inline-flex items-center gap-2"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Xoa
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 export default function App() {
   const [adminKey, setAdminKey] = useState(() => sessionStorage.getItem('sapo_dashboard_password_v2') || '');
   const [stores, setStores] = useState([]);
@@ -312,6 +429,7 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [orders, setOrders] = useState([]);
   const [blacklist, setBlacklist] = useState([]);
+  const [activeView, setActiveView] = useState('orders');
   const [pagination, setPagination] = useState({ page: 1, limit: 30, total: 0, totalPages: 1 });
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -414,6 +532,26 @@ export default function App() {
     }
   };
 
+  const addManualBlacklist = async (ip, reason) => {
+    try {
+      await addToBlacklist(ip, reason);
+      notify('Da them IP vao danh sach den.');
+      await Promise.all([loadBlacklist(), loadOrders(pagination.page)]);
+    } catch (err) {
+      notify(err.response?.data?.message || 'Khong them duoc IP.', 'error');
+    }
+  };
+
+  const removeBlacklistIp = async (ip) => {
+    try {
+      await removeFromBlacklist(ip);
+      notify('Da xoa IP khoi danh sach den.');
+      await Promise.all([loadBlacklist(), loadOrders(pagination.page)]);
+    } catch (err) {
+      notify(err.response?.data?.message || 'Khong xoa duoc IP.', 'error');
+    }
+  };
+
   useEffect(() => {
     loadStores().catch(() => {});
   }, [loadStores]);
@@ -436,22 +574,44 @@ export default function App() {
   if (!adminKey) return <AdminGate onUnlock={setAdminKey} />;
 
   return (
-    <div className="min-h-screen bg-[#F8FAFD] text-[#202124]">
+    <div className="min-h-screen bg-[#F8FAFD] text-[#202124] font-sans">
       <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-[#DADCE0]">
-        <div className="max-w-[1680px] mx-auto px-4 py-3 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-lg bg-[#1A73E8] text-white flex items-center justify-center"><ShieldCheck className="w-6 h-6" /></div>
+        <div className="max-w-[1680px] mx-auto px-4 py-3 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-11 h-11 rounded-lg bg-[#1A73E8] text-white flex items-center justify-center shrink-0"><ShieldCheck className="w-6 h-6" /></div>
             <div>
               <h1 className="text-lg font-extrabold">Sapo IP Guard Clean</h1>
               <p className="text-xs text-[#5F6368]">Quet don, IP ket noi va IP WebRTC</p>
             </div>
           </div>
-          <button
-            onClick={() => { sessionStorage.removeItem('sapo_dashboard_password_v2'); setAdminKey(''); }}
-            className="h-9 px-3 rounded-lg bg-[#F1F3F4] text-sm font-bold"
-          >
-            Khoa
-          </button>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+            <nav className="inline-flex items-center gap-1 rounded-lg bg-[#F1F3F4] p-1">
+              {[
+                { key: 'orders', label: 'Don hang', icon: Database },
+                { key: 'blacklist', label: 'Danh sach den', icon: Ban },
+                { key: 'settings', label: 'Cai dat', icon: Settings }
+              ].map(item => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.key}
+                    onClick={() => setActiveView(item.key)}
+                    className={cn('h-9 px-3 rounded-lg text-sm font-extrabold inline-flex items-center gap-2', activeView === item.key ? 'bg-white text-[#1A73E8] shadow-sm' : 'text-[#3C4043]')}
+                  >
+                    <Icon className="w-4 h-4" />
+                    {item.label}
+                  </button>
+                );
+              })}
+            </nav>
+            <button
+              onClick={() => { sessionStorage.removeItem('sapo_dashboard_password_v2'); setAdminKey(''); }}
+              className="h-10 px-3 rounded-lg bg-[#F1F3F4] text-sm font-bold inline-flex items-center justify-center gap-2"
+            >
+              <KeyRound className="w-4 h-4" />
+              Khoa
+            </button>
+          </div>
         </div>
       </header>
 
@@ -461,150 +621,182 @@ export default function App() {
         </div>
       )}
 
-      <main className="max-w-[1680px] mx-auto p-4 grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-4">
-        <aside className="space-y-4">
-          <StorePanel
-            stores={stores}
-            selectedStoreId={selectedStoreId}
-            setSelectedStoreId={setSelectedStoreId}
-            onStoresChanged={loadStores}
-            notice={notify}
-          />
-          <section className="bg-white border border-[#E5E5EA] rounded-lg p-4 grid grid-cols-2 gap-3">
-            <Info label="Don dang hien" value={String(pagination.total || 0)} />
-            <Info label="Canh bao" value={String(summary.high)} />
-            <Info label="Co WebRTC" value={String(summary.webrtc)} />
-            <Info label="Da chan trong bang" value={String(summary.blocked)} />
-            <Info label="Blacklist" value={String(blacklist.length)} />
-            <Info label="Preset" value={DATE_PRESETS[preset].label} />
-          </section>
-        </aside>
-
-        <section className="bg-white border border-[#DADCE0] rounded-lg overflow-hidden">
-          <div className="p-4 border-b border-[#DADCE0] space-y-3">
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-              <div>
-                <h2 className="text-xl font-extrabold">Danh sach don hang</h2>
-                <p className="text-sm text-[#5F6368]">Data chi cap nhat khi bam nut quet don.</p>
-              </div>
-              <button
-                onClick={runSync}
-                disabled={syncing}
-                className="h-11 px-4 rounded-lg bg-[#188038] text-white font-extrabold flex items-center justify-center gap-2"
-              >
-                {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                Quet don Sapo
-              </button>
-            </div>
-            <div className="flex flex-col lg:flex-row gap-3">
-              <div className="flex gap-2">
-                {Object.entries(DATE_PRESETS).map(([key, item]) => (
-                  <button
-                    key={key}
-                    onClick={() => setPreset(key)}
-                    className={cn('h-10 px-4 rounded-lg text-sm font-extrabold', preset === key ? 'bg-[#1A73E8] text-white' : 'bg-[#F1F3F4] text-[#202124]')}
-                  >
-                    <Calendar className="w-4 h-4 inline mr-1" />
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-              <div className="relative flex-1">
-                <Search className="w-4 h-4 absolute left-3 top-3 text-[#5F6368]" />
-                <input
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  onKeyDown={(event) => { if (event.key === 'Enter') loadOrders(1); }}
-                  placeholder="Tim ma don, ten, phone, IP, ISP..."
-                  className="w-full h-10 rounded-lg border border-[#DADCE0] pl-9 pr-3 text-sm outline-none focus:border-[#1A73E8]"
-                />
-              </div>
-              <button onClick={() => loadOrders(1)} className="h-10 px-4 rounded-lg bg-[#F1F3F4] font-bold text-sm">Tai lai</button>
-            </div>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[1080px] text-sm">
-              <thead className="bg-[#F8FAFD] text-[#5F6368]">
-                <tr>
-                  <th className="text-left p-3 font-extrabold">Thoi gian</th>
-                  <th className="text-left p-3 font-extrabold">Don & khach</th>
-                  <th className="text-left p-3 font-extrabold">IP ket noi</th>
-                  <th className="text-left p-3 font-extrabold">IP WebRTC</th>
-                  <th className="text-left p-3 font-extrabold">Vi tri / ISP</th>
-                  <th className="text-left p-3 font-extrabold">Trang thai</th>
-                  <th className="text-right p-3 font-extrabold">Chi tiet</th>
-                  <th className="text-right p-3 font-extrabold">Chan IP</th>
-                </tr>
-              </thead>
-              <tbody>
-                {loading && (
-                  <tr><td colSpan="8" className="p-10 text-center text-[#86868B] font-bold"><Loader2 className="w-5 h-5 animate-spin inline mr-2" />Dang tai...</td></tr>
-                )}
-                {!loading && orders.length === 0 && (
-                  <tr><td colSpan="8" className="p-10 text-center text-[#86868B] font-bold">Chua co don trong khoang nay. Bam Quet don Sapo.</td></tr>
-                )}
-                {!loading && orders.map(order => {
-                  const info = order.order_info || {};
-                  const risk = riskInfo(order);
-                  const RiskIcon = risk.icon;
-                  return (
-                    <tr key={order.id} className={cn('border-t border-[#DADCE0]', (order.risk_level === 'HIGH_RISK' || order.is_blacklisted) && 'bg-[#FCE8E6]/45')}>
-                      <td className="p-3 font-mono font-bold">{formatDate(order.created_at)}</td>
-                      <td className="p-3">
-                        <div className="font-extrabold text-[#1A73E8]">{info.order_id || order.id}</div>
-                        <div className="font-bold">{info.customer_name || '--'}</div>
-                        <div className="text-xs text-[#5F6368]">{info.phone || '--'}</div>
-                      </td>
-                      <td className="p-3">
-                        <div className={cn('inline-flex items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order) ? 'bg-[#FCE8E6] text-[#D93025]' : 'bg-[#F1F3F4]')}>
-                          <Wifi className={cn('w-4 h-4', isFakeConnection(order) ? 'text-[#D93025]' : 'text-[#1A73E8]')} />
-                          {ipText(order.client_ip)}
-                        </div>
-                        <div className={cn('mt-1 text-[11px] font-bold', isFakeConnection(order) ? 'text-[#D93025]' : 'text-[#5F6368]')}>{connectionLabel(order)}</div>
-                      </td>
-                      <td className="p-3">
-                        <div className={cn('font-mono font-extrabold', order.webrtc_mismatch && 'text-[#D93025]')}>{ipText(order.webrtc_ip)}</div>
-                        <div className={cn('text-xs', order.webrtc_mismatch ? 'text-[#D93025] font-bold' : 'text-[#5F6368]')}>{webrtcLabel(order)}</div>
-                      </td>
-                      <td className="p-3 max-w-[260px]">
-                        <div className="font-bold truncate flex items-center gap-1"><Globe2 className="w-4 h-4" />{networkText(order)}</div>
-                        <div className="text-xs text-[#5F6368] truncate">{ispText(order)}</div>
-                      </td>
-                      <td className="p-3">
-                        <div className={cn('inline-flex items-center gap-2 rounded-full px-3 py-1 font-extrabold text-xs', risk.tone === 'red' ? 'bg-[#FCE8E6] text-[#D93025]' : risk.tone === 'green' ? 'bg-[#E6F4EA] text-[#188038]' : 'bg-[#F1F3F4] text-[#5F6368]')}>
-                          <RiskIcon className="w-4 h-4" />
-                          {risk.label}
-                        </div>
-                      </td>
-                      <td className="p-3 text-right">
-                        <button onClick={() => setSelectedOrder(order)} className="h-9 px-3 rounded-lg bg-[#E8F0FE] text-[#1A73E8] font-extrabold inline-flex items-center gap-1">
-                          <Eye className="w-4 h-4" />
-                          Xem
-                        </button>
-                      </td>
-                      <td className="p-3 text-right">
-                        <button
-                          onClick={() => order.is_blacklisted ? unblockOrder(order) : blockOrder(order)}
-                          className={cn('h-9 px-3 rounded-lg font-extrabold inline-flex items-center gap-1', order.is_blacklisted ? 'bg-[#F1F3F4] text-[#3C4043]' : 'bg-[#FCE8E6] text-[#D93025]')}
-                        >
-                          <Ban className="w-4 h-4" />
-                          {order.is_blacklisted ? 'Bo chan' : 'Chan'}
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="p-4 border-t border-[#DADCE0] flex items-center justify-between">
-            <button disabled={pagination.page <= 1} onClick={() => loadOrders(pagination.page - 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40"><ChevronLeft className="w-4 h-4 inline" /> Truoc</button>
-            <div className="text-sm font-bold text-[#5F6368]">Trang {pagination.page} / {pagination.totalPages} - {pagination.total} don</div>
-            <button disabled={pagination.page >= pagination.totalPages} onClick={() => loadOrders(pagination.page + 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40">Sau <ChevronRight className="w-4 h-4 inline" /></button>
-          </div>
+      <main className="max-w-[1680px] mx-auto p-4 space-y-4">
+        <section className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+          <StatCard icon={Database} label="Don dang hien" value={pagination.total || 0} />
+          <StatCard icon={ShieldAlert} label="Canh bao" value={summary.high} tone="red" />
+          <StatCard icon={Wifi} label="Co WebRTC" value={summary.webrtc} tone="blue" />
+          <StatCard icon={Ban} label="Da chan" value={summary.blocked} tone="red" />
+          <StatCard icon={ListFilter} label="Blacklist" value={blacklist.length} tone="gray" />
         </section>
+
+        {activeView === 'settings' && (
+          <div className="grid grid-cols-1 xl:grid-cols-[420px_1fr] gap-4">
+            <StorePanel
+              stores={stores}
+              selectedStoreId={selectedStoreId}
+              setSelectedStoreId={setSelectedStoreId}
+              onStoresChanged={loadStores}
+              notice={notify}
+            />
+            <section className="bg-white border border-[#DADCE0] rounded-lg p-5">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-lg bg-[#E8F0FE] text-[#1A73E8] flex items-center justify-center">
+                  <Clipboard className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-extrabold">Cai dat van hanh</h2>
+                  <p className="text-sm text-[#5F6368]">Quet don chi chay khi bam nut, tracker tu ghi IP va WebRTC tren shop.</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <Info label="Preset hien tai" value={DATE_PRESETS[preset].label} />
+                <Info label="Store dang chon" value={selectedStore?.store_name || '--'} />
+                <Info label="Domain" value={selectedStore?.mysapo_domain || '--'} mono />
+                <Info label="Trang thai tracker" value={selectedStore ? 'San sang nhung vao theme' : 'Chua co store'} tone={selectedStore ? 'gray' : 'red'} />
+              </div>
+            </section>
+          </div>
+        )}
+
+        {activeView === 'blacklist' && (
+          <BlacklistPanel
+            blacklist={blacklist}
+            onAddIp={addManualBlacklist}
+            onRemoveIp={removeBlacklistIp}
+          />
+        )}
+
+        {activeView === 'orders' && (
+          <section className="bg-white border border-[#DADCE0] rounded-lg overflow-hidden">
+            <div className="p-4 border-b border-[#DADCE0] space-y-3">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-extrabold">Danh sach don hang</h2>
+                  <p className="text-sm text-[#5F6368]">Data chi cap nhat khi bam nut quet don.</p>
+                </div>
+                <button
+                  onClick={runSync}
+                  disabled={syncing}
+                  className="h-11 px-4 rounded-lg bg-[#188038] text-white font-extrabold flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  Quet don Sapo
+                </button>
+              </div>
+              <div className="flex flex-col xl:flex-row gap-3">
+                <div className="flex gap-2 overflow-x-auto pb-1">
+                  {Object.entries(DATE_PRESETS).map(([key, item]) => (
+                    <button
+                      key={key}
+                      onClick={() => setPreset(key)}
+                      className={cn('h-10 px-4 rounded-lg text-sm font-extrabold inline-flex items-center gap-2 whitespace-nowrap', preset === key ? 'bg-[#1A73E8] text-white' : 'bg-[#F1F3F4] text-[#202124]')}
+                    >
+                      <Calendar className="w-4 h-4" />
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 absolute left-3 top-3 text-[#5F6368]" />
+                  <input
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === 'Enter') loadOrders(1); }}
+                    placeholder="Tim ma don, ten, phone, IP, ISP..."
+                    className="w-full h-10 rounded-lg border border-[#DADCE0] pl-9 pr-3 text-sm outline-none focus:border-[#1A73E8]"
+                  />
+                </div>
+                <button onClick={() => loadOrders(1)} className="h-10 px-4 rounded-lg bg-[#F1F3F4] font-bold text-sm inline-flex items-center justify-center gap-2">
+                  <RefreshCw className="w-4 h-4" />
+                  Tai lai
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[1180px] text-sm">
+                <thead className="bg-[#F8FAFD] text-[#5F6368]">
+                  <tr>
+                    <th className="text-left p-3 font-extrabold">Thoi gian</th>
+                    <th className="text-left p-3 font-extrabold">Don & khach</th>
+                    <th className="text-left p-3 font-extrabold">IP ket noi</th>
+                    <th className="text-left p-3 font-extrabold">IP WebRTC</th>
+                    <th className="text-left p-3 font-extrabold">Vi tri / ISP</th>
+                    <th className="text-left p-3 font-extrabold">Trang thai</th>
+                    <th className="text-right p-3 font-extrabold">Chi tiet</th>
+                    <th className="text-right p-3 font-extrabold">Chan IP</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading && (
+                    <tr><td colSpan="8" className="p-10 text-center text-[#5F6368] font-bold"><Loader2 className="w-5 h-5 animate-spin inline mr-2" />Dang tai...</td></tr>
+                  )}
+                  {!loading && orders.length === 0 && (
+                    <tr><td colSpan="8" className="p-10 text-center text-[#5F6368] font-bold">Chua co don trong khoang nay. Bam Quet don Sapo.</td></tr>
+                  )}
+                  {!loading && orders.map(order => {
+                    const info = order.order_info || {};
+                    const risk = riskInfo(order);
+                    const RiskIcon = risk.icon;
+                    return (
+                      <tr key={order.id} className={cn('border-t border-[#DADCE0] hover:bg-[#F8FAFD]', (order.risk_level === 'HIGH_RISK' || order.is_blacklisted) && 'bg-[#FCE8E6]/45 hover:bg-[#FCE8E6]/60')}>
+                        <td className="p-3 font-mono font-bold whitespace-nowrap">{formatDate(order.created_at)}</td>
+                        <td className="p-3">
+                          <div className="font-extrabold text-[#1A73E8]">{info.order_id || order.id}</div>
+                          <div className="font-bold">{info.customer_name || '--'}</div>
+                          <div className="text-xs text-[#5F6368]">{info.phone || '--'}</div>
+                        </td>
+                        <td className="p-3">
+                          <div className={cn('inline-flex items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order) ? 'bg-[#FCE8E6] text-[#D93025]' : 'bg-[#F1F3F4]')}>
+                            <Wifi className={cn('w-4 h-4', isFakeConnection(order) ? 'text-[#D93025]' : 'text-[#1A73E8]')} />
+                            {ipText(order.client_ip)}
+                          </div>
+                          <div className={cn('mt-1 text-[11px] font-bold', isFakeConnection(order) ? 'text-[#D93025]' : 'text-[#5F6368]')}>{connectionLabel(order)}</div>
+                        </td>
+                        <td className="p-3">
+                          <div className={cn('font-mono font-extrabold', order.webrtc_mismatch && 'text-[#D93025]')}>{ipText(order.webrtc_ip)}</div>
+                          <div className={cn('text-xs', order.webrtc_mismatch ? 'text-[#D93025] font-bold' : 'text-[#5F6368]')}>{webrtcLabel(order)}</div>
+                        </td>
+                        <td className="p-3 max-w-[280px]">
+                          <div className="font-bold truncate flex items-center gap-1"><Globe2 className="w-4 h-4 shrink-0" />{networkText(order)}</div>
+                          <div className="text-xs text-[#5F6368] truncate">{ispText(order)}</div>
+                        </td>
+                        <td className="p-3">
+                          <div className={cn('inline-flex items-center gap-2 rounded-full px-3 py-1 font-extrabold text-xs', risk.tone === 'red' ? 'bg-[#FCE8E6] text-[#D93025]' : risk.tone === 'green' ? 'bg-[#E6F4EA] text-[#188038]' : 'bg-[#F1F3F4] text-[#5F6368]')}>
+                            <RiskIcon className="w-4 h-4" />
+                            {risk.label}
+                          </div>
+                        </td>
+                        <td className="p-3 text-right">
+                          <button onClick={() => setSelectedOrder(order)} className="h-9 px-3 rounded-lg bg-[#E8F0FE] text-[#1A73E8] font-extrabold inline-flex items-center gap-1">
+                            <Eye className="w-4 h-4" />
+                            Xem
+                          </button>
+                        </td>
+                        <td className="p-3 text-right">
+                          <button
+                            onClick={() => order.is_blacklisted ? unblockOrder(order) : blockOrder(order)}
+                            className={cn('h-9 px-3 rounded-lg font-extrabold inline-flex items-center gap-1', order.is_blacklisted ? 'bg-[#F1F3F4] text-[#3C4043]' : 'bg-[#FCE8E6] text-[#D93025]')}
+                          >
+                            <Ban className="w-4 h-4" />
+                            {order.is_blacklisted ? 'Bo chan' : 'Chan'}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="p-4 border-t border-[#DADCE0] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <button disabled={pagination.page <= 1} onClick={() => loadOrders(pagination.page - 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40"><ChevronLeft className="w-4 h-4 inline" /> Truoc</button>
+              <div className="text-sm font-bold text-[#5F6368] text-center">Trang {pagination.page} / {pagination.totalPages} - {pagination.total} don</div>
+              <button disabled={pagination.page >= pagination.totalPages} onClick={() => loadOrders(pagination.page + 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40">Sau <ChevronRight className="w-4 h-4 inline" /></button>
+            </div>
+          </section>
+        )}
       </main>
 
       <OrderDetail

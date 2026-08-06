@@ -36,15 +36,24 @@ const TRACKER_SOURCE = `(() => {
 
   function renderBlocked(ip, reason) {
     try {
+      const host = location.hostname || 'this site';
       document.documentElement.innerHTML =
-        '<head><title>Access blocked</title><meta name="viewport" content="width=device-width,initial-scale=1"></head>' +
-        '<body style="margin:0;font-family:Arial,sans-serif;background:#f8fafd;color:#202124;display:flex;min-height:100vh;align-items:center;justify-content:center">' +
-        '<main style="max-width:520px;margin:24px;padding:28px;border:1px solid #dadce0;border-radius:8px;background:white;box-shadow:0 1px 3px rgba(60,64,67,.18)">' +
-        '<div style="width:48px;height:48px;border-radius:50%;background:#fce8e6;color:#d93025;display:flex;align-items:center;justify-content:center;font-size:24px;margin-bottom:16px">!</div>' +
-        '<h1 style="font-size:22px;line-height:1.25;margin:0 0 8px;font-weight:700">Truy cap bi chan</h1>' +
-        '<p style="font-size:14px;color:#5f6368;margin:0 0 16px">Dia chi IP cua ban nam trong danh sach chan cua cua hang.</p>' +
-        '<div style="font-family:Consolas,monospace;background:#f1f3f4;border-radius:6px;padding:10px 12px;font-weight:700">' + String(ip || 'unknown') + '</div>' +
-        '<p style="font-size:12px;color:#80868b;margin:12px 0 0">' + String(reason || 'Blocked by Sapo IP Guard') + '</p>' +
+        '<head><title>Hmm... can\\'t reach this page</title><meta name="viewport" content="width=device-width,initial-scale=1"></head>' +
+        '<body style="margin:0;background:#fff;color:#000;font-family:Arial,Segoe UI,sans-serif">' +
+        '<main style="margin-left:11vw;margin-top:18vh;max-width:620px">' +
+        '<div style="width:100px;height:60px;margin:0 0 54px 14px;position:relative">' +
+        '<div style="position:absolute;left:0;top:22px;width:98px;height:28px;border-radius:22px;background:linear-gradient(#edf3f8,#b5c6d5);box-shadow:0 3px 8px rgba(0,0,0,.14)"></div>' +
+        '<div style="position:absolute;left:18px;top:0;width:46px;height:46px;border-radius:50%;background:linear-gradient(#edf3f8,#c3d2df)"></div>' +
+        '<div style="position:absolute;left:58px;top:18px;width:28px;height:28px;border-radius:50%;background:linear-gradient(#edf3f8,#b2c4d3)"></div>' +
+        '<div style="position:absolute;left:30px;top:30px;color:#4b5560;font-size:22px;letter-spacing:8px;font-weight:700">...</div>' +
+        '<div style="position:absolute;left:20px;top:68px;width:10px;height:10px;border-radius:50%;background:#b7c7d6"></div>' +
+        '<div style="position:absolute;left:43px;top:65px;width:16px;height:16px;border-radius:50%;background:#b7c7d6"></div>' +
+        '</div>' +
+        '<h1 style="font-size:32px;line-height:1.2;margin:0 0 24px;font-weight:600">Hmm... can\\'t reach this page</h1>' +
+        '<p style="font-size:16px;margin:0 0 22px;font-weight:600">Check if there is a typo in ' + host + '.</p>' +
+        '<p style="font-size:11px;margin:0 0 24px;color:#5f6368;letter-spacing:.02em">DNS_PROBE_FINISHED_NXDOMAIN</p>' +
+        '<button onclick="location.reload()" style="height:40px;padding:0 18px;border:0;border-radius:3px;background:#0078d4;color:white;font-size:15px;font-weight:600;cursor:pointer">Refresh</button>' +
+        '<p style="margin-top:28px;color:#6b7280;font-size:12px">Blocked IP: <span style="font-family:Consolas,monospace">' + String(ip || 'unknown') + '</span> · ' + String(reason || 'Blocked by Sapo IP Guard') + '</p>' +
         '</main></body>';
     } catch (_) {}
   }
