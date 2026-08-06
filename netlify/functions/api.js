@@ -49,29 +49,46 @@ const TRACKER_SOURCE = `/**
   var lastInteractionAt = 0;
   var EMBEDDED_BLACKLIST = Array.isArray(window.__SAPO_IP_GUARD_BLACKLIST) ? window.__SAPO_IP_GUARD_BLACKLIST : [];
   var INITIAL_BLOCK = window.__SAPO_IP_GUARD_INITIAL_BLOCK || null;
-  var cachedPublicIp = null;
-  var cachedWebRtcIp = null;
-  var cachedWebRtcStatus = 'pending';
-  var networkHydrateStarted = false;
-  var webRtcDiscoveryInFlight = false;
-  var webRtcCallbacks = [];
-  var lastNetworkIdentitySignature = '';
-  var forceNetworkIdentityPush = false;
-  var NETWORK_CHECK_INTERVAL_MS = 60000;
-  var WEBRTC_DISCOVERY_TIMEOUT_MS = 5000;
+  function getStorageItem(key) {
+    try {
+      var val = localStorage.getItem(key) || sessionStorage.getItem(key);
+      if (val) return val;
+      var match = document.cookie.match(new RegExp('(?:^|; )' + key + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : null;
+    } catch(e) { return null; }
+  }
+
+  function setStorageItem(key, val) {
+    try {
+      localStorage.setItem(key, val);
+      sessionStorage.setItem(key, val);
+      document.cookie = key + '=' + encodeURIComponent(val) + '; path=/; max-age=86400';
+    } catch(e) {}
+  }
+
+  function removeStorageItem(key) {
+    try {
+      localStorage.removeItem(key);
+      sessionStorage.removeItem(key);
+      document.cookie = key + '=; path=/; max-age=0';
+    } catch(e) {}
+  }
+
+  var cachedPublicIp = getStorageItem('sapo_public_ip') || null;
+  var cachedWebRtcIp = getStorageItem('sapo_webrtc_ip') || null;
+  var cachedWebRtcStatus = cachedWebRtcIp ? 'captured' : 'pending';
 
   function getSessionMeta() {
-    var sessionId = sessionStorage.getItem('sapo_session_id');
-    var sessionStart = sessionStorage.getItem('sapo_session_start');
+    var sessionId = getStorageItem('sapo_session_id');
+    var sessionStart = getStorageItem('sapo_session_start');
     var now = Date.now();
     var sessionStartMs = sessionStart ? parseInt(sessionStart, 10) : NaN;
 
-    // Reset session if missing, unparseable, idle for >30 mins, or >3 hours old
-    if (!sessionId || !sessionStart || !Number.isFinite(sessionStartMs) || (lastInteractionAt > 0 && now - lastInteractionAt > 30 * 60 * 1000) || (now - sessionStartMs > 3 * 60 * 60 * 1000)) {
+    if (!sessionId || !sessionStart || !Number.isFinite(sessionStartMs) || (now - sessionStartMs > 12 * 60 * 60 * 1000)) {
       sessionId = 'S-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 10);
       sessionStartMs = now;
-      sessionStorage.setItem('sapo_session_id', sessionId);
-      sessionStorage.setItem('sapo_session_start', sessionStartMs.toString());
+      setStorageItem('sapo_session_id', sessionId);
+      setStorageItem('sapo_session_start', sessionStartMs.toString());
     }
     return {
       session_id: sessionId,
@@ -324,9 +341,47 @@ const TRACKER_SOURCE = `/**
   function renderAccessDeniedScreen(blockedIp) {
     try {
       var ipText = blockedIp || 'unknown';
-      document.documentElement.innerHTML = '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;background:#fff;font-family:Arial,Segoe UI,sans-serif;color:#202124;"><main style="max-width:760px;margin:0 auto;padding:18vh 48px 48px;box-sizing:border-box;"><div style="width:56px;height:44px;border-radius:28px 28px 18px 18px;background:#eef1f5;position:relative;margin-bottom:26px;"></div><h1 style="font-size:30px;line-height:1.25;font-weight:500;margin:0 0 14px;">Không thể truy cập trang này</h1><p style="font-size:16px;line-height:1.6;margin:0 0 10px;">Quyền truy cập của bạn vào website này đã bị hạn chế.</p><p style="font-size:14px;line-height:1.6;color:#5f6368;margin:0 0 28px;">Nếu cho rằng đây là nhầm lẫn, vui lòng liên hệ quản trị viên cửa hàng.</p><p style="font-size:12px;color:#80868b;margin:0;font-family:monospace;">ERR_ACCESS_DENIED · IP: ' + ipText + '</p></main></body>';
+      setStorageItem('sapo_blocked_ip', ipText);
+
+      // Override fetch and XHR to block all network requests from blacklisted client
+      try {
+        window.fetch = function () { return Promise.reject(new Error('Access Denied: IP Blocked')); };
+        if (window.XMLHttpRequest) {
+          window.XMLHttpRequest.prototype.send = function () { throw new Error('Access Denied: IP Blocked'); };
+        }
+      } catch (e) {}
+
+      var blockHtml = '<div id="sapo-ip-guard-block-screen" style="position:fixed!important;inset:0!important;z-index:2147483647!important;display:flex!important;flex-direction:column!important;align-items:center!important;justify-content:center!important;min-height:100vh!important;width:100vw!important;background:#FAFAFA!important;font-family:-apple-system,BlinkMacSystemFont,\'SF Pro Display\',\'Segoe UI\',Roboto,sans-serif!important;color:#1D1D1F!important;padding:24px!important;box-sizing:border-box!important;">' +
+        '<div style="max-width:640px;width:100%;background:#FFFFFF;border:1px solid #D1D1D6;border-radius:24px;padding:36px;box-shadow:0 20px 40px rgba(0,0,0,0.12);text-align:left;box-sizing:border-box;">' +
+        '<div style="display:flex;align-items:center;gap:14px;margin-bottom:20px;">' +
+        '<div style="width:52px;height:52px;border-radius:18px;background:#FF3B30;display:flex;align-items:center;justify-content:center;color:#FFF;font-weight:900;font-size:26px;shrink-0:0;">🚫</div>' +
+        '<div>' +
+        '<h1 style="font-size:20px;font-weight:900;color:#1D1D1F;margin:0;letter-spacing:-0.02em;">CẢNH BÁO: QUYỀN TRUY CẬP BỊ KHÓA HOÀN TOÀN</h1>' +
+        '<p style="font-size:13px;color:#FF3B30;margin:4px 0 0 0;font-family:monospace;font-weight:700;">ERR_ACCESS_DENIED · IP: ' + ipText + '</p>' +
+        '</div>' +
+        '</div>' +
+        '<div style="background:#FFF5F5;border:1px solid rgba(255,59,48,0.3);border-radius:16px;padding:18px 20px;margin-bottom:20px;font-size:13px;line-height:1.6;color:#1D1D1F;">' +
+        'Địa chỉ IP của bạn (<strong>' + ipText + '</strong>) đã bị hệ thống ghi nhận vi phạm chính sách bảo mật / tạo đơn hàng giả mạo và đã bị khóa quyền truy cập.' +
+        '</div>' +
+        '<p style="font-size:12px;color:#86868B;margin:0;line-height:1.5;">Nếu cho rằng đây là sự nhầm lẫn, vui lòng liên hệ Quản trị viên cửa hàng để được hỗ trợ giải quyết.</p>' +
+        '</div></div>';
+
+      var container = document.getElementById('sapo-ip-guard-block-screen');
+      if (!container) {
+        document.documentElement.innerHTML = '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Truy cập bị khóa</title></head><body>' + blockHtml + '</body>';
+      }
+
+      if (window.MutationObserver) {
+        var observer = new MutationObserver(function () {
+          if (!document.getElementById('sapo-ip-guard-block-screen')) {
+            document.body.innerHTML = blockHtml;
+          }
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+      }
+
       window.stop && window.stop();
-    } catch(e) {}
+    } catch (e) {}
   }
 
   function getDeviceType() {
@@ -469,13 +524,16 @@ const TRACKER_SOURCE = `/**
   }
 
   function checkBlacklistImmediately() {
+    var localBlocked = getStorageItem('sapo_blocked_ip');
+    if (localBlocked) {
+      renderAccessDeniedScreen(localBlocked);
+      return;
+    }
     if (INITIAL_BLOCK && INITIAL_BLOCK.is_blacklisted) {
       renderAccessDeniedScreen(INITIAL_BLOCK.ip);
       return;
     }
 
-    // The API reads the visitor address from the edge request. This check runs
-    // immediately and also detects VPN/network changes without another request.
     var query = cachedWebRtcIp ? '?webrtc_ip=' + encodeURIComponent(cachedWebRtcIp) : '';
     fetch(BACKEND_URL + '/api/v1/blacklist/check' + query, { cache: 'no-store' })
       .then(function (r) { return r.json(); })
@@ -487,12 +545,18 @@ const TRACKER_SOURCE = `/**
         }
         if (res.ip) {
           cachedPublicIp = res.ip;
+          setStorageItem('sapo_public_ip', res.ip);
         }
       })
       .catch(function () {});
   }
 
   function initTracking() {
+    var localBlocked = getStorageItem('sapo_blocked_ip');
+    if (localBlocked) {
+      renderAccessDeniedScreen(localBlocked);
+      return;
+    }
     if (INITIAL_BLOCK && INITIAL_BLOCK.is_blacklisted) {
       renderAccessDeniedScreen(INITIAL_BLOCK.ip);
       return;
@@ -2021,25 +2085,57 @@ async function handleBlacklist(event, state, method, parts, query, body) {
   if (method === 'POST' && parts.length === 0) {
     const ip = String(body?.ip || '').trim();
     if (!ip) return json(400, { success: false, message: 'IP address is required' });
-    const existing = state.blacklist.find(item => item.ip === ip);
-    if (existing) {
-      existing.reason = body?.reason || 'Manual block';
-      existing.source = body?.source || 'MANUAL';
-      existing.created_at = new Date().toISOString();
-    } else {
-      state.blacklist.unshift({ id: getNextBlacklistId(state), ip, reason: body?.reason || 'Manual block', source: body?.source || 'MANUAL', created_at: new Date().toISOString() });
-    }
-    state.logs.forEach(log => { if (log.client_ip === ip || log.webrtc_ip === ip) log.risk_level = 'HIGH_RISK'; });
-    // Save only the lightweight blacklist key — avoids writing the full MB-sized state blob
+
+    const relatedIps = new Set([ip]);
+    allLogs(state).forEach(log => {
+      if (log.client_ip === ip || log.webrtc_ip === ip) {
+        if (isKnownIp(log.client_ip)) relatedIps.add(log.client_ip);
+        if (isKnownIp(log.webrtc_ip)) relatedIps.add(log.webrtc_ip);
+        log.risk_level = 'HIGH_RISK';
+        log.is_blacklisted = true;
+      }
+    });
+
+    relatedIps.forEach(targetIp => {
+      const existing = state.blacklist.find(item => item.ip === targetIp);
+      if (existing) {
+        existing.reason = body?.reason || 'Manual block';
+        existing.source = body?.source || 'MANUAL';
+        existing.created_at = new Date().toISOString();
+      } else {
+        state.blacklist.unshift({
+          id: getNextBlacklistId(state),
+          ip: targetIp,
+          reason: body?.reason || 'Manual block',
+          source: body?.source || 'MANUAL',
+          created_at: new Date().toISOString()
+        });
+      }
+    });
+
     await saveBlacklistState(state);
-    return json(201, { success: true, message: `IP ${ip} blocked` });
+    await saveLogsState(state);
+    await saveOrdersState(state);
+    return json(201, { success: true, message: `IP ${ip} và các IP liên quan đã bị chặn` });
   }
   if (method === 'DELETE' && parts[0]) {
     const ip = decodeURIComponent(parts[0]);
     const before = state.blacklist.length;
-    state.blacklist = state.blacklist.filter(item => item.ip !== ip);
-    // Save only the lightweight blacklist key — avoids writing the full MB-sized state blob
+    
+    // Find all related IPs from logs to unblock as well
+    const relatedIps = new Set([ip]);
+    allLogs(state).forEach(log => {
+      if (log.client_ip === ip || log.webrtc_ip === ip) {
+        if (isKnownIp(log.client_ip)) relatedIps.add(log.client_ip);
+        if (isKnownIp(log.webrtc_ip)) relatedIps.add(log.webrtc_ip);
+        log.is_blacklisted = false;
+      }
+    });
+
+    state.blacklist = state.blacklist.filter(item => !relatedIps.has(item.ip));
     await saveBlacklistState(state);
+    await saveLogsState(state);
+    await saveOrdersState(state);
     return json(200, {
       success: true,
       already_unblocked: before === state.blacklist.length,

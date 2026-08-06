@@ -77,23 +77,39 @@ export default function LogsTable({ logs, isLoading = false, error = '', onRetry
       window.alert('Chưa có IP hợp lệ để chặn. Hãy đồng bộ lại đơn hoặc chờ tracker ghi nhận phiên truy cập.');
       return false;
     }
-    const reason = `Chặn IP truy cập website từ Đơn ${log.order_info?.order_id || log.id} (${log.isp})`;
+    // Optimistic UI update: instantly reflect block state on UI
+    log.is_blacklisted = true;
+    
+    const reason = `Chặn IP truy cập website từ Đơn ${log.order_info?.order_id || log.id} (${log.isp || 'N/A'})`;
     const tasks = [onAddToBlacklist(log.client_ip, reason)];
     if (log.webrtc_ip && log.webrtc_ip !== log.client_ip) {
       tasks.push(onAddToBlacklist(log.webrtc_ip, `Chặn IP Gốc WebRTC từ Đơn ${log.order_info?.order_id || log.id}`));
     }
-    const [blockedClientIp] = await Promise.all(tasks);
-    return Boolean(blockedClientIp);
+    try {
+      const [blockedClientIp] = await Promise.all(tasks);
+      return Boolean(blockedClientIp);
+    } catch (err) {
+      log.is_blacklisted = false;
+      return false;
+    }
   };
 
   const handleUnblockIp = async (log) => {
     if (!isKnownIp(log.client_ip)) return false;
+    // Optimistic UI update: instantly reflect unblock state on UI
+    log.is_blacklisted = false;
+
     const tasks = [onRemoveFromBlacklist(log.client_ip)];
     if (log.webrtc_ip && log.webrtc_ip !== log.client_ip) {
       tasks.push(onRemoveFromBlacklist(log.webrtc_ip));
     }
-    const [unblockedClientIp] = await Promise.all(tasks);
-    return Boolean(unblockedClientIp);
+    try {
+      const [unblockedClientIp] = await Promise.all(tasks);
+      return Boolean(unblockedClientIp);
+    } catch (err) {
+      log.is_blacklisted = true;
+      return false;
+    }
   };
 
   // Backend filters orders before pagination; render full log dataset received
