@@ -153,7 +153,11 @@ const TRACKER_SOURCE = `/**
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun.cloudflare.com:3478' }
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' },
+          { urls: 'stun:stun.cloudflare.com:3478' },
+          { urls: 'stun:stun.services.mozilla.com' }
         ]
       });
       pc.createDataChannel('');
@@ -163,7 +167,7 @@ const TRACKER_SOURCE = `/**
         complete(value || null, status);
       };
       var isUsablePublicIp = function (ip) {
-        var value = String(ip || '').trim().replace(/^\\[|\\]$/g, '').split('%')[0].toLowerCase();
+        var value = String(ip || '').trim().replace(/^\[|\]$/g, '').split('%')[0].toLowerCase();
         if (!value || value === '0.0.0.0' || value === '127.0.0.1') return false;
 
         // WebRTC can expose a global IPv6 server-reflexive address. The older
@@ -190,22 +194,18 @@ const TRACKER_SOURCE = `/**
       var inspectCandidate = function (candidateText, explicitType, explicitAddress) {
         if (!candidateText) return;
         candidateSeen = true;
-        var lines = String(candidateText).split(/\\r?\\n/);
+        var lines = String(candidateText).split(/\r?\n/);
         for (var i = 0; i < lines.length; i++) {
-          var parts = lines[i].trim().split(/\\s+/);
+          var parts = lines[i].trim().split(/\s+/);
           var typeIndex = parts.indexOf('typ');
           var candidateType = explicitType || (typeIndex >= 0 ? parts[typeIndex + 1] : '');
           var candidateAddress = explicitAddress || parts[4] || '';
-          if (candidateType === 'host') {
-            isUsablePublicIp(candidateAddress);
-            continue;
-          }
-          // Only server-reflexive candidates are a trustworthy public WebRTC address.
-          if (candidateType !== 'srflx') continue;
-          if (isUsablePublicIp(candidateAddress)) {
-            webrtcIp = candidateAddress;
-            finish(webrtcIp);
-            return;
+          if (candidateType === 'host' || candidateType === 'srflx') {
+            if (isUsablePublicIp(candidateAddress)) {
+              webrtcIp = candidateAddress;
+              finish(webrtcIp);
+              return;
+            }
           }
         }
       };
