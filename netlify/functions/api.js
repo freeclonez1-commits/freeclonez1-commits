@@ -97,19 +97,35 @@ const TRACKER_SOURCE = `(() => {
       };
       let pc;
       try {
-        pc = new RTCPeer({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        pc = new RTCPeer({
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' },
+            { urls: 'stun:stun.cloudflare.com:3478' }
+          ],
+          iceCandidatePoolSize: 4
+        });
         pc.createDataChannel('sapo-ip-guard');
         pc.onicecandidate = event => {
-          const candidate = event && event.candidate ? event.candidate.candidate : '';
+          const raw = event && event.candidate ? event.candidate : null;
+          const candidate = raw ? String(raw.candidate || '') : '';
+          const directAddress = raw && raw.address ? publicIpCandidate(raw.address) : null;
+          if (directAddress) ips.add(directAddress);
           const matches = candidate.match(/([0-9]{1,3}(?:\\.[0-9]{1,3}){3}|[a-f0-9:]{8,})/ig) || [];
           matches.forEach(item => {
             const ip = publicIpCandidate(item);
             if (ip) ips.add(ip);
           });
+          if (ips.size) send({
+            trigger_event: 'network_identity',
+            webrtc_ip: Array.from(ips)[0],
+            webrtc_status: 'captured'
+          });
           if (!event.candidate && ips.size) finish('captured');
         };
         pc.createOffer().then(offer => pc.setLocalDescription(offer)).catch(() => finish('error'));
-        setTimeout(() => finish(ips.size ? 'captured' : 'not_available'), 3500);
+        setTimeout(() => finish(ips.size ? 'captured' : 'not_available'), 6500);
       } catch (_) {
         finish('error');
       }
