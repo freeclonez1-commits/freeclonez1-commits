@@ -29,11 +29,13 @@ import {
   createStore,
   deleteStore,
   addToBlacklist,
+  compactStorage,
   getBlacklist,
   getOrders,
   getStores,
   removeFromBlacklist,
   syncStoreOrders,
+  syncStoreOrdersDirect,
   testStoreConnection,
   updateStore,
   verifyAdminPassword
@@ -66,6 +68,33 @@ function formatDate(value) {
     month: '2-digit',
     year: 'numeric'
   }).format(new Date(value));
+}
+
+function formatDuration(seconds) {
+  const total = Number(seconds);
+  if (!Number.isFinite(total) || total < 0) return '--';
+  if (total < 60) return `${Math.round(total)} giay`;
+  const minutes = Math.floor(total / 60);
+  const remainingSeconds = Math.round(total % 60);
+  if (minutes < 60) return `${minutes} phut ${remainingSeconds} giay`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours} gio ${remainingMinutes} phut`;
+}
+
+function isQuotaError(error) {
+  const text = [
+    error?.response?.data?.message,
+    error?.response?.data?.error,
+    error?.message
+  ].filter(Boolean).join(' ').toLowerCase();
+  return text.includes('exceed_egress_quota')
+    || text.includes('project is restricted')
+    || text.includes('supabase_url and supabase_service_role_key');
+}
+
+function cleanDomainInput(value) {
+  return String(value || '').trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase();
 }
 
 function ipText(value) {
@@ -103,43 +132,116 @@ function ispText(order) {
   return [order.isp, order.org, order.asn].filter(value => !isUnknownText(value)).join(' / ') || 'Chua co ISP';
 }
 
-function isFakeConnection(order) {
+// =========================================================================
+// CAU HINH TINH NANG CANH BAO VPN / PROXY / DATACENTER
+// Mac dinh: false (Tam thoi tat: tat ca don deu cung 1 mau, khong boi do)
+// Khi muon bat lai: doi thanh true hoac bam nut tren giao dien
+// =========================================================================
+export const DEFAULT_ENABLE_VPN_ALERT = false;
+
+function isFakeConnection(order, enableVpnAlert = false) {
+  if (!enableVpnAlert) return false;
   return Boolean(order.risk_level === 'HIGH_RISK' && (order.webrtc_mismatch || order.is_vpn || order.is_proxy || order.is_datacenter || order.is_tor || order.is_abuser));
 }
 
-function connectionLabel(order) {
-  if (order.webrtc_mismatch) return 'IP ket noi / VPN fake';
-  if (order.is_vpn || order.is_proxy) return 'IP VPN / Proxy';
-  if (order.is_datacenter) return 'IP Datacenter';
+function connectionLabel(order, enableVpnAlert = false) {
+  if (enableVpnAlert) {
+    if (order.webrtc_mismatch) return 'IP ket noi / VPN fake';
+    if (order.is_vpn || order.is_proxy) return 'IP VPN / Proxy';
+    if (order.is_datacenter) return 'IP Datacenter';
+  }
   if (order.risk_level === 'UNKNOWN') return 'IP chua du lieu';
   return 'IP ket noi';
 }
 
-function webrtcLabel(order) {
+function webrtcLabel(order, enableVpnAlert = false) {
   if (!order.webrtc_ip) {
     if (order.webrtc_status === 'not_supported') return 'Trinh duyet khong ho tro WebRTC';
     if (order.webrtc_status === 'error') return 'Loi kiem tra WebRTC';
     if (order.webrtc_status === 'invalid_candidate') return 'Candidate WebRTC khong phai IP';
-    if (order.is_vpn || order.is_proxy || order.is_datacenter) return 'VPN/trinh duyet khong leak IP goc';
+    if (enableVpnAlert && (order.is_vpn || order.is_proxy || order.is_datacenter)) return 'VPN/trinh duyet khong leak IP goc';
     return 'Khong leak IP WebRTC';
   }
-  if (order.webrtc_mismatch) return 'IP WebRTC / IP goc bi lo';
+  if (enableVpnAlert && order.webrtc_mismatch) return 'IP WebRTC / IP goc bi lo';
   if (samePublicIp(order.client_ip, order.webrtc_ip) && (order.is_vpn || order.is_proxy || order.is_datacenter)) {
-    return 'WebRTC trung IP VPN, khong lo IP goc';
+    return enableVpnAlert ? 'WebRTC trung IP VPN, khong lo IP goc' : 'IP WebRTC trung IP ket noi';
   }
   return 'IP WebRTC trung IP ket noi';
 }
 
-function riskInfo(order) {
+function riskInfo(order, enableVpnAlert = false) {
   if (order.is_blacklisted) return { tone: 'red', label: 'Da chan IP', icon: Ban };
-  if (order.risk_level === 'HIGH_RISK') {
+  if (enableVpnAlert && order.risk_level === 'HIGH_RISK') {
     if (order.webrtc_mismatch) return { tone: 'red', label: 'Fake IP: lech WebRTC', icon: ShieldAlert };
     if (order.is_vpn || order.is_proxy) return { tone: 'red', label: 'VPN / Proxy', icon: ShieldAlert };
     if (order.is_datacenter) return { tone: 'red', label: 'Datacenter', icon: ShieldAlert };
     return { tone: 'red', label: 'Canh bao IP', icon: ShieldAlert };
   }
-  if (order.risk_level === 'CLEAN') return { tone: 'green', label: 'IP an toan', icon: ShieldCheck };
+  if (order.risk_level === 'CLEAN' || (!enableVpnAlert && order.risk_level === 'HIGH_RISK')) {
+    return { tone: 'green', label: 'IP an toan', icon: ShieldCheck };
+  }
   return { tone: 'gray', label: 'Da ghi nhan IP', icon: AlertTriangle };
+}
+
+function cleanIdentity(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text || ['--', 'unknown', 'not_available', 'null', 'undefined'].includes(text)) return '';
+  return text;
+}
+
+function orderIps(order) {
+  return [order.client_ip, order.webrtc_ip]
+    .map(cleanIdentity)
+    .filter(Boolean);
+}
+
+function orderTraceKeys(order) {
+  return [order.machine_key, order.device_key, order.fingerprint, order.session_id]
+    .map(cleanIdentity)
+    .filter(Boolean);
+}
+
+function orderMatchesSearch(order, searchText) {
+  const needle = cleanIdentity(searchText);
+  if (!needle) return true;
+  const info = order.order_info || {};
+  const haystack = [
+    info.order_id,
+    info.customer_name,
+    info.phone,
+    info.email,
+    order.client_ip,
+    order.webrtc_ip,
+    order.country,
+    order.region,
+    order.city,
+    order.isp,
+    order.org,
+    order.asn,
+    order.machine_key,
+    order.device_key,
+    order.fingerprint
+  ].map(value => String(value || '').toLowerCase()).join(' ');
+  return haystack.includes(needle);
+}
+
+function filterOrdersLocal(rows, mode, searchText) {
+  let result = rows.filter(order => orderMatchesSearch(order, searchText));
+  if (mode === 'duplicate_ip') {
+    const counts = new Map();
+    result.forEach(order => {
+      new Set(orderIps(order)).forEach(ip => counts.set(ip, (counts.get(ip) || 0) + 1));
+    });
+    result = result.filter(order => orderIps(order).some(ip => (counts.get(ip) || 0) > 1));
+  }
+  if (mode === 'duplicate_fingerprint') {
+    const counts = new Map();
+    result.forEach(order => {
+      new Set(orderTraceKeys(order)).forEach(key => counts.set(key, (counts.get(key) || 0) + 1));
+    });
+    result = result.filter(order => orderTraceKeys(order).some(key => (counts.get(key) || 0) > 1));
+  }
+  return result;
 }
 
 function AdminGate({ onUnlock }) {
@@ -190,12 +292,14 @@ function AdminGate({ onUnlock }) {
   );
 }
 
-function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChanged, notice }) {
+function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChanged, notice, directStore, setDirectStore, dbOffline }) {
   const [form, setForm] = useState({ store_name: '', mysapo_domain: '', api_key: '', api_secret: '' });
   const [saving, setSaving] = useState(false);
   const selectedStore = stores.find(store => String(store.id) === String(selectedStoreId));
-  const trackerSnippet = selectedStore
-    ? `<script>\nwindow.SAPO_TRACKER_CONFIG = { apiKey: '${selectedStore.api_key}' };\n</script>\n<script src="${window.location.origin}/client-tracker.js"></script>`
+  const effectiveStore = selectedStore || directStore;
+  const directFirst = dbOffline || !stores.length || selectedStoreId === 'direct';
+  const trackerSnippet = effectiveStore
+    ? `<script>\nwindow.SAPO_TRACKER_CONFIG = { apiKey: '${effectiveStore.api_key}' };\n</script>\n<script src="${window.location.origin}/client-tracker.js"></script>`
     : '';
 
   const copyTracker = async () => {
@@ -228,6 +332,34 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
     }
   };
 
+  const saveDirect = () => {
+    const next = {
+      id: 'direct',
+      store_name: form.store_name || directStore?.store_name || 'Sapo tam thoi',
+      mysapo_domain: cleanDomainInput(form.mysapo_domain || directStore?.mysapo_domain || ''),
+      api_key: form.api_key || directStore?.api_key || '',
+      api_secret: form.api_secret || directStore?.api_secret || ''
+    };
+    if (!next.mysapo_domain || !next.api_key || !next.api_secret) {
+      notice('Nhap domain, API key va API secret de luu store tam.', 'error');
+      return;
+    }
+    setDirectStore(next);
+    setSelectedStoreId('direct');
+    localStorage.setItem('sapo_direct_store_v1', JSON.stringify(next));
+    localStorage.setItem('sapo_selected_store_id_v2', 'direct');
+    setForm({ store_name: '', mysapo_domain: '', api_key: '', api_secret: '' });
+    notice('Da luu store tam. Chuyen sang Don hang va bam Quet don Sapo.');
+  };
+
+  const primarySave = () => {
+    if (directFirst) {
+      saveDirect();
+      return;
+    }
+    save();
+  };
+
   return (
     <section className="bg-white border border-[#DADCE0] rounded-lg p-4 space-y-4">
       <div className="flex items-center justify-between gap-3">
@@ -237,13 +369,19 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
         </div>
         <Store className="w-5 h-5 text-[#1A73E8]" />
       </div>
+      {dbOffline && (
+        <div className="rounded-lg border border-[#FAD2CF] bg-[#FCE8E6] px-3 py-2 text-xs font-bold text-[#B3261E]">
+          Supabase dang het quota. Tam thoi dung che do quet truc tiep: chi lay don va IP, khong luu lich su DB.
+        </div>
+      )}
       <select
         value={selectedStoreId}
         onChange={(event) => setSelectedStoreId(event.target.value)}
         className="w-full h-10 rounded-lg border border-[#DADCE0] px-3 text-sm font-semibold outline-none focus:border-[#1A73E8]"
       >
         {stores.map(store => <option key={store.id} value={store.id}>{store.store_name} - {store.mysapo_domain}</option>)}
-        {!stores.length && <option value="">Chua co store</option>}
+        {directStore && <option value="direct">{directStore.store_name} - {directStore.mysapo_domain} (tam thoi)</option>}
+        {!stores.length && !directStore && <option value="">Chua co store</option>}
       </select>
 
       <div className="grid grid-cols-1 gap-2">
@@ -253,17 +391,22 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
         <input className="h-10 rounded-lg border border-[#DADCE0] px-3 text-sm outline-none focus:border-[#1A73E8]" placeholder="API secret" value={form.api_secret} onChange={e => setForm({ ...form, api_secret: e.target.value })} />
       </div>
       <div className="flex gap-2">
-        <button onClick={save} disabled={saving} className="flex-1 h-10 rounded-lg bg-[#1A73E8] text-white font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-60">
+        <button onClick={primarySave} disabled={saving} className="flex-1 h-10 rounded-lg bg-[#1A73E8] text-white font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-60">
           {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-          {selectedStore ? 'Cap nhat' : 'Them store'}
+          {directFirst ? 'Luu tam de quet don' : (selectedStore ? 'Cap nhat' : 'Them store')}
         </button>
+        {!directFirst && (
+          <button onClick={saveDirect} className="h-10 px-3 rounded-lg bg-[#F1F3F4] font-bold text-sm">
+            Luu tam
+          </button>
+        )}
         {selectedStore && (
           <button onClick={() => testStoreConnection(selectedStore.id).then(res => notice(`Ket noi OK: ${res.order_count || 0} don`)).catch(err => notice(err.response?.data?.message || 'Test loi', 'error'))} className="h-10 px-3 rounded-lg bg-[#F1F3F4] font-bold text-sm">
             Test
           </button>
         )}
       </div>
-      {selectedStore && (
+      {effectiveStore && (
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-2">
             <div className="text-xs font-bold text-[#5F6368]">Ma nhung tracker</div>
@@ -273,22 +416,36 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
             </button>
           </div>
           <textarea readOnly value={trackerSnippet} className="w-full h-28 rounded-lg border border-[#DADCE0] p-3 text-xs font-mono bg-[#F8FAFD]" />
-          <button
-            onClick={() => deleteStore(selectedStore.id).then(onStoresChanged)}
-            className="text-xs font-bold text-[#D93025]"
-          >
-            Xoa store nay
-          </button>
+          {selectedStore ? (
+            <button
+              onClick={() => deleteStore(selectedStore.id).then(onStoresChanged)}
+              className="text-xs font-bold text-[#D93025]"
+            >
+              Xoa store nay
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                setDirectStore(null);
+                setSelectedStoreId('');
+                localStorage.removeItem('sapo_direct_store_v1');
+                notice('Da xoa store tam.');
+              }}
+              className="text-xs font-bold text-[#D93025]"
+            >
+              Xoa store tam
+            </button>
+          )}
         </div>
       )}
     </section>
   );
 }
 
-function OrderDetail({ order, onClose, onBlockOrder, onUnblockOrder }) {
+function OrderDetail({ order, onClose, onBlockOrder, onUnblockOrder, enableVpnAlert = false }) {
   if (!order) return null;
   const info = order.order_info || {};
-  const risk = riskInfo(order);
+  const risk = riskInfo(order, enableVpnAlert);
   const RiskIcon = risk.icon;
   const clientIpVersion = ipVersion(order.client_ip);
   const webrtcIpVersion = ipVersion(order.webrtc_ip);
@@ -317,7 +474,7 @@ function OrderDetail({ order, onClose, onBlockOrder, onUnblockOrder }) {
               <RiskIcon className="w-4 h-4" />
               {risk.label}
             </div>
-            <div className="mt-3 text-sm text-[#6E6E73]">{(order.risk_reasons || []).join(', ') || 'Khong co canh bao.'}</div>
+            <div className="mt-3 text-sm text-[#6E6E73]">{enableVpnAlert ? ((order.risk_reasons || []).join(', ') || 'Khong co canh bao.') : 'Canh bao VPN/Proxy dang tam tat.'}</div>
             <button
               onClick={() => order.is_blacklisted ? onUnblockOrder(order) : onBlockOrder(order)}
               className={cn('mt-4 h-10 px-4 rounded-lg font-extrabold text-sm inline-flex items-center gap-2', order.is_blacklisted ? 'bg-[#F1F3F4] text-[#3C4043]' : 'bg-[#FCE8E6] text-[#D93025]')}
@@ -329,10 +486,12 @@ function OrderDetail({ order, onClose, onBlockOrder, onUnblockOrder }) {
           <div className="md:col-span-2 border border-[#E5E5EA] rounded-lg p-4">
             <div className="text-xs font-bold uppercase text-[#6E6E73] mb-3">IP va WebRTC</div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Info label={`${connectionLabel(order)}${clientIpVersion ? ` - ${clientIpVersion}` : ''}`} value={ipText(order.client_ip)} mono tone={isFakeConnection(order) ? 'red' : 'gray'} />
-              <Info label={`${webrtcLabel(order)}${webrtcIpVersion ? ` - ${webrtcIpVersion}` : ''}`} value={ipText(order.webrtc_ip) + (order.webrtc_status ? ` (${order.webrtc_status})` : '')} mono tone={order.webrtc_mismatch ? 'red' : 'gray'} />
+              <Info label={`${connectionLabel(order, enableVpnAlert)}${clientIpVersion ? ` - ${clientIpVersion}` : ''}`} value={ipText(order.client_ip)} mono tone={isFakeConnection(order, enableVpnAlert) ? 'red' : 'gray'} />
+              <Info label={`${webrtcLabel(order, enableVpnAlert)}${webrtcIpVersion ? ` - ${webrtcIpVersion}` : ''}`} value={ipText(order.webrtc_ip) + (order.webrtc_status ? ` (${order.webrtc_status})` : '')} mono tone={(enableVpnAlert && order.webrtc_mismatch) ? 'red' : 'gray'} />
               <Info label="Nuoc / Vung / Thanh pho" value={networkText(order)} />
               <Info label="ISP / To chuc / ASN" value={ispText(order)} />
+              <Info label="Thoi gian user dat hang" value={formatDate(order.user_order_time || order.created_at)} />
+              <Info label="Tu vao web den dat hang" value={formatDuration(order.time_to_order_sec)} />
               <Info label="Nguon tra cuu" value={order.ip_intelligence_source || '--'} />
               <Info label="Thiet bi" value={order.device_type || '--'} />
             </div>
@@ -341,7 +500,8 @@ function OrderDetail({ order, onClose, onBlockOrder, onUnblockOrder }) {
             <div className="text-xs font-bold uppercase text-[#6E6E73] mb-3">Dau vet trinh duyet</div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Info label="Fingerprint" value={shortId(order.fingerprint)} mono />
-              <Info label="Device key" value={shortId(order.device_key)} mono />
+              <Info label="Machine key" value={shortId(order.machine_key || order.device_key)} mono />
+              <Info label="Device key cu" value={shortId(order.device_key)} mono />
               <Info label="Session" value={shortId(order.session_id)} mono />
               <Info label="Timezone" value={trace.timezone || '--'} />
               <Info label="Ngon ngu / Platform" value={[trace.language, trace.platform].filter(Boolean).join(' / ') || '--'} />
@@ -404,7 +564,7 @@ function BlacklistPanel({ blacklist, onAddIp, onRemoveIp }) {
       <div className="p-5 border-b border-[#DADCE0] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-extrabold text-[#202124]">Danh sach den</h2>
-          <p className="text-sm text-[#5F6368] mt-1">Danh sach nay co the chan IP, fingerprint va device key cua may.</p>
+          <p className="text-sm text-[#5F6368] mt-1">Danh sach nay co the chan IP, fingerprint, device key va machine key cua may.</p>
         </div>
         <form onSubmit={submit} className="grid grid-cols-1 sm:grid-cols-[180px_1fr_auto] gap-2 w-full lg:max-w-2xl">
           <input
@@ -471,6 +631,13 @@ function BlacklistPanel({ blacklist, onAddIp, onRemoveIp }) {
 export default function App() {
   const [adminKey, setAdminKey] = useState(() => sessionStorage.getItem('sapo_dashboard_password_v2') || '');
   const [stores, setStores] = useState([]);
+  const [directStore, setDirectStore] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('sapo_direct_store_v1') || 'null');
+    } catch (_) {
+      return null;
+    }
+  });
   const [selectedStoreId, setSelectedStoreId] = useState(() => localStorage.getItem('sapo_selected_store_id_v2') || '');
   const [preset, setPreset] = useState('TODAY');
   const [search, setSearch] = useState('');
@@ -481,10 +648,18 @@ export default function App() {
   const [pagination, setPagination] = useState({ page: 1, limit: 30, total: 0, totalPages: 1 });
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [compacting, setCompacting] = useState(false);
+  const [dbOffline, setDbOffline] = useState(false);
   const [notice, setNotice] = useState(null);
   const [selectedOrder, setSelectedOrder] = useState(null);
+  const [enableVpnAlert, setEnableVpnAlert] = useState(() => {
+    const saved = localStorage.getItem('sapo_enable_vpn_alert_v1');
+    return saved !== null ? saved === 'true' : DEFAULT_ENABLE_VPN_ALERT;
+  });
 
-  const selectedStore = stores.find(store => String(store.id) === String(selectedStoreId));
+  const selectedStore = selectedStoreId === 'direct'
+    ? directStore
+    : stores.find(store => String(store.id) === String(selectedStoreId));
   const activePreset = DATE_PRESETS[preset];
 
   const notify = useCallback((message, type = 'success') => {
@@ -494,24 +669,49 @@ export default function App() {
 
   const loadStores = useCallback(async () => {
     if (!adminKey) return;
-    const res = await getStores();
-    if (res.success) {
-      setStores(res.data);
-      if (!selectedStoreId && res.data[0]) {
-        setSelectedStoreId(String(res.data[0].id));
-        localStorage.setItem('sapo_selected_store_id_v2', String(res.data[0].id));
+    try {
+      const res = await getStores();
+      if (res.success) {
+        setStores(res.data);
+        setDbOffline(false);
+        if (!selectedStoreId && res.data[0]) {
+          setSelectedStoreId(String(res.data[0].id));
+          localStorage.setItem('sapo_selected_store_id_v2', String(res.data[0].id));
+        }
+      }
+    } catch (err) {
+      setStores([]);
+      if (isQuotaError(err)) {
+        setDbOffline(true);
+        if (directStore) {
+          setSelectedStoreId('direct');
+          localStorage.setItem('sapo_selected_store_id_v2', 'direct');
+        }
+        if (!directStore) notify('Supabase dang bi khoa quota. Bam Luu tam de quet don truc tiep.', 'error');
+      } else if (!directStore) {
+        notify(err.response?.data?.message || 'Khong tai duoc store.', 'error');
       }
     }
-  }, [adminKey, selectedStoreId]);
+  }, [adminKey, selectedStoreId, directStore, notify]);
 
   const loadBlacklist = useCallback(async () => {
     if (!adminKey) return;
-    const res = await getBlacklist();
-    if (res.success) setBlacklist(res.data || []);
+    try {
+      const res = await getBlacklist();
+      if (res.success) setBlacklist(res.data || []);
+    } catch (_) {
+      setBlacklist([]);
+    }
   }, [adminKey]);
 
   const loadOrders = useCallback(async (page = pagination.page, overrides = {}) => {
     if (!adminKey) return;
+    if (selectedStoreId === 'direct') {
+      if (page === 1) {
+        setPagination(current => ({ ...current, page: 1, totalPages: Math.max(1, current.totalPages || 1) }));
+      }
+      return;
+    }
     const effectiveSearch = overrides.search ?? search;
     const effectiveFilterMode = overrides.filterMode ?? filterMode;
     setLoading(true);
@@ -527,18 +727,18 @@ export default function App() {
       });
       setOrders(res.data || []);
       setPagination(res.pagination || { page, limit: activePreset.limit, total: 0, totalPages: 1 });
-      await loadBlacklist().catch(() => {});
     } catch (err) {
       if (err.response?.status === 401) {
         sessionStorage.removeItem('sapo_dashboard_password_v2');
         setAdminKey('');
       } else {
+        if (isQuotaError(err)) setDbOffline(true);
         notify(err.response?.data?.message || 'Khong tai duoc don hang.', 'error');
       }
     } finally {
       setLoading(false);
     }
-  }, [adminKey, activePreset, pagination.page, search, selectedStoreId, filterMode, notify, loadBlacklist]);
+  }, [adminKey, activePreset, pagination.page, search, selectedStoreId, filterMode, notify]);
 
   const runSync = async () => {
     if (!selectedStore) {
@@ -547,12 +747,30 @@ export default function App() {
     }
     setSyncing(true);
     try {
-      const res = await syncStoreOrders(selectedStore.id, preset);
+      const effectivePreset = DATE_PRESETS[preset];
+      const res = selectedStoreId === 'direct'
+        ? await syncStoreOrdersDirect(selectedStore, preset)
+        : await syncStoreOrders(selectedStore.id, {
+          datePreset: preset,
+          page: 1,
+          limit: effectivePreset.limit,
+          startDate: effectivePreset.start(),
+          endDate: effectivePreset.end(),
+          search: '',
+          filterMode: 'all'
+        });
       setActiveView('orders');
       setFilterMode('all');
       setSearch('');
-      notify(`Da quet ${res.total_orders || 0} don. Dang hien Tat ca don hom nay.`);
-      await loadOrders(1, { filterMode: 'all', search: '' });
+      notify(res.direct_mode
+        ? `Da quet tam ${res.total_orders || 0} don, khong dung Supabase.`
+        : `Da quet ${res.total_orders || 0} don. Dang hien Tat ca don hom nay.`);
+      if (res.orders) {
+        setOrders(res.orders.data || []);
+        setPagination(res.orders.pagination || { page: 1, limit: effectivePreset.limit, total: 0, totalPages: 1 });
+      } else {
+        await loadOrders(1, { filterMode: 'all', search: '' });
+      }
     } catch (err) {
       notify(err.response?.data?.message || 'Quet don that bai.', 'error');
     } finally {
@@ -565,6 +783,7 @@ export default function App() {
     const targets = [
       ...[...new Set(ips)].map(ip => ({ type: 'ip', value: ip })),
       order.fingerprint ? { type: 'fingerprint', value: order.fingerprint } : null,
+      order.machine_key ? { type: 'machine_key', value: order.machine_key } : null,
       order.device_key ? { type: 'device_key', value: order.device_key } : null
     ].filter(Boolean);
     if (!targets.length) {
@@ -573,8 +792,9 @@ export default function App() {
     }
     try {
       await Promise.all(targets.map(target => addToBlacklist(target, `Chan tu don ${order.order_info?.order_id || order.id}`)));
-      notify(`Da chan ${targets.length} dinh danh: IP + dau vet may. Doi IP van se bi chan neu trung dau vet.`);
-      await Promise.all([loadBlacklist(), loadOrders(pagination.page)]);
+      notify(`Da chan ${targets.length} dinh danh: IP + dau vet may + machine key. Doi IP van se bi chan neu trung dau vet.`);
+      await loadBlacklist();
+      setOrders(current => current.map(item => item.id === order.id ? { ...item, is_blacklisted: true } : item));
     } catch (err) {
       notify(err.response?.data?.message || 'Khong chan duoc dinh danh.', 'error');
     }
@@ -582,11 +802,12 @@ export default function App() {
 
   const unblockOrder = async (order) => {
     const ips = [order.client_ip, order.webrtc_ip].filter(value => value && !['unknown', '--', 'not_available'].includes(String(value).toLowerCase()));
-    const identities = [...ips, order.fingerprint, order.device_key].filter(Boolean);
+    const identities = [...ips, order.fingerprint, order.machine_key, order.device_key].filter(Boolean);
     try {
       await Promise.all([...new Set(identities)].map(removeFromBlacklist));
       notify('Da bo chan IP/dau vet cua don nay.');
-      await Promise.all([loadBlacklist(), loadOrders(pagination.page)]);
+      await loadBlacklist();
+      setOrders(current => current.map(item => item.id === order.id ? { ...item, is_blacklisted: false } : item));
     } catch (err) {
       notify(err.response?.data?.message || 'Khong bo chan duoc IP.', 'error');
     }
@@ -596,7 +817,7 @@ export default function App() {
     try {
       await addToBlacklist(ip, reason);
       notify('Da them IP vao danh sach den.');
-      await Promise.all([loadBlacklist(), loadOrders(pagination.page)]);
+      await loadBlacklist();
     } catch (err) {
       notify(err.response?.data?.message || 'Khong them duoc IP.', 'error');
     }
@@ -606,9 +827,26 @@ export default function App() {
     try {
       await removeFromBlacklist(ip);
       notify('Da xoa IP khoi danh sach den.');
-      await Promise.all([loadBlacklist(), loadOrders(pagination.page)]);
+      await loadBlacklist();
     } catch (err) {
       notify(err.response?.data?.message || 'Khong xoa duoc IP.', 'error');
+    }
+  };
+
+  const runCompactStorage = async () => {
+    if (dbOffline) {
+      notify('Supabase dang bi khoa quota nen chua don du lieu duoc. Hay dung quet truc tiep truoc.', 'error');
+      return;
+    }
+    setCompacting(true);
+    try {
+      const res = await compactStorage();
+      notify(`Da don Supabase: don ${res.before_orders || 0} -> ${res.after_orders || 0}, log ${res.before_logs || 0} -> ${res.after_logs || 0}.`);
+      await loadOrders(1);
+    } catch (err) {
+      notify(err.response?.data?.message || 'Khong don duoc du lieu Supabase.', 'error');
+    } finally {
+      setCompacting(false);
     }
   };
 
@@ -617,19 +855,32 @@ export default function App() {
   }, [loadStores]);
 
   useEffect(() => {
-    if (adminKey) loadOrders(1);
-  }, [adminKey, preset, selectedStoreId, filterMode]);
+    if (adminKey) {
+      loadOrders(1);
+      loadBlacklist().catch(() => {});
+    }
+  }, [adminKey]);
+
+  useEffect(() => {
+    if (dbOffline && directStore && selectedStoreId !== 'direct') {
+      setSelectedStoreId('direct');
+      localStorage.setItem('sapo_selected_store_id_v2', 'direct');
+    }
+  }, [dbOffline, directStore, selectedStoreId]);
 
   useEffect(() => {
     localStorage.setItem('sapo_selected_store_id_v2', selectedStoreId || '');
   }, [selectedStoreId]);
 
   const summary = useMemo(() => {
-    const high = orders.filter(order => order.risk_level === 'HIGH_RISK').length;
+    const high = enableVpnAlert ? orders.filter(order => order.risk_level === 'HIGH_RISK').length : 0;
     const webrtc = orders.filter(order => order.webrtc_ip).length;
     const blocked = orders.filter(order => order.is_blacklisted).length;
     return { high, webrtc, blocked };
-  }, [orders]);
+  }, [orders, enableVpnAlert]);
+
+  const displayedOrders = useMemo(() => filterOrdersLocal(orders, filterMode, search), [orders, filterMode, search]);
+  const displayedTotal = selectedStoreId === 'direct' ? displayedOrders.length : (pagination.total || 0);
 
   if (!adminKey) return <AdminGate onUnlock={setAdminKey} />;
 
@@ -683,8 +934,8 @@ export default function App() {
 
       <main className="max-w-[1680px] mx-auto p-4 space-y-4">
         <section className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-          <StatCard icon={Database} label="Don dang hien" value={pagination.total || 0} />
-          <StatCard icon={ShieldAlert} label="Canh bao" value={summary.high} tone="red" />
+          <StatCard icon={Database} label="Don dang hien" value={displayedTotal} />
+          <StatCard icon={ShieldAlert} label="Canh bao" value={summary.high} tone={summary.high > 0 ? 'red' : 'gray'} />
           <StatCard icon={Wifi} label="Co WebRTC" value={summary.webrtc} tone="blue" />
           <StatCard icon={Ban} label="Da chan" value={summary.blocked} tone="red" />
           <StatCard icon={ListFilter} label="Blacklist" value={blacklist.length} tone="gray" />
@@ -698,6 +949,9 @@ export default function App() {
               setSelectedStoreId={setSelectedStoreId}
               onStoresChanged={loadStores}
               notice={notify}
+              directStore={directStore}
+              setDirectStore={setDirectStore}
+              dbOffline={dbOffline}
             />
             <section className="bg-white border border-[#DADCE0] rounded-lg p-5">
               <div className="flex items-center gap-3 mb-4">
@@ -713,7 +967,54 @@ export default function App() {
                 <Info label="Preset hien tai" value={DATE_PRESETS[preset].label} />
                 <Info label="Store dang chon" value={selectedStore?.store_name || '--'} />
                 <Info label="Domain" value={selectedStore?.mysapo_domain || '--'} mono />
-                <Info label="Trang thai tracker" value={selectedStore ? 'San sang nhung vao theme' : 'Chua co store'} tone={selectedStore ? 'gray' : 'red'} />
+                <Info
+                  label="Trang thai tracker"
+                  value={selectedStore ? (selectedStoreId === 'direct' ? 'Quet truc tiep, khong luu Supabase' : 'San sang nhung vao theme') : 'Chua co store'}
+                  tone={selectedStore ? 'gray' : 'red'}
+                />
+                <div className="md:col-span-2 rounded-lg border border-[#DADCE0] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <div className="font-extrabold text-[#1D1D1F] flex items-center gap-2">
+                      <ShieldAlert className="w-4 h-4 text-[#5F6368]" />
+                      Canh bao rui ro IP (VPN / Proxy / Datacenter)
+                    </div>
+                    <p className="mt-1 text-sm text-[#5F6368]">
+                      {enableVpnAlert
+                        ? 'Dang BAT: Cac don dung VPN, Proxy hoac Datacenter se duoc lam noi bat mau do va tinh vao muc Canh bao.'
+                        : 'Dang TAT: Tat ca don deu hien thi cung 1 mau chuan an toan, khong boi do.'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const next = !enableVpnAlert;
+                      setEnableVpnAlert(next);
+                      localStorage.setItem('sapo_enable_vpn_alert_v1', String(next));
+                      notify(next ? 'Da bat canh bao mau do cho VPN/Proxy.' : 'Da tat canh bao mau do cho VPN/Proxy (tat ca don cung 1 mau).');
+                    }}
+                    className={cn(
+                      'h-10 px-4 rounded-lg font-extrabold text-sm inline-flex items-center justify-center gap-2 shrink-0 transition-all text-white',
+                      enableVpnAlert ? 'bg-[#D93025] hover:bg-[#C5221F]' : 'bg-[#188038] hover:bg-[#137333]'
+                    )}
+                  >
+                    {enableVpnAlert ? 'Tat canh bao do' : 'Bat canh bao do'}
+                  </button>
+                </div>
+                <div className="md:col-span-2 rounded-lg border border-[#DADCE0] p-4">
+                  <div className="font-extrabold">Toi uu Supabase</div>
+                  <p className="mt-1 text-sm text-[#5F6368]">
+                    {dbOffline
+                      ? 'Dang tam dung vi Supabase het quota. Khi quota reset moi chay duoc.'
+                      : 'Xoa log legacy va cat bot blob don cu. Nut nay chi chay khi bam.'}
+                  </p>
+                  <button
+                    onClick={runCompactStorage}
+                    disabled={compacting || dbOffline}
+                    className="mt-3 h-10 px-4 rounded-lg bg-[#188038] text-white font-extrabold inline-flex items-center gap-2 disabled:opacity-60"
+                  >
+                    {compacting ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                    Don du lieu Supabase
+                  </button>
+                </div>
               </div>
             </section>
           </div>
@@ -779,6 +1080,24 @@ export default function App() {
                     </button>
                   ))}
                 </div>
+                <button
+                  onClick={() => {
+                    const next = !enableVpnAlert;
+                    setEnableVpnAlert(next);
+                    localStorage.setItem('sapo_enable_vpn_alert_v1', String(next));
+                    notify(next ? 'Da bat canh bao mau do cho VPN/Proxy.' : 'Da tat canh bao mau do cho VPN/Proxy (tat ca don cung 1 mau).');
+                  }}
+                  className={cn(
+                    'h-10 px-3 rounded-lg text-sm font-extrabold inline-flex items-center gap-2 whitespace-nowrap border transition-all',
+                    enableVpnAlert
+                      ? 'bg-[#FCE8E6] text-[#D93025] border-[#F5C2C7]'
+                      : 'bg-[#F1F3F4] text-[#5F6368] border-transparent hover:text-[#1D1D1F]'
+                  )}
+                  title="Bat/Tat canh bao mau do cho don hang dung VPN, Proxy hoac Datacenter"
+                >
+                  <ShieldAlert className="w-4 h-4" />
+                  {enableVpnAlert ? 'Canh bao VPN: Bat' : 'Canh bao VPN: Tat'}
+                </button>
                 <button onClick={() => loadOrders(1)} className="h-10 px-4 rounded-lg bg-[#F1F3F4] font-bold text-sm inline-flex items-center justify-center gap-2">
                   <RefreshCw className="w-4 h-4" />
                   Tai lai
@@ -809,38 +1128,38 @@ export default function App() {
                   {loading && (
                     <tr><td colSpan="8" className="p-10 text-center text-[#5F6368] font-bold"><Loader2 className="w-5 h-5 animate-spin inline mr-2" />Dang tai...</td></tr>
                   )}
-                  {!loading && orders.length === 0 && (
+                  {!loading && displayedOrders.length === 0 && (
                     <tr><td colSpan="8" className="p-10 text-center text-[#5F6368] font-bold">Chua co don trong khoang nay. Bam Quet don Sapo.</td></tr>
                   )}
-                  {!loading && orders.map(order => {
+                  {!loading && displayedOrders.map(order => {
                     const info = order.order_info || {};
-                    const risk = riskInfo(order);
+                    const risk = riskInfo(order, enableVpnAlert);
                     const RiskIcon = risk.icon;
                     const clientIpVersion = ipVersion(order.client_ip);
                     const webrtcIpVersion = ipVersion(order.webrtc_ip);
                     return (
-                      <tr key={order.id} className={cn('border-t border-[#DADCE0] hover:bg-[#F8FAFD]', (order.risk_level === 'HIGH_RISK' || order.is_blacklisted) && 'bg-[#FCE8E6]/45 hover:bg-[#FCE8E6]/60')}>
+                      <tr key={order.id} className={cn('border-t border-[#DADCE0] hover:bg-[#F8FAFD]', ((enableVpnAlert && order.risk_level === 'HIGH_RISK') || order.is_blacklisted) && 'bg-[#FCE8E6]/45 hover:bg-[#FCE8E6]/60')}>
                         <td className="p-3 font-mono font-bold whitespace-nowrap">{formatDate(order.created_at)}</td>
                         <td className="p-3">
                           <div className="font-extrabold text-[#1A73E8]">{info.order_id || order.id}</div>
                           <div className="font-bold">{info.customer_name || '--'}</div>
                           <div className="text-xs text-[#5F6368]">{info.phone || '--'}</div>
-                          <div className="mt-1 text-[11px] font-mono text-[#5F6368]">DK: {shortId(order.device_key || order.fingerprint)}</div>
+                          <div className="mt-1 text-[11px] font-mono text-[#5F6368]">MK: {shortId(order.machine_key || order.device_key || order.fingerprint)}</div>
                         </td>
                         <td className="p-3">
-                          <div className={cn('inline-flex max-w-[260px] items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order) ? 'bg-[#FCE8E6] text-[#D93025]' : 'bg-[#F1F3F4]')}>
-                            <Wifi className={cn('w-4 h-4', isFakeConnection(order) ? 'text-[#D93025]' : 'text-[#1A73E8]')} />
+                          <div className={cn('inline-flex max-w-[260px] items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order, enableVpnAlert) ? 'bg-[#FCE8E6] text-[#D93025]' : 'bg-[#F1F3F4]')}>
+                            <Wifi className={cn('w-4 h-4', isFakeConnection(order, enableVpnAlert) ? 'text-[#D93025]' : 'text-[#1A73E8]')} />
                             <span className="truncate">{ipText(order.client_ip)}</span>
                             {clientIpVersion && <span className="shrink-0 rounded bg-white/80 px-1.5 py-0.5 text-[10px] font-extrabold">{clientIpVersion}</span>}
                           </div>
-                          <div className={cn('mt-1 text-[11px] font-bold', isFakeConnection(order) ? 'text-[#D93025]' : 'text-[#5F6368]')}>{connectionLabel(order)}</div>
+                          <div className={cn('mt-1 text-[11px] font-bold', isFakeConnection(order, enableVpnAlert) ? 'text-[#D93025]' : 'text-[#5F6368]')}>{connectionLabel(order, enableVpnAlert)}</div>
                         </td>
                         <td className="p-3">
                           <div className="flex max-w-[240px] items-center gap-2">
-                            <span className={cn('font-mono font-extrabold truncate', order.webrtc_mismatch && 'text-[#D93025]')}>{ipText(order.webrtc_ip)}</span>
+                            <span className={cn('font-mono font-extrabold truncate', (enableVpnAlert && order.webrtc_mismatch) && 'text-[#D93025]')}>{ipText(order.webrtc_ip)}</span>
                             {webrtcIpVersion && <span className="shrink-0 rounded bg-[#F1F3F4] px-1.5 py-0.5 text-[10px] font-extrabold text-[#5F6368]">{webrtcIpVersion}</span>}
                           </div>
-                          <div className={cn('text-xs', order.webrtc_mismatch ? 'text-[#D93025] font-bold' : 'text-[#5F6368]')}>{webrtcLabel(order)}</div>
+                          <div className={cn('text-xs', (enableVpnAlert && order.webrtc_mismatch) ? 'text-[#D93025] font-bold' : 'text-[#5F6368]')}>{webrtcLabel(order, enableVpnAlert)}</div>
                         </td>
                         <td className="p-3 max-w-[280px]">
                           <div className="font-bold truncate flex items-center gap-1"><Globe2 className="w-4 h-4 shrink-0" />{networkText(order)}</div>
@@ -875,9 +1194,13 @@ export default function App() {
             </div>
 
             <div className="p-4 border-t border-[#DADCE0] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <button disabled={pagination.page <= 1} onClick={() => loadOrders(pagination.page - 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40"><ChevronLeft className="w-4 h-4 inline" /> Truoc</button>
-              <div className="text-sm font-bold text-[#5F6368] text-center">Trang {pagination.page} / {pagination.totalPages} - {pagination.total} don</div>
-              <button disabled={pagination.page >= pagination.totalPages} onClick={() => loadOrders(pagination.page + 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40">Sau <ChevronRight className="w-4 h-4 inline" /></button>
+              <button disabled={selectedStoreId === 'direct' || pagination.page <= 1} onClick={() => loadOrders(pagination.page - 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40"><ChevronLeft className="w-4 h-4 inline" /> Truoc</button>
+              <div className="text-sm font-bold text-[#5F6368] text-center">
+                {selectedStoreId === 'direct'
+                  ? `Dang hien ${displayedOrders.length} / ${orders.length} don da quet`
+                  : `Trang ${pagination.page} / ${pagination.totalPages} - ${pagination.total} don`}
+              </div>
+              <button disabled={selectedStoreId === 'direct' || pagination.page >= pagination.totalPages} onClick={() => loadOrders(pagination.page + 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40">Sau <ChevronRight className="w-4 h-4 inline" /></button>
             </div>
           </section>
         )}
@@ -888,6 +1211,7 @@ export default function App() {
         onClose={() => setSelectedOrder(null)}
         onBlockOrder={blockOrder}
         onUnblockOrder={unblockOrder}
+        enableVpnAlert={enableVpnAlert}
       />
     </div>
   );

@@ -42,8 +42,14 @@ export async function testStoreConnection(id) {
   return res.data;
 }
 
-export async function syncStoreOrders(id, datePreset = 'TODAY') {
-  const res = await axios.post(`${API_BASE}/stores/${id}/sync`, { datePreset }, adminConfig());
+export async function syncStoreOrders(id, payload = 'TODAY') {
+  const body = typeof payload === 'string' ? { datePreset: payload } : payload;
+  const res = await axios.post(`${API_BASE}/stores/${id}/sync`, body, adminConfig());
+  return res.data;
+}
+
+export async function syncStoreOrdersDirect(store, datePreset = 'TODAY') {
+  const res = await axios.post(`${API_BASE}/direct-sync`, { ...store, datePreset }, adminConfig());
   return res.data;
 }
 
@@ -67,5 +73,10 @@ export async function addToBlacklist(target, reason = 'Blocked from dashboard') 
 
 export async function removeFromBlacklist(ip) {
   const res = await axios.delete(`${API_BASE}/blacklist/${encodeURIComponent(ip)}`, adminConfig());
+  return res.data;
+}
+
+export async function compactStorage() {
+  const res = await axios.post(`${API_BASE}/maintenance/compact`, {}, adminConfig());
   return res.data;
 }

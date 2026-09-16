@@ -8,3 +8,6 @@ deploy-netlify/
 deploy-netlify-fixed/
 *.zip
 .netlify/
+
+.vercel
+.env*

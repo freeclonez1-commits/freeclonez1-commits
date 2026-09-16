@@ -7,6 +7,9 @@ const COMPRESSED_LOGS_ENCODING = 'gzip-base64-v1';
 const LOG_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
 const BOOTSTRAP_DASHBOARD_PASSWORD_HASH = '5614f8701b76755fca46a29799ae4122ca791e6339afb80e45e9da52c4ea6474';
 const MAX_IP_LOOKUPS_PER_SYNC = 30;
+const MAX_STORED_ORDERS = Math.max(100, Number(process.env.MAX_STORED_ORDERS || 700));
+const MAX_LEGACY_LOGS = Math.max(50, Number(process.env.MAX_LEGACY_LOGS || 150));
+const MAX_VISITS_PER_SYNC = Math.max(50, Number(process.env.MAX_VISITS_PER_SYNC || 250));
 const IP_INTELLIGENCE_VERSION = 2;
 const DATACENTER_WORDS = [
   'datacenter', 'data center', 'hosting', 'host', 'cloud', 'server', 'vps',
@@ -17,6 +20,9 @@ const DATACENTER_WORDS = [
 ];
 
 const memoryIpCache = new Map();
+const memoryBlacklistCache = { data: null, expiresAt: 0 };
+const memoryStoresCache = { data: null, autoStoreId: 1, expiresAt: 0 };
+const memoryFallbackBlacklist = { blacklist: [], autoBlacklistId: 1 };
 
 const TRACKER_SOURCE = `(() => {
   'use strict';
@@ -96,10 +102,47 @@ const TRACKER_SOURCE = `(() => {
     return ('00000000' + (hash >>> 0).toString(16)).slice(-8);
   }
 
+  function canvasHash() {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 280;
+      canvas.height = 80;
+      const ctx = canvas.getContext('2d');
+      ctx.textBaseline = 'top';
+      ctx.font = '16px Arial';
+      ctx.fillStyle = '#f60';
+      ctx.fillRect(0, 0, 120, 22);
+      ctx.fillStyle = '#069';
+      ctx.fillText('Sapo IP Guard 2026', 4, 6);
+      ctx.fillStyle = 'rgba(102, 204, 0, 0.7)';
+      ctx.font = '18px Times New Roman';
+      ctx.fillText('device-check', 18, 34);
+      return simpleHash(canvas.toDataURL());
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function webglInfo() {
+    try {
+      const canvas = document.createElement('canvas');
+      const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+      if (!gl) return { vendor: '', renderer: '' };
+      const debug = gl.getExtension('WEBGL_debug_renderer_info');
+      return {
+        vendor: debug ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+        renderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)
+      };
+    } catch (_) {
+      return { vendor: '', renderer: '' };
+    }
+  }
+
   function browserTrace() {
     const nav = navigator || {};
     const scr = screen || {};
     const tz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (_) { return ''; } })();
+    const webgl = webglInfo();
     const plugins = (() => {
       try { return Array.from(nav.plugins || []).slice(0, 12).map(item => item.name).join('|'); } catch (_) { return ''; }
     })();
@@ -112,23 +155,31 @@ const TRACKER_SOURCE = `(() => {
       languages,
       platform: nav.platform || '',
       timezone: tz,
-      screen: [scr.width, scr.height, scr.colorDepth, window.devicePixelRatio || 1].join('x'),
+      screen: [scr.width, scr.height, scr.colorDepth].join('x'),
+      viewport: [window.innerWidth || 0, window.innerHeight || 0].join('x'),
       hardware_concurrency: nav.hardwareConcurrency || null,
       device_memory: nav.deviceMemory || null,
       max_touch_points: nav.maxTouchPoints || 0,
       webdriver: Boolean(nav.webdriver),
-      plugins_hash: simpleHash(plugins)
+      plugins_hash: simpleHash(plugins),
+      canvas_hash: canvasHash(),
+      webgl_vendor: webgl.vendor || '',
+      webgl_renderer: webgl.renderer || ''
     };
     trace.fingerprint = simpleHash(JSON.stringify(trace));
-    trace.device_key = simpleHash(JSON.stringify({
+    trace.machine_key = simpleHash(JSON.stringify({
       platform: trace.platform,
       timezone: trace.timezone,
       screen: trace.screen,
       hardware_concurrency: trace.hardware_concurrency,
       device_memory: trace.device_memory,
       max_touch_points: trace.max_touch_points,
-      languages: trace.languages
+      language: trace.language,
+      canvas_hash: trace.canvas_hash,
+      webgl_vendor: trace.webgl_vendor,
+      webgl_renderer: trace.webgl_renderer
     }));
+    trace.device_key = trace.machine_key;
     return trace;
   }
 
@@ -143,6 +194,7 @@ const TRACKER_SOURCE = `(() => {
     payload.session_start_at = sessionValue(sessionStartKey) || new Date().toISOString();
     payload.fingerprint = trace.fingerprint;
     payload.device_key = trace.device_key;
+    payload.machine_key = trace.machine_key;
     payload.browser_trace = trace;
 
     const body = JSON.stringify(payload);
@@ -162,6 +214,7 @@ const TRACKER_SOURCE = `(() => {
     if (webrtcIp) query.push('webrtc_ip=' + encodeURIComponent(webrtcIp));
     if (trace.fingerprint) query.push('fingerprint=' + encodeURIComponent(trace.fingerprint));
     if (trace.device_key) query.push('device_key=' + encodeURIComponent(trace.device_key));
+    if (trace.machine_key) query.push('machine_key=' + encodeURIComponent(trace.machine_key));
     if (!query.length) return;
     fetch(backendUrl + '/api/v1/blacklist/check?' + query.join('&'), {
       method: 'GET',
@@ -221,25 +274,18 @@ const TRACKER_SOURCE = `(() => {
             const ip = publicIpCandidate(item);
             if (ip) ips.add(ip);
           });
-          if (ips.size) send({
-            trigger_event: 'network_identity',
-            webrtc_ip: Array.from(ips)[0],
-            webrtc_status: 'captured'
-          });
-          if (ips.size) checkBlocked(Array.from(ips)[0]);
           if (!event.candidate && ips.size) finish('captured');
         };
         pc.createOffer().then(offer => pc.setLocalDescription(offer)).catch(() => finish('error'));
-        setTimeout(() => finish(ips.size ? 'captured' : 'not_available'), 6500);
+        setTimeout(() => finish(ips.size ? 'captured' : 'not_available'), 3200);
       } catch (_) {
         finish('error');
       }
     });
   }
 
-  checkBlocked(null);
-  send({ trigger_event: 'page_view', webrtc_status: 'pending' });
   checkWebRtc().then(result => {
+    checkBlocked(result.ip);
     send({
       trigger_event: 'network_identity',
       webrtc_ip: result.ip,
@@ -316,6 +362,14 @@ async function supabaseFetch(path, options = {}) {
   return data;
 }
 
+function isSupabaseQuotaError(error) {
+  const text = String(error?.message || error || '').toLowerCase();
+  return text.includes('exceed_egress_quota')
+    || text.includes('project is restricted')
+    || text.includes('supabase_url and supabase_service_role_key')
+    || text.includes('supabase error 402');
+}
+
 function stateTemplate() {
   return {
     stores: [],
@@ -333,6 +387,12 @@ function unpackLogsValue(value) {
   return JSON.parse(zlib.gunzipSync(Buffer.from(value.data, 'base64')).toString('utf8'));
 }
 
+function trimRows(rows, max, dateField = 'created_at') {
+  return [...(Array.isArray(rows) ? rows : [])]
+    .sort((a, b) => new Date(b?.[dateField] || b?.updated_at || 0).getTime() - new Date(a?.[dateField] || a?.updated_at || 0).getTime())
+    .slice(0, max);
+}
+
 function packLogsValue(logs, autoLogId) {
   const value = { logs, autoLogId };
   const serialized = JSON.stringify(value);
@@ -343,10 +403,11 @@ function packLogsValue(logs, autoLogId) {
   };
 }
 
-async function loadState({ includeLogs = true, includeStores = true, includeBlacklist = true } = {}) {
+async function loadState({ includeLogs = true, includeOrders = includeLogs, includeStores = true, includeBlacklist = true } = {}) {
   const keys = [];
   if (includeStores) keys.push('stores');
-  if (includeLogs) keys.push('logs', 'sapo_orders');
+  if (includeLogs) keys.push('logs');
+  if (includeOrders) keys.push('sapo_orders');
   if (includeBlacklist) keys.push('blacklist');
   const rows = keys.length
     ? await supabaseFetch(`/app_state?key=in.(${keys.map(encodeURIComponent).join(',')})&select=key,value`)
@@ -362,15 +423,15 @@ async function loadState({ includeLogs = true, includeStores = true, includeBlac
 
   const logsValue = unpackLogsValue(find('logs'));
   if (includeLogs && logsValue) {
-    state.logs = Array.isArray(logsValue.logs) ? logsValue.logs : [];
+    state.logs = trimRows(Array.isArray(logsValue.logs) ? logsValue.logs : [], MAX_LEGACY_LOGS);
     state.autoLogId = Number(logsValue.autoLogId || state.autoLogId);
   }
 
   const ordersValue = unpackLogsValue(find('sapo_orders'));
-  if (includeLogs && ordersValue) {
-    state.orders = Array.isArray(ordersValue.orders)
+  if (includeOrders && ordersValue) {
+    state.orders = trimRows(Array.isArray(ordersValue.orders)
       ? ordersValue.orders
-      : (Array.isArray(ordersValue.logs) ? ordersValue.logs : []);
+      : (Array.isArray(ordersValue.logs) ? ordersValue.logs : []), MAX_STORED_ORDERS);
   }
 
   const blacklistValue = find('blacklist');
@@ -390,20 +451,111 @@ async function saveStateValue(key, value) {
   });
 }
 
+async function loadStateValue(key) {
+  const rows = await supabaseFetch(`/app_state?key=eq.${encodeURIComponent(key)}&select=key,value&limit=1`);
+  return Array.isArray(rows) && rows[0] ? rows[0].value : null;
+}
+
+function visitStateKey(storeId, sessionId) {
+  const cleanSession = String(sessionId || '').trim().replace(/[^a-z0-9_-]/gi, '').slice(0, 80);
+  return cleanSession ? `visit:${storeId}:${cleanSession}` : '';
+}
+
+async function saveVisitLog(row) {
+  const key = visitStateKey(row.store_id, row.session_id);
+  if (!key) return false;
+  await saveStateValue(key, row);
+  return true;
+}
+
+async function loadVisitLog(storeId, sessionId) {
+  const key = visitStateKey(storeId, sessionId);
+  if (!key) return null;
+  const value = await loadStateValue(key);
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+async function loadRecentVisits(storeId, hours = 8) {
+  const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  const rows = await supabaseFetch(
+    `/app_state?key=like.${encodeURIComponent(`visit:${storeId}:%`)}&updated_at=gte.${encodeURIComponent(since)}&select=value,updated_at&order=updated_at.desc&limit=${MAX_VISITS_PER_SYNC}`
+  );
+  return (Array.isArray(rows) ? rows : [])
+    .map(row => row.value)
+    .filter(value => value && typeof value === 'object' && !Array.isArray(value));
+}
+
 async function saveStores(state) {
+  memoryStoresCache.data = null;
+  memoryStoresCache.expiresAt = 0;
   await saveStateValue('stores', { stores: state.stores, autoStoreId: state.autoStoreId });
 }
 
 async function saveLogs(state) {
+  state.logs = trimRows(state.logs, MAX_LEGACY_LOGS);
   await saveStateValue('logs', packLogsValue(state.logs, state.autoLogId));
 }
 
 async function saveOrders(state) {
+  state.orders = trimRows(state.orders, MAX_STORED_ORDERS);
   await saveStateValue('sapo_orders', packLogsValue(state.orders, state.autoLogId));
 }
 
 async function saveBlacklist(state) {
+  memoryBlacklistCache.data = null;
+  memoryBlacklistCache.expiresAt = 0;
   await saveStateValue('blacklist', { blacklist: state.blacklist || [], autoBlacklistId: state.autoBlacklistId || 1 });
+}
+
+async function saveBlacklistSafe(state) {
+  try {
+    await saveBlacklist(state);
+    memoryFallbackBlacklist.blacklist = state.blacklist || [];
+    memoryFallbackBlacklist.autoBlacklistId = state.autoBlacklistId || 1;
+    return { transient: false };
+  } catch (error) {
+    if (!isSupabaseQuotaError(error)) throw error;
+    memoryFallbackBlacklist.blacklist = state.blacklist || [];
+    memoryFallbackBlacklist.autoBlacklistId = state.autoBlacklistId || 1;
+    memoryBlacklistCache.data = memoryFallbackBlacklist.blacklist;
+    memoryBlacklistCache.expiresAt = Date.now() + 60 * 60 * 1000;
+    return { transient: true };
+  }
+}
+
+async function loadBlacklistStateCached(ttlMs = 15000) {
+  if (memoryBlacklistCache.data && memoryBlacklistCache.expiresAt > Date.now()) {
+    return { ...stateTemplate(), blacklist: memoryBlacklistCache.data };
+  }
+  const state = await loadState({ includeLogs: false, includeOrders: false, includeStores: false, includeBlacklist: true });
+  memoryBlacklistCache.data = state.blacklist || [];
+  memoryBlacklistCache.expiresAt = Date.now() + ttlMs;
+  return state;
+}
+
+async function loadBlacklistStateSafe(ttlMs = 15000) {
+  try {
+    return await loadBlacklistStateCached(ttlMs);
+  } catch (error) {
+    if (!isSupabaseQuotaError(error)) throw error;
+    return {
+      ...stateTemplate(),
+      blacklist: memoryFallbackBlacklist.blacklist || [],
+      autoBlacklistId: memoryFallbackBlacklist.autoBlacklistId || 1,
+      transient_blacklist: true
+    };
+  }
+}
+
+async function loadStoresStateCached(ttlMs = 60000) {
+  if (memoryStoresCache.data && memoryStoresCache.expiresAt > Date.now()) {
+    return { ...stateTemplate(), stores: memoryStoresCache.data, autoStoreId: memoryStoresCache.autoStoreId };
+  }
+  const state = await loadState({ includeLogs: false, includeOrders: false, includeStores: true, includeBlacklist: false });
+  memoryStoresCache.data = state.stores || [];
+  memoryStoresCache.autoStoreId = state.autoStoreId || 1;
+  memoryStoresCache.expiresAt = Date.now() + ttlMs;
+  return state;
 }
 
 function encryptionKey() {
@@ -510,7 +662,7 @@ function normalizeIpValue(value) {
 
 function normalizeIdentityType(value) {
   const type = String(value || 'ip').trim().toLowerCase();
-  return ['ip', 'fingerprint', 'device_key'].includes(type) ? type : 'ip';
+  return ['ip', 'fingerprint', 'device_key', 'machine_key'].includes(type) ? type : 'ip';
 }
 
 function normalizeIdentityValue(type, value) {
@@ -536,10 +688,11 @@ function findBlacklist(state, ...ips) {
   return (state.blacklist || []).find(item => blacklistType(item) === 'ip' && values.includes(blacklistValue(item))) || null;
 }
 
-function findBlockedIdentity(state, { ips = [], fingerprint = '', deviceKey = '' } = {}) {
+function findBlockedIdentity(state, { ips = [], fingerprint = '', deviceKey = '', machineKey = '' } = {}) {
   const ipValues = ips.map(normalizeIpValue).filter(Boolean);
   const fp = normalizeIdentityValue('fingerprint', fingerprint);
   const dk = normalizeIdentityValue('device_key', deviceKey);
+  const mk = normalizeIdentityValue('machine_key', machineKey);
   return (state.blacklist || []).find(item => {
     const type = blacklistType(item);
     const value = blacklistValue(item);
@@ -547,6 +700,7 @@ function findBlockedIdentity(state, { ips = [], fingerprint = '', deviceKey = ''
     if (type === 'ip') return ipValues.includes(value);
     if (type === 'fingerprint') return fp && value === fp;
     if (type === 'device_key') return dk && value === dk;
+    if (type === 'machine_key') return mk && value === mk;
     return false;
   }) || null;
 }
@@ -585,7 +739,13 @@ function fallbackFingerprint(row) {
 
 function fallbackDeviceKey(row) {
   const trace = normalizeTrace(row?.browser_trace);
-  if (trace?.device_key) return String(trace.device_key).trim();
+  if (trace?.device_key || trace?.machine_key) return String(trace.device_key || trace.machine_key).trim();
+  return null;
+}
+
+function fallbackMachineKey(row) {
+  const trace = normalizeTrace(row?.browser_trace);
+  if (trace?.machine_key || trace?.device_key) return String(trace.machine_key || trace.device_key).trim();
   return null;
 }
 
@@ -845,10 +1005,10 @@ function getOrderInfo(row) {
   return parseJson(row?.order_info, row?.order_info || {});
 }
 
-function findVisitForOrder(state, storeId, orderInfo, createdAt, orderIp) {
+function findVisitForOrder(visits, storeId, orderInfo, createdAt, orderIp) {
   const orderTime = new Date(createdAt).getTime();
   if (!Number.isFinite(orderTime)) return null;
-  const candidates = (state.logs || []).filter(log => {
+  const candidates = (Array.isArray(visits) ? visits : []).filter(log => {
     if (log.store_id !== storeId) return false;
     const visitTime = new Date(log.created_at).getTime();
     if (!Number.isFinite(visitTime)) return false;
@@ -892,6 +1052,8 @@ async function syncSapoOrders(state, store, preset = 'TODAY') {
   const createdMin = presetMinDate(preset);
   const pageLimit = preset === 'TODAY' ? 100 : 250;
   const maxPages = preset === 'TODAY' ? 2 : (preset === '7_DAYS' ? 4 : 8);
+  const recentVisits = await loadRecentVisits(store.id, preset === 'TODAY' ? 8 : (preset === '7_DAYS' ? 24 * 7 : 24 * 30))
+    .catch(() => []);
   const known = new Map();
   (state.orders || []).forEach(row => {
     if (row.store_id !== store.id) return;
@@ -935,7 +1097,7 @@ async function syncSapoOrders(state, store, preset = 'TODAY') {
 
       const orderIp = sapoClientIp(sapoOrder);
       const existing = known.get(String(info.order_id));
-      const visit = findVisitForOrder(state, store.id, info, createdAt, orderIp);
+      const visit = findVisitForOrder(recentVisits, store.id, info, createdAt, orderIp);
       const webrtcIp = isKnownIp(visit?.webrtc_ip) ? visit.webrtc_ip : (existing?.webrtc_ip || null);
       const row = existing || {
         id: `sapo:${store.id}:${info.order_id}`,
@@ -953,6 +1115,7 @@ async function syncSapoOrders(state, store, preset = 'TODAY') {
       row.device_type = visit?.device_type || row.device_type || 'Unknown';
       row.fingerprint = visit?.fingerprint || row.fingerprint || null;
       row.device_key = visit?.device_key || row.device_key || null;
+      row.machine_key = visit?.machine_key || row.machine_key || null;
       row.browser_trace = visit?.browser_trace || row.browser_trace || null;
       row.order_info = JSON.stringify(info);
       row.created_at = new Date(createdAt).toISOString();
@@ -987,6 +1150,75 @@ async function syncSapoOrders(state, store, preset = 'TODAY') {
   return { success: true, total_orders: total, synced_new: created, updated_orders: updated, enriched_ips: enriched };
 }
 
+async function scanSapoOrdersDirect(store, preset = 'TODAY') {
+  const createdMin = presetMinDate(preset);
+  const pageLimit = preset === 'TODAY' ? 100 : 250;
+  const maxPages = preset === 'TODAY' ? 2 : (preset === '7_DAYS' ? 4 : 8);
+  const rows = [];
+  let total = 0;
+  let minParamName = 'created_at_min';
+
+  for (let page = 1; page <= maxPages; page++) {
+    const activeMinParam = createdMin ? `&${minParamName}=${encodeURIComponent(createdMin)}` : '';
+    let { res, data } = await sapoFetch(store, `/admin/orders.json?limit=${pageLimit}&page=${page}${activeMinParam}`);
+    if (page === 1 && res.ok && createdMin && (!Array.isArray(data?.orders) || data.orders.length === 0)) {
+      const altParam = minParamName === 'created_at_min' ? 'created_on_min' : 'created_at_min';
+      const alt = await sapoFetch(store, `/admin/orders.json?limit=${pageLimit}&page=1&${altParam}=${encodeURIComponent(createdMin)}`);
+      if (alt.res.ok && Array.isArray(alt.data?.orders) && alt.data.orders.length > 0) {
+        minParamName = altParam;
+        res = alt.res;
+        data = alt.data;
+      }
+    }
+    if (!res.ok) throw new Error(sapoError(res.status));
+    const orders = Array.isArray(data?.orders) ? data.orders : [];
+    if (!orders.length) break;
+
+    for (const sapoOrder of orders) {
+      const createdAt = sapoOrder.created_on || sapoOrder.created_at || new Date().toISOString();
+      if (!inPreset(createdAt, preset)) continue;
+      const info = parseSapoOrder(sapoOrder);
+      if (!info.order_id) continue;
+      total++;
+      const orderIp = sapoClientIp(sapoOrder);
+      rows.push({
+        id: `direct:${store.id}:${info.order_id}`,
+        store_id: store.id,
+        store_domain: store.mysapo_domain,
+        trigger_event: 'sapo_direct_scan',
+        client_ip: isKnownIp(orderIp) ? orderIp : 'unknown',
+        webrtc_ip: null,
+        webrtc_status: 'db_offline',
+        user_agent: 'Sapo API Direct Scan',
+        device_type: 'Unknown',
+        order_info: JSON.stringify(info),
+        created_at: new Date(createdAt).toISOString(),
+        updated_at: new Date().toISOString()
+      });
+    }
+
+    if (orders.length < pageLimit) break;
+  }
+
+  const enriched = await enrichOrders(rows);
+  return {
+    success: true,
+    direct_mode: true,
+    total_orders: total,
+    synced_new: rows.length,
+    updated_orders: 0,
+    enriched_ips: enriched,
+    orders: pagedOrders({ ...stateTemplate(), orders: rows }, {
+      page: 1,
+      limit: preset === 'TODAY' ? 30 : (preset === '7_DAYS' ? 60 : 80),
+      store_id: store.id,
+      startDate: businessDate(presetMinDate(preset) || new Date().toISOString()),
+      endDate: businessDate(),
+      filterMode: 'all'
+    })
+  };
+}
+
 function decorateOrder(row, state) {
   const info = getOrderInfo(row);
   const clientIp = normalizeIpValue(row.client_ip) || 'unknown';
@@ -997,14 +1229,23 @@ function decorateOrder(row, state) {
   const browserTrace = normalizeTrace(row.browser_trace);
   const fingerprint = row.fingerprint || fallbackFingerprint(row);
   const deviceKey = row.device_key || fallbackDeviceKey(row);
-  const blocked = findBlockedIdentity(state || {}, { ips: [clientIp, webrtcIp], fingerprint, deviceKey });
+  const machineKey = row.machine_key || fallbackMachineKey(row);
+  const orderTimeMs = new Date(row.created_at).getTime();
+  const sessionStartMs = new Date(row.session_start_at || '').getTime();
+  const timeToOrderSec = Number.isFinite(orderTimeMs) && Number.isFinite(sessionStartMs)
+    ? Math.max(0, Math.round((orderTimeMs - sessionStartMs) / 1000))
+    : null;
+  const blocked = findBlockedIdentity(state || {}, { ips: [clientIp, webrtcIp], fingerprint, deviceKey, machineKey });
   return {
     ...row,
     client_ip: clientIp,
     webrtc_ip: webrtcIp,
     fingerprint,
     device_key: deviceKey,
+    machine_key: machineKey,
     browser_trace: browserTrace,
+    user_order_time: row.created_at,
+    time_to_order_sec: timeToOrderSec,
     webrtc_status: invalidWebrtc ? 'invalid_candidate' : row.webrtc_status,
     webrtc_mismatch: webrtcIp ? Boolean(row.webrtc_mismatch) : false,
     risk_level: invalidWebrtc && !hasOtherRisk ? 'UNKNOWN' : row.risk_level,
@@ -1049,12 +1290,28 @@ function filterOrders(rows, query, state) {
   if (query.filterMode === 'duplicate_fingerprint') {
     const counts = new Map();
     result.forEach(row => {
-      const key = String(row.device_key || row.fingerprint || '').trim();
+      const key = String(row.machine_key || row.device_key || row.fingerprint || '').trim();
       if (key) counts.set(key, (counts.get(key) || 0) + 1);
     });
-    result = result.filter(row => (counts.get(String(row.device_key || row.fingerprint || '').trim()) || 0) > 1);
+    result = result.filter(row => (counts.get(String(row.machine_key || row.device_key || row.fingerprint || '').trim()) || 0) > 1);
   }
   return result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+}
+
+function pagedOrders(state, query = {}) {
+  const page = Math.max(1, Number(query.page || 1));
+  const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
+  const filtered = filterOrders(state.orders || [], query, state);
+  return {
+    success: true,
+    data: filtered.slice((page - 1) * limit, page * limit),
+    pagination: {
+      page,
+      limit,
+      total: filtered.length,
+      totalPages: Math.max(1, Math.ceil(filtered.length / limit))
+    }
+  };
 }
 
 async function handleStores(state, method, parts, body) {
@@ -1099,14 +1356,25 @@ async function handleStores(state, method, parts, body) {
     return json(200, { success: true, order_count: Number(data?.count || data?.orders_count || 0) });
   }
   if (method === 'POST' && parts[1] === 'sync') {
-    return json(200, await syncSapoOrders(state, store, body.datePreset || 'TODAY'));
+    const preset = body.datePreset || 'TODAY';
+    const result = await syncSapoOrders(state, store, preset);
+    const orders = pagedOrders(state, {
+      page: body.page || 1,
+      limit: body.limit || 30,
+      store_id: store.id,
+      startDate: body.startDate || businessDate(presetMinDate(preset) || new Date().toISOString()),
+      endDate: body.endDate || businessDate(),
+      search: body.search || '',
+      filterMode: body.filterMode || 'all'
+    });
+    return json(200, { ...result, orders });
   }
   return json(404, { success: false, message: 'Not found.' });
 }
 
 async function handleBlacklist(event, state, method, parts, query, body) {
   if (method === 'GET' && parts.length === 0) {
-    return json(200, { success: true, data: (state.blacklist || []).map(blacklistPublic) });
+    return json(200, { success: true, transient: Boolean(state.transient_blacklist), data: (state.blacklist || []).map(blacklistPublic) });
   }
 
   if (method === 'GET' && parts[0] === 'check') {
@@ -1114,7 +1382,8 @@ async function handleBlacklist(event, state, method, parts, query, body) {
     const blocked = findBlockedIdentity(state, {
       ips: [clientIp, query.webrtc_ip],
       fingerprint: query.fingerprint,
-      deviceKey: query.device_key
+      deviceKey: query.device_key,
+      machineKey: query.machine_key
     });
     return json(200, {
       success: true,
@@ -1127,15 +1396,15 @@ async function handleBlacklist(event, state, method, parts, query, body) {
   }
 
   if (method === 'POST' && parts.length === 0) {
-    const type = normalizeIdentityType(body.type || body.identity_type || (body.fingerprint ? 'fingerprint' : (body.device_key ? 'device_key' : 'ip')));
-    const value = normalizeIdentityValue(type, body.value || body.identity_value || body.ip || body.fingerprint || body.device_key);
+    const type = normalizeIdentityType(body.type || body.identity_type || (body.machine_key ? 'machine_key' : (body.fingerprint ? 'fingerprint' : (body.device_key ? 'device_key' : 'ip'))));
+    const value = normalizeIdentityValue(type, body.value || body.identity_value || body.ip || body.fingerprint || body.device_key || body.machine_key);
     if (!value) return json(400, { success: false, message: 'Gia tri chan khong hop le.' });
     const existing = (state.blacklist || []).find(item => blacklistType(item) === type && blacklistValue(item) === value);
     if (existing) {
       existing.reason = String(body.reason || existing.reason || 'Blocked by Sapo IP Guard').trim();
       existing.updated_at = new Date().toISOString();
-      await saveBlacklist(state);
-      return json(200, { success: true, data: blacklistPublic(existing) });
+      const saved = await saveBlacklistSafe(state);
+      return json(200, { success: true, transient: saved.transient, data: blacklistPublic(existing) });
     }
     const item = {
       id: state.autoBlacklistId++,
@@ -1148,8 +1417,8 @@ async function handleBlacklist(event, state, method, parts, query, body) {
       updated_at: new Date().toISOString()
     };
     state.blacklist.unshift(item);
-    await saveBlacklist(state);
-    return json(201, { success: true, data: blacklistPublic(item) });
+    const saved = await saveBlacklistSafe(state);
+    return json(201, { success: true, transient: saved.transient, data: blacklistPublic(item) });
   }
 
   if (method === 'DELETE' && parts[0]) {
@@ -1159,8 +1428,9 @@ async function handleBlacklist(event, state, method, parts, query, body) {
       const publicItem = blacklistPublic(item);
       return String(publicItem.id) !== rawValue && publicItem.value !== rawValue && publicItem.ip !== rawValue;
     });
-    if (state.blacklist.length !== before) await saveBlacklist(state);
-    return json(200, { success: true });
+    let saved = { transient: Boolean(state.transient_blacklist) };
+    if (state.blacklist.length !== before) saved = await saveBlacklistSafe(state);
+    return json(200, { success: true, transient: saved.transient });
   }
 
   return json(404, { success: false, message: 'Not found.' });
@@ -1178,11 +1448,9 @@ async function handleLogs(event, state, method, parts, query, body) {
     if (!store) return json(403, { success: false, message: 'Unknown store.' });
 
     const ip = firstIp(event.headers['x-forwarded-for']) || event.headers['x-real-ip'] || body.client_ip || 'unknown';
-    const existing = body.trigger_event === 'network_identity' && body.session_id
-      ? state.logs.find(row => row.store_id === store.id && row.session_id === body.session_id && row.trigger_event === 'page_view')
-      : null;
+    const existing = body.session_id ? await loadVisitLog(store.id, body.session_id).catch(() => null) : null;
     const row = existing || {
-      id: state.autoLogId++,
+      id: body.session_id ? `visit:${store.id}:${String(body.session_id).slice(0, 60)}` : state.autoLogId++,
       store_id: store.id,
       store_domain: store.mysapo_domain,
       created_at: new Date().toISOString()
@@ -1205,17 +1473,22 @@ async function handleLogs(event, state, method, parts, query, body) {
     row.session_start_at = body.session_start_at || row.session_start_at || null;
     row.fingerprint = String(body.fingerprint || row.fingerprint || '').trim() || null;
     row.device_key = String(body.device_key || row.device_key || '').trim() || null;
+    row.machine_key = String(body.machine_key || row.machine_key || '').trim() || null;
     row.browser_trace = body.browser_trace && typeof body.browser_trace === 'object'
       ? body.browser_trace
       : (row.browser_trace || null);
-    row.trigger_event = existing ? 'page_view' : (body.trigger_event || 'page_view');
+    row.trigger_event = body.trigger_event || row.trigger_event || 'network_identity';
     row.updated_at = new Date().toISOString();
-    if (!existing) state.logs.unshift(row);
-    await saveLogs(state);
+    const savedVisit = await saveVisitLog(row);
+    if (!savedVisit) {
+      if (!existing) state.logs.unshift(row);
+      await saveLogs(state);
+    }
     const blocked = findBlockedIdentity(state, {
       ips: [row.client_ip, row.webrtc_ip],
       fingerprint: row.fingerprint,
-      deviceKey: row.device_key
+      deviceKey: row.device_key,
+      machineKey: row.machine_key
     });
     return json(201, {
       success: true,
@@ -1231,22 +1504,46 @@ async function handleLogs(event, state, method, parts, query, body) {
   }
 
   if (method === 'GET' && parts.length === 0) {
-    const page = Math.max(1, Number(query.page || 1));
-    const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
-    const filtered = filterOrders(state.orders || [], query, state);
-    return json(200, {
-      success: true,
-      data: filtered.slice((page - 1) * limit, page * limit),
-      pagination: {
-        page,
-        limit,
-        total: filtered.length,
-        totalPages: Math.max(1, Math.ceil(filtered.length / limit))
-      }
-    });
+    return json(200, pagedOrders(state, query));
   }
 
   return json(404, { success: false, message: 'Not found.' });
+}
+
+async function handleMaintenance(state, method, parts) {
+  if (method === 'POST' && parts[0] === 'compact') {
+    const beforeOrders = (state.orders || []).length;
+    const beforeLogs = (state.logs || []).length;
+    state.orders = trimRows(state.orders, MAX_STORED_ORDERS);
+    state.logs = [];
+    await Promise.all([
+      saveOrders(state),
+      saveLogs(state)
+    ]);
+    return json(200, {
+      success: true,
+      before_orders: beforeOrders,
+      after_orders: state.orders.length,
+      before_logs: beforeLogs,
+      after_logs: 0
+    });
+  }
+  return json(404, { success: false, message: 'Not found.' });
+}
+
+async function handleDirectSync(method, body) {
+  if (method !== 'POST') return json(404, { success: false, message: 'Not found.' });
+  const store = {
+    id: 0,
+    store_name: String(body.store_name || body.mysapo_domain || 'Sapo Direct').trim(),
+    mysapo_domain: normalizeDomain(body.mysapo_domain || body.domain),
+    api_key: String(body.api_key || '').trim(),
+    api_secret_encrypted: encryptSecret(String(body.api_secret || '').trim())
+  };
+  if (!store.mysapo_domain || !store.api_key || !body.api_secret) {
+    return json(400, { success: false, message: 'Nhap domain Sapo, API key va API secret de quet tam thoi.' });
+  }
+  return json(200, await scanSapoOrdersDirect(store, body.datePreset || 'TODAY'));
 }
 
 function firstIp(value) {
@@ -1257,12 +1554,12 @@ exports.handler = async (event) => {
   try {
     if (event.httpMethod === 'OPTIONS') return response(204, '');
     const rawPath = event.path.replace(/^\/\.netlify\/functions\/api/, '');
-    if (rawPath === '/health') return json(200, { status: 'OK', version: 'clean-orders-v2', time: new Date().toISOString() });
+    if (rawPath === '/health') return json(200, { status: 'OK', version: 'clean-orders-v4-direct-sapo', time: new Date().toISOString() });
     if (rawPath === '/client-tracker.js') {
       const clientIp = firstIp(event.headers['x-forwarded-for']) || event.headers['x-real-ip'] || event.headers['cf-connecting-ip'] || '';
       let blocked = null;
       try {
-        const state = await loadState({ includeLogs: false, includeStores: false, includeBlacklist: true });
+        const state = await loadBlacklistStateCached();
         blocked = findBlacklist(state, clientIp);
       } catch (_) {
         blocked = null;
@@ -1290,13 +1587,42 @@ exports.handler = async (event) => {
     if (!publicCollect && !publicBlacklistCheck && !assertAdmin(event)) return json(401, { success: false, message: 'Dashboard password is invalid.' });
     if (resource === 'auth' && method === 'POST' && parts[0] === 'verify') return json(200, { success: true });
 
+    if (resource === 'direct-sync') return await handleDirectSync(method, body);
+
+    if (publicBlacklistCheck) {
+      const state = await loadBlacklistStateCached();
+      return await handleBlacklist(event, state, method, parts, query, body);
+    }
+
+    if (publicCollect) {
+      const [storesState, blacklistState] = await Promise.all([
+        loadStoresStateCached(),
+        loadBlacklistStateCached()
+      ]);
+      const state = {
+        ...stateTemplate(),
+        stores: storesState.stores || [],
+        autoStoreId: storesState.autoStoreId || 1,
+        blacklist: blacklistState.blacklist || [],
+        autoBlacklistId: blacklistState.autoBlacklistId || 1
+      };
+      return await handleLogs(event, state, method, parts, query, body);
+    }
+
+    const isSync = resource === 'stores' && method === 'POST' && parts[1] === 'sync';
+    const isOrdersRead = resource === 'logs' && method === 'GET';
+    const isBlacklistResource = resource === 'blacklist';
+    const isMaintenance = resource === 'maintenance';
     const state = await loadState({
-      includeLogs: resource !== 'auth' && resource !== 'blacklist',
-      includeStores: resource !== 'blacklist' || publicCollect
+      includeLogs: Boolean(isMaintenance),
+      includeOrders: Boolean(isOrdersRead || isSync || isMaintenance),
+      includeStores: Boolean(resource === 'stores' || publicCollect),
+      includeBlacklist: Boolean(isOrdersRead || isBlacklistResource || publicCollect)
     });
     if (resource === 'stores') return await handleStores(state, method, parts, body);
     if (resource === 'blacklist') return await handleBlacklist(event, state, method, parts, query, body);
     if (resource === 'logs') return await handleLogs(event, state, method, parts, query, body);
+    if (resource === 'maintenance') return await handleMaintenance(state, method, parts);
 
     return json(404, { success: false, message: 'Not found.' });
   } catch (error) {
