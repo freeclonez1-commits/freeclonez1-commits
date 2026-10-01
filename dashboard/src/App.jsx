@@ -41,10 +41,12 @@ import {
   verifyAdminPassword
 } from './api/client';
 
+export const PAGE_SIZE = 50;
+
 const DATE_PRESETS = {
-  TODAY: { label: 'Hom nay', start: () => businessDate(), end: () => businessDate(), limit: 30 },
-  '7_DAYS': { label: '7 ngay', start: () => businessDateDaysAgo(6), end: () => businessDate(), limit: 60 },
-  '30_DAYS': { label: '30 ngay', start: () => businessDateDaysAgo(29), end: () => businessDate(), limit: 80 }
+  TODAY: { label: 'Hom nay', start: () => businessDate(), end: () => businessDate() },
+  '7_DAYS': { label: '7 ngay', start: () => businessDateDaysAgo(6), end: () => businessDate() },
+  '30_DAYS': { label: '30 ngay', start: () => businessDateDaysAgo(29), end: () => businessDate() }
 };
 
 const FILTER_MODES = [
@@ -642,10 +644,17 @@ export default function App() {
   const [preset, setPreset] = useState('TODAY');
   const [search, setSearch] = useState('');
   const [filterMode, setFilterMode] = useState('all');
-  const [orders, setOrders] = useState([]);
+  const [orders, setOrders] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem('sapo_direct_orders_v1');
+      return saved ? JSON.parse(saved) : [];
+    } catch (_) {
+      return [];
+    }
+  });
   const [blacklist, setBlacklist] = useState([]);
   const [activeView, setActiveView] = useState('orders');
-  const [pagination, setPagination] = useState({ page: 1, limit: 30, total: 0, totalPages: 1 });
+  const [pagination, setPagination] = useState({ page: 1, limit: PAGE_SIZE, total: 0, totalPages: 1 });
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [compacting, setCompacting] = useState(false);
@@ -707,9 +716,7 @@ export default function App() {
   const loadOrders = useCallback(async (page = pagination.page, overrides = {}) => {
     if (!adminKey) return;
     if (selectedStoreId === 'direct') {
-      if (page === 1) {
-        setPagination(current => ({ ...current, page: 1, totalPages: Math.max(1, current.totalPages || 1) }));
-      }
+      setPagination(current => ({ ...current, page: Math.max(1, page) }));
       return;
     }
     const effectiveSearch = overrides.search ?? search;
@@ -718,7 +725,7 @@ export default function App() {
     try {
       const res = await getOrders({
         page,
-        limit: activePreset.limit,
+        limit: PAGE_SIZE,
         store_id: selectedStoreId || 'ALL',
         startDate: activePreset.start(),
         endDate: activePreset.end(),
@@ -726,7 +733,7 @@ export default function App() {
         filterMode: effectiveFilterMode
       });
       setOrders(res.data || []);
-      setPagination(res.pagination || { page, limit: activePreset.limit, total: 0, totalPages: 1 });
+      setPagination(res.pagination || { page, limit: PAGE_SIZE, total: 0, totalPages: 1 });
     } catch (err) {
       if (err.response?.status === 401) {
         sessionStorage.removeItem('sapo_dashboard_password_v2');
@@ -753,7 +760,7 @@ export default function App() {
         : await syncStoreOrders(selectedStore.id, {
           datePreset: preset,
           page: 1,
-          limit: effectivePreset.limit,
+          limit: PAGE_SIZE,
           startDate: effectivePreset.start(),
           endDate: effectivePreset.end(),
           search: '',
@@ -762,12 +769,24 @@ export default function App() {
       setActiveView('orders');
       setFilterMode('all');
       setSearch('');
+      const totalCount = res.total_orders ?? res.all_orders?.length ?? (res.orders?.pagination?.total || 0);
       notify(res.direct_mode
-        ? `Da quet tam ${res.total_orders || 0} don, khong dung Supabase.`
-        : `Da quet ${res.total_orders || 0} don. Dang hien Tat ca don hom nay.`);
-      if (res.orders) {
+        ? `Da quet thanh cong ${totalCount} don tu Sapo (Direct mode).`
+        : `Da quet ${totalCount} don. Dang hien tat ca don.`);
+      if (res.direct_mode && Array.isArray(res.all_orders)) {
+        setOrders(res.all_orders);
+        try {
+          sessionStorage.setItem('sapo_direct_orders_v1', JSON.stringify(res.all_orders));
+        } catch (_) {}
+        setPagination({
+          page: 1,
+          limit: PAGE_SIZE,
+          total: res.all_orders.length,
+          totalPages: Math.max(1, Math.ceil(res.all_orders.length / PAGE_SIZE))
+        });
+      } else if (res.orders) {
         setOrders(res.orders.data || []);
-        setPagination(res.orders.pagination || { page: 1, limit: effectivePreset.limit, total: 0, totalPages: 1 });
+        setPagination(res.orders.pagination || { page: 1, limit: PAGE_SIZE, total: 0, totalPages: 1 });
       } else {
         await loadOrders(1, { filterMode: 'all', search: '' });
       }
@@ -879,8 +898,36 @@ export default function App() {
     return { high, webrtc, blocked };
   }, [orders, enableVpnAlert]);
 
+  const isDirect = selectedStoreId === 'direct';
   const displayedOrders = useMemo(() => filterOrdersLocal(orders, filterMode, search), [orders, filterMode, search]);
-  const displayedTotal = selectedStoreId === 'direct' ? displayedOrders.length : (pagination.total || 0);
+
+  const totalOrdersCount = isDirect ? displayedOrders.length : (pagination.total || 0);
+  const totalPagesCount = isDirect ? Math.max(1, Math.ceil(displayedOrders.length / PAGE_SIZE)) : (pagination.totalPages || 1);
+  const currentPage = isDirect ? Math.min(Math.max(1, pagination.page), totalPagesCount) : (pagination.page || 1);
+
+  const currentTableRows = useMemo(() => {
+    if (isDirect) {
+      const start = (currentPage - 1) * PAGE_SIZE;
+      return displayedOrders.slice(start, start + PAGE_SIZE);
+    }
+    return displayedOrders;
+  }, [isDirect, displayedOrders, currentPage]);
+
+  const handlePrevPage = () => {
+    if (isDirect) {
+      setPagination(p => ({ ...p, page: Math.max(1, currentPage - 1) }));
+    } else {
+      loadOrders(currentPage - 1);
+    }
+  };
+
+  const handleNextPage = () => {
+    if (isDirect) {
+      setPagination(p => ({ ...p, page: Math.min(totalPagesCount, currentPage + 1) }));
+    } else {
+      loadOrders(currentPage + 1);
+    }
+  };
 
   if (!adminKey) return <AdminGate onUnlock={setAdminKey} />;
 
@@ -934,7 +981,7 @@ export default function App() {
 
       <main className="max-w-[1680px] mx-auto p-4 space-y-4">
         <section className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-          <StatCard icon={Database} label="Don dang hien" value={displayedTotal} />
+          <StatCard icon={Database} label="Don dang hien" value={totalOrdersCount} />
           <StatCard icon={ShieldAlert} label="Canh bao" value={summary.high} tone={summary.high > 0 ? 'red' : 'gray'} />
           <StatCard icon={Wifi} label="Co WebRTC" value={summary.webrtc} tone="blue" />
           <StatCard icon={Ban} label="Da chan" value={summary.blocked} tone="red" />
@@ -1050,7 +1097,10 @@ export default function App() {
                   {Object.entries(DATE_PRESETS).map(([key, item]) => (
                     <button
                       key={key}
-                      onClick={() => setPreset(key)}
+                      onClick={() => {
+                        setPreset(key);
+                        setPagination(p => ({ ...p, page: 1 }));
+                      }}
                       className={cn('h-10 px-4 rounded-lg text-sm font-extrabold inline-flex items-center gap-2 whitespace-nowrap', preset === key ? 'bg-[#1A73E8] text-white' : 'bg-[#F1F3F4] text-[#202124]')}
                     >
                       <Calendar className="w-4 h-4" />
@@ -1062,7 +1112,10 @@ export default function App() {
                   <Search className="w-4 h-4 absolute left-3 top-3 text-[#5F6368]" />
                   <input
                     value={search}
-                    onChange={(event) => setSearch(event.target.value)}
+                    onChange={(event) => {
+                      setSearch(event.target.value);
+                      setPagination(p => ({ ...p, page: 1 }));
+                    }}
                     onKeyDown={(event) => { if (event.key === 'Enter') loadOrders(1); }}
                     placeholder="Tim ma don, ten, phone, IP, ISP..."
                     className="w-full h-10 rounded-lg border border-[#DADCE0] pl-9 pr-3 text-sm outline-none focus:border-[#1A73E8]"
@@ -1072,7 +1125,10 @@ export default function App() {
                   {FILTER_MODES.map(item => (
                     <button
                       key={item.key}
-                      onClick={() => setFilterMode(item.key)}
+                      onClick={() => {
+                        setFilterMode(item.key);
+                        setPagination(p => ({ ...p, page: 1 }));
+                      }}
                       className={cn('h-10 px-3 rounded-lg text-sm font-extrabold inline-flex items-center gap-2 whitespace-nowrap', filterMode === item.key ? 'bg-[#E8F0FE] text-[#1A73E8] border border-[#AECBFA]' : 'bg-[#F1F3F4] text-[#3C4043] border border-transparent')}
                     >
                       <ListFilter className="w-4 h-4" />
@@ -1128,10 +1184,10 @@ export default function App() {
                   {loading && (
                     <tr><td colSpan="8" className="p-10 text-center text-[#5F6368] font-bold"><Loader2 className="w-5 h-5 animate-spin inline mr-2" />Dang tai...</td></tr>
                   )}
-                  {!loading && displayedOrders.length === 0 && (
+                  {!loading && currentTableRows.length === 0 && (
                     <tr><td colSpan="8" className="p-10 text-center text-[#5F6368] font-bold">Chua co don trong khoang nay. Bam Quet don Sapo.</td></tr>
                   )}
-                  {!loading && displayedOrders.map(order => {
+                  {!loading && currentTableRows.map(order => {
                     const info = order.order_info || {};
                     const risk = riskInfo(order, enableVpnAlert);
                     const RiskIcon = risk.icon;
@@ -1194,13 +1250,25 @@ export default function App() {
             </div>
 
             <div className="p-4 border-t border-[#DADCE0] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <button disabled={selectedStoreId === 'direct' || pagination.page <= 1} onClick={() => loadOrders(pagination.page - 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40"><ChevronLeft className="w-4 h-4 inline" /> Truoc</button>
+              <button
+                disabled={currentPage <= 1 || loading}
+                onClick={handlePrevPage}
+                className="h-9 px-4 rounded-lg bg-[#F1F3F4] font-bold text-sm inline-flex items-center gap-1.5 transition-all disabled:opacity-40 hover:bg-[#E8EAED]"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                Truoc
+              </button>
               <div className="text-sm font-bold text-[#5F6368] text-center">
-                {selectedStoreId === 'direct'
-                  ? `Dang hien ${displayedOrders.length} / ${orders.length} don da quet`
-                  : `Trang ${pagination.page} / ${pagination.totalPages} - ${pagination.total} don`}
+                Trang {currentPage} / {totalPagesCount} — Tong {totalOrdersCount} don ({totalOrdersCount === 0 ? '0 don' : `Hien thi ${(currentPage - 1) * PAGE_SIZE + 1}–${Math.min(currentPage * PAGE_SIZE, totalOrdersCount)}`})
               </div>
-              <button disabled={selectedStoreId === 'direct' || pagination.page >= pagination.totalPages} onClick={() => loadOrders(pagination.page + 1)} className="h-9 px-3 rounded-lg bg-[#F1F3F4] font-bold disabled:opacity-40">Sau <ChevronRight className="w-4 h-4 inline" /></button>
+              <button
+                disabled={currentPage >= totalPagesCount || loading}
+                onClick={handleNextPage}
+                className="h-9 px-4 rounded-lg bg-[#F1F3F4] font-bold text-sm inline-flex items-center gap-1.5 transition-all disabled:opacity-40 hover:bg-[#E8EAED]"
+              >
+                Sau
+                <ChevronRight className="w-4 h-4" />
+              </button>
             </div>
           </section>
         )}

@@ -1050,8 +1050,8 @@ async function enrichOrders(orders) {
 
 async function syncSapoOrders(state, store, preset = 'TODAY') {
   const createdMin = presetMinDate(preset);
-  const pageLimit = preset === 'TODAY' ? 100 : 250;
-  const maxPages = preset === 'TODAY' ? 2 : (preset === '7_DAYS' ? 4 : 8);
+  const pageLimit = 250;
+  const maxPages = preset === 'TODAY' ? 10 : (preset === '7_DAYS' ? 25 : 50);
   const recentVisits = await loadRecentVisits(store.id, preset === 'TODAY' ? 8 : (preset === '7_DAYS' ? 24 * 7 : 24 * 30))
     .catch(() => []);
   const known = new Map();
@@ -1152,8 +1152,8 @@ async function syncSapoOrders(state, store, preset = 'TODAY') {
 
 async function scanSapoOrdersDirect(store, preset = 'TODAY') {
   const createdMin = presetMinDate(preset);
-  const pageLimit = preset === 'TODAY' ? 100 : 250;
-  const maxPages = preset === 'TODAY' ? 2 : (preset === '7_DAYS' ? 4 : 8);
+  const pageLimit = 250;
+  const maxPages = preset === 'TODAY' ? 10 : (preset === '7_DAYS' ? 25 : 50);
   const rows = [];
   let total = 0;
   let minParamName = 'created_at_min';
@@ -1201,6 +1201,7 @@ async function scanSapoOrdersDirect(store, preset = 'TODAY') {
   }
 
   const enriched = await enrichOrders(rows);
+  const decorated = rows.map(r => decorateOrder(r, null));
   return {
     success: true,
     direct_mode: true,
@@ -1208,9 +1209,10 @@ async function scanSapoOrdersDirect(store, preset = 'TODAY') {
     synced_new: rows.length,
     updated_orders: 0,
     enriched_ips: enriched,
+    all_orders: decorated,
     orders: pagedOrders({ ...stateTemplate(), orders: rows }, {
       page: 1,
-      limit: preset === 'TODAY' ? 30 : (preset === '7_DAYS' ? 60 : 80),
+      limit: 50,
       store_id: store.id,
       startDate: businessDate(presetMinDate(preset) || new Date().toISOString()),
       endDate: businessDate(),
@@ -1300,7 +1302,7 @@ function filterOrders(rows, query, state) {
 
 function pagedOrders(state, query = {}) {
   const page = Math.max(1, Number(query.page || 1));
-  const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
+  const limit = Math.min(100, Math.max(1, Number(query.limit || 50)));
   const filtered = filterOrders(state.orders || [], query, state);
   return {
     success: true,
@@ -1360,7 +1362,7 @@ async function handleStores(state, method, parts, body) {
     const result = await syncSapoOrders(state, store, preset);
     const orders = pagedOrders(state, {
       page: body.page || 1,
-      limit: body.limit || 30,
+      limit: body.limit || 50,
       store_id: store.id,
       startDate: body.startDate || businessDate(presetMinDate(preset) || new Date().toISOString()),
       endDate: body.endDate || businessDate(),
