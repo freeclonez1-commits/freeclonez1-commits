@@ -229,21 +229,101 @@ function orderMatchesSearch(order, searchText) {
 
 function filterOrdersLocal(rows, mode, searchText) {
   let result = rows.filter(order => orderMatchesSearch(order, searchText));
+
+  const getOrderTime = (o) => {
+    const raw = o.created_at || o.order_info?.created_at || 0;
+    const t = new Date(raw).getTime();
+    return isNaN(t) ? 0 : t;
+  };
+
   if (mode === 'duplicate_ip') {
     const counts = new Map();
     result.forEach(order => {
       new Set(orderIps(order)).forEach(ip => counts.set(ip, (counts.get(ip) || 0) + 1));
     });
     result = result.filter(order => orderIps(order).some(ip => (counts.get(ip) || 0) > 1));
+
+    const getPrimaryDuplicateIp = (order) => {
+      const clientIp = cleanIdentity(order.client_ip);
+      if (clientIp && (counts.get(clientIp) || 0) > 1) return clientIp;
+      const webrtcIp = cleanIdentity(order.webrtc_ip);
+      if (webrtcIp && (counts.get(webrtcIp) || 0) > 1) return webrtcIp;
+      return clientIp || webrtcIp || 'unknown';
+    };
+
+    const groups = new Map();
+    result.forEach(order => {
+      const key = getPrimaryDuplicateIp(order);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(order);
+    });
+
+    for (const groupOrders of groups.values()) {
+      groupOrders.sort((a, b) => getOrderTime(b) - getOrderTime(a));
+    }
+
+    const sortedGroups = Array.from(groups.entries()).sort(([, aOrders], [, bOrders]) => {
+      return getOrderTime(bOrders[0]) - getOrderTime(aOrders[0]);
+    });
+
+    let groupIndex = 0;
+    return sortedGroups.flatMap(([groupKey, groupOrders]) => {
+      const gIdx = groupIndex++;
+      return groupOrders.map((order, idx) => ({
+        ...order,
+        _dup_group_key: groupKey,
+        _dup_group_index: gIdx,
+        _dup_group_count: groupOrders.length,
+        _dup_is_first_in_group: idx === 0,
+        _dup_is_last_in_group: idx === groupOrders.length - 1
+      }));
+    });
   }
+
   if (mode === 'duplicate_fingerprint') {
     const counts = new Map();
     result.forEach(order => {
       new Set(orderTraceKeys(order)).forEach(key => counts.set(key, (counts.get(key) || 0) + 1));
     });
     result = result.filter(order => orderTraceKeys(order).some(key => (counts.get(key) || 0) > 1));
+
+    const getPrimaryDuplicateTrace = (order) => {
+      for (const key of orderTraceKeys(order)) {
+        if ((counts.get(key) || 0) > 1) return key;
+      }
+      return orderTraceKeys(order)[0] || 'unknown';
+    };
+
+    const groups = new Map();
+    result.forEach(order => {
+      const key = getPrimaryDuplicateTrace(order);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(order);
+    });
+
+    for (const groupOrders of groups.values()) {
+      groupOrders.sort((a, b) => getOrderTime(b) - getOrderTime(a));
+    }
+
+    const sortedGroups = Array.from(groups.entries()).sort(([, aOrders], [, bOrders]) => {
+      return getOrderTime(bOrders[0]) - getOrderTime(aOrders[0]);
+    });
+
+    let groupIndex = 0;
+    return sortedGroups.flatMap(([groupKey, groupOrders]) => {
+      const gIdx = groupIndex++;
+      return groupOrders.map((order, idx) => ({
+        ...order,
+        _dup_group_key: groupKey,
+        _dup_group_index: gIdx,
+        _dup_group_count: groupOrders.length,
+        _dup_is_first_in_group: idx === 0,
+        _dup_is_last_in_group: idx === groupOrders.length - 1
+      }));
+    });
   }
-  return result;
+
+  return [...result].sort((a, b) => getOrderTime(b) - getOrderTime(a));
 }
 
 function AdminGate({ onUnlock }) {
@@ -1159,9 +1239,16 @@ export default function App() {
                   Tai lai
                 </button>
               </div>
-              {filterMode !== 'all' && (
-                <div className="rounded-lg border border-[#AECBFA] bg-[#E8F0FE] px-3 py-2 text-sm font-bold text-[#1A73E8]">
-                  Dang loc {FILTER_MODES.find(item => item.key === filterMode)?.label}. So don hien thi co the it hon tong don Sapo da quet.
+              {filterMode === 'duplicate_ip' && (
+                <div className="rounded-lg border border-[#AECBFA] bg-[#E8F0FE] px-3 py-2 text-sm font-bold text-[#1A73E8] flex flex-wrap items-center justify-between gap-2">
+                  <span>Dang loc <strong>Trung IP</strong>: Cac don co cung dia chi IP duoc xep dung lien tiep nhau de ban de doi chieu va xu ly.</span>
+                  <span className="text-xs font-semibold bg-white px-2 py-0.5 rounded text-[#1A73E8] border border-[#AECBFA]">Nhom theo tung dia chi IP</span>
+                </div>
+              )}
+              {filterMode === 'duplicate_fingerprint' && (
+                <div className="rounded-lg border border-[#AECBFA] bg-[#E8F0FE] px-3 py-2 text-sm font-bold text-[#1A73E8] flex flex-wrap items-center justify-between gap-2">
+                  <span>Dang loc <strong>Trung dau vet</strong>: Cac don co cung thiet bi / dau vet duoc xep dung lien tiep nhau.</span>
+                  <span className="text-xs font-semibold bg-white px-2 py-0.5 rounded text-[#1A73E8] border border-[#AECBFA]">Nhom theo dau vet thiet bi</span>
                 </div>
               )}
             </div>
@@ -1187,20 +1274,38 @@ export default function App() {
                   {!loading && currentTableRows.length === 0 && (
                     <tr><td colSpan="8" className="p-10 text-center text-[#5F6368] font-bold">Chua co don trong khoang nay. Bam Quet don Sapo.</td></tr>
                   )}
-                  {!loading && currentTableRows.map(order => {
+                  {!loading && currentTableRows.map((order, index) => {
                     const info = order.order_info || {};
                     const risk = riskInfo(order, enableVpnAlert);
                     const RiskIcon = risk.icon;
                     const clientIpVersion = ipVersion(order.client_ip);
                     const webrtcIpVersion = ipVersion(order.webrtc_ip);
+                    const isDupMode = filterMode === 'duplicate_ip' || filterMode === 'duplicate_fingerprint';
+                    const isGroupBoundary = isDupMode && index > 0 && order._dup_is_first_in_group;
+                    const isGroupAlt = isDupMode && (order._dup_group_index % 2 === 1);
                     return (
-                      <tr key={order.id} className={cn('border-t border-[#DADCE0] hover:bg-[#F8FAFD]', ((enableVpnAlert && order.risk_level === 'HIGH_RISK') || order.is_blacklisted) && 'bg-[#FCE8E6]/45 hover:bg-[#FCE8E6]/60')}>
+                      <tr
+                        key={order.id}
+                        className={cn(
+                          'border-t hover:bg-[#F8FAFD]',
+                          isGroupBoundary ? 'border-t-2 border-[#1A73E8]/40' : 'border-[#DADCE0]',
+                          isGroupAlt ? 'bg-[#F8FAFD]/60' : 'bg-white',
+                          ((enableVpnAlert && order.risk_level === 'HIGH_RISK') || order.is_blacklisted) && 'bg-[#FCE8E6]/45 hover:bg-[#FCE8E6]/60'
+                        )}
+                      >
                         <td className="p-3 font-mono font-bold whitespace-nowrap">{formatDate(order.created_at)}</td>
                         <td className="p-3">
                           <div className="font-extrabold text-[#1A73E8]">{info.order_id || order.id}</div>
                           <div className="font-bold">{info.customer_name || '--'}</div>
                           <div className="text-xs text-[#5F6368]">{info.phone || '--'}</div>
-                          <div className="mt-1 text-[11px] font-mono text-[#5F6368]">MK: {shortId(order.machine_key || order.device_key || order.fingerprint)}</div>
+                          <div className="mt-1 flex items-center gap-1.5 text-[11px] font-mono text-[#5F6368] flex-wrap">
+                            <span>MK: {shortId(order.machine_key || order.device_key || order.fingerprint)}</span>
+                            {filterMode === 'duplicate_fingerprint' && order._dup_group_count > 1 && (
+                              <span className="shrink-0 rounded-full bg-[#E8F0FE] text-[#1A73E8] border border-[#AECBFA] px-1.5 py-0.2 text-[9px] font-extrabold">
+                                Trung {order._dup_group_count} don
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="p-3">
                           <div className={cn('inline-flex max-w-[260px] items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order, enableVpnAlert) ? 'bg-[#FCE8E6] text-[#D93025]' : 'bg-[#F1F3F4]')}>
@@ -1208,7 +1313,14 @@ export default function App() {
                             <span className="truncate">{ipText(order.client_ip)}</span>
                             {clientIpVersion && <span className="shrink-0 rounded bg-white/80 px-1.5 py-0.5 text-[10px] font-extrabold">{clientIpVersion}</span>}
                           </div>
-                          <div className={cn('mt-1 text-[11px] font-bold', isFakeConnection(order, enableVpnAlert) ? 'text-[#D93025]' : 'text-[#5F6368]')}>{connectionLabel(order, enableVpnAlert)}</div>
+                          <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                            <span className={cn('text-[11px] font-bold', isFakeConnection(order, enableVpnAlert) ? 'text-[#D93025]' : 'text-[#5F6368]')}>{connectionLabel(order, enableVpnAlert)}</span>
+                            {filterMode === 'duplicate_ip' && order._dup_group_count > 1 && (
+                              <span className="shrink-0 rounded-full bg-[#E8F0FE] text-[#1A73E8] border border-[#AECBFA] px-2 py-0.2 text-[10px] font-extrabold">
+                                Trung {order._dup_group_count} don
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="p-3">
                           <div className="flex max-w-[240px] items-center gap-2">

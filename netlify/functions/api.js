@@ -1281,23 +1281,109 @@ function filterOrders(rows, query, state) {
       ].some(value => String(value || '').toLowerCase().includes(search));
     });
   }
+  const getOrderTime = (o) => {
+    const raw = o.created_at || o.order_info?.created_at || 0;
+    const t = new Date(raw).getTime();
+    return isNaN(t) ? 0 : t;
+  };
+
   if (query.filterMode === 'duplicate_ip') {
     const counts = new Map();
     result.forEach(row => {
-      const key = normalizeIpValue(row.client_ip);
-      if (key) counts.set(key, (counts.get(key) || 0) + 1);
+      const ips = [normalizeIpValue(row.client_ip), normalizeIpValue(row.webrtc_ip)].filter(Boolean);
+      new Set(ips).forEach(ip => counts.set(ip, (counts.get(ip) || 0) + 1));
     });
-    result = result.filter(row => (counts.get(normalizeIpValue(row.client_ip)) || 0) > 1);
+    result = result.filter(row => {
+      const ips = [normalizeIpValue(row.client_ip), normalizeIpValue(row.webrtc_ip)].filter(Boolean);
+      return ips.some(ip => (counts.get(ip) || 0) > 1);
+    });
+
+    const getPrimaryDuplicateIp = (row) => {
+      const cIp = normalizeIpValue(row.client_ip);
+      if (cIp && (counts.get(cIp) || 0) > 1) return cIp;
+      const wIp = normalizeIpValue(row.webrtc_ip);
+      if (wIp && (counts.get(wIp) || 0) > 1) return wIp;
+      return cIp || wIp || 'unknown';
+    };
+
+    const groups = new Map();
+    result.forEach(row => {
+      const key = getPrimaryDuplicateIp(row);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    });
+
+    for (const groupOrders of groups.values()) {
+      groupOrders.sort((a, b) => getOrderTime(b) - getOrderTime(a));
+    }
+
+    const sortedGroups = Array.from(groups.entries()).sort(([, aOrders], [, bOrders]) => {
+      return getOrderTime(bOrders[0]) - getOrderTime(aOrders[0]);
+    });
+
+    let groupIndex = 0;
+    return sortedGroups.flatMap(([groupKey, groupOrders]) => {
+      const gIdx = groupIndex++;
+      return groupOrders.map((order, idx) => ({
+        ...order,
+        _dup_group_key: groupKey,
+        _dup_group_index: gIdx,
+        _dup_group_count: groupOrders.length,
+        _dup_is_first_in_group: idx === 0,
+        _dup_is_last_in_group: idx === groupOrders.length - 1
+      }));
+    });
   }
+
   if (query.filterMode === 'duplicate_fingerprint') {
     const counts = new Map();
     result.forEach(row => {
-      const key = String(row.machine_key || row.device_key || row.fingerprint || '').trim();
-      if (key) counts.set(key, (counts.get(key) || 0) + 1);
+      const keys = [row.machine_key, row.device_key, row.fingerprint].map(v => String(v || '').trim()).filter(Boolean);
+      new Set(keys).forEach(k => counts.set(k, (counts.get(k) || 0) + 1));
     });
-    result = result.filter(row => (counts.get(String(row.machine_key || row.device_key || row.fingerprint || '').trim()) || 0) > 1);
+    result = result.filter(row => {
+      const keys = [row.machine_key, row.device_key, row.fingerprint].map(v => String(v || '').trim()).filter(Boolean);
+      return keys.some(k => (counts.get(k) || 0) > 1);
+    });
+
+    const getPrimaryDuplicateTrace = (row) => {
+      const keys = [row.machine_key, row.device_key, row.fingerprint].map(v => String(v || '').trim()).filter(Boolean);
+      for (const k of keys) {
+        if ((counts.get(k) || 0) > 1) return k;
+      }
+      return keys[0] || 'unknown';
+    };
+
+    const groups = new Map();
+    result.forEach(row => {
+      const key = getPrimaryDuplicateTrace(row);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    });
+
+    for (const groupOrders of groups.values()) {
+      groupOrders.sort((a, b) => getOrderTime(b) - getOrderTime(a));
+    }
+
+    const sortedGroups = Array.from(groups.entries()).sort(([, aOrders], [, bOrders]) => {
+      return getOrderTime(bOrders[0]) - getOrderTime(aOrders[0]);
+    });
+
+    let groupIndex = 0;
+    return sortedGroups.flatMap(([groupKey, groupOrders]) => {
+      const gIdx = groupIndex++;
+      return groupOrders.map((order, idx) => ({
+        ...order,
+        _dup_group_key: groupKey,
+        _dup_group_index: gIdx,
+        _dup_group_count: groupOrders.length,
+        _dup_is_first_in_group: idx === 0,
+        _dup_is_last_in_group: idx === groupOrders.length - 1
+      }));
+    });
   }
-  return result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  return [...result].sort((a, b) => getOrderTime(b) - getOrderTime(a));
 }
 
 function pagedOrders(state, query = {}) {
