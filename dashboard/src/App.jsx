@@ -37,11 +37,20 @@ import {
   syncStoreOrders,
   syncStoreOrdersDirect,
   testStoreConnection,
+  testDirectStoreConnection,
   updateStore,
   verifyAdminPassword
 } from './api/client';
 
 export const PAGE_SIZE = 50;
+
+export const DEFAULT_STUSSY_STORE = {
+  id: 'direct',
+  store_name: 'Stussy',
+  mysapo_domain: 'stussy-vietnam.mysapo.net',
+  api_key: 'e8685cda41d44c1d8f0547b2cec7de02',
+  api_secret: '2c26c88a76dd4a93bd1df8885af2837c'
+};
 
 const DATE_PRESETS = {
   TODAY: { label: 'Hom nay', start: () => businessDate(), end: () => businessDate() },
@@ -375,11 +384,37 @@ function AdminGate({ onUnlock }) {
 }
 
 function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChanged, notice, directStore, setDirectStore, dbOffline }) {
-  const [form, setForm] = useState({ store_name: '', mysapo_domain: '', api_key: '', api_secret: '' });
+  const [form, setForm] = useState({
+    store_name: directStore?.store_name || '',
+    mysapo_domain: directStore?.mysapo_domain || '',
+    api_key: directStore?.api_key || '',
+    api_secret: directStore?.api_secret || ''
+  });
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [showSecret, setShowSecret] = useState(false);
   const selectedStore = stores.find(store => String(store.id) === String(selectedStoreId));
   const effectiveStore = selectedStore || directStore;
   const directFirst = dbOffline || !stores.length || selectedStoreId === 'direct';
+
+  useEffect(() => {
+    if (selectedStoreId === 'direct' && directStore) {
+      setForm({
+        store_name: directStore.store_name || '',
+        mysapo_domain: directStore.mysapo_domain || '',
+        api_key: directStore.api_key || '',
+        api_secret: directStore.api_secret || ''
+      });
+    } else if (selectedStore) {
+      setForm({
+        store_name: selectedStore.store_name || '',
+        mysapo_domain: selectedStore.mysapo_domain || '',
+        api_key: selectedStore.api_key || '',
+        api_secret: ''
+      });
+    }
+  }, [selectedStoreId, directStore, selectedStore]);
+
   const trackerSnippet = effectiveStore
     ? `<script>\nwindow.SAPO_TRACKER_CONFIG = { apiKey: '${effectiveStore.api_key}' };\n</script>\n<script src="${window.location.origin}/client-tracker.js"></script>`
     : '';
@@ -388,6 +423,43 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
     if (!trackerSnippet) return;
     await navigator.clipboard?.writeText(trackerSnippet);
     notice('Da copy ma nhung tracker.');
+  };
+
+  const loadDefaultStussy = () => {
+    setForm({
+      store_name: DEFAULT_STUSSY_STORE.store_name,
+      mysapo_domain: DEFAULT_STUSSY_STORE.mysapo_domain,
+      api_key: DEFAULT_STUSSY_STORE.api_key,
+      api_secret: DEFAULT_STUSSY_STORE.api_secret
+    });
+    setDirectStore(DEFAULT_STUSSY_STORE);
+    setSelectedStoreId('direct');
+    localStorage.setItem('sapo_direct_store_v1', JSON.stringify(DEFAULT_STUSSY_STORE));
+    localStorage.setItem('sapo_selected_store_id_v2', 'direct');
+    notice('Da nap cau hinh Stussy chuan! Hay bam Test ket noi hoac sang tab Don hang de quet.');
+  };
+
+  const runTest = async () => {
+    setTesting(true);
+    try {
+      const storeToTest = selectedStoreId === 'direct'
+        ? {
+            ...effectiveStore,
+            store_name: form.store_name || effectiveStore?.store_name,
+            mysapo_domain: form.mysapo_domain || effectiveStore?.mysapo_domain,
+            api_key: form.api_key || effectiveStore?.api_key,
+            api_secret: form.api_secret || effectiveStore?.api_secret
+          }
+        : selectedStore;
+      const res = selectedStoreId === 'direct'
+        ? await testDirectStoreConnection(storeToTest)
+        : await testStoreConnection(selectedStore.id);
+      notice(`Ket noi Sapo thanh cong! Doc duoc ${res.order_count || 0} don hang.`);
+    } catch (err) {
+      notice(err.response?.data?.message || 'Ket noi Sapo that bai. Kiem tra lai API key/secret.', 'error');
+    } finally {
+      setTesting(false);
+    }
   };
 
   const save = async () => {
@@ -405,7 +477,6 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
         await createStore(form);
         notice('Da them store.');
       }
-      setForm({ store_name: '', mysapo_domain: '', api_key: '', api_secret: '' });
       await onStoresChanged();
     } catch (err) {
       notice(err.response?.data?.message || 'Khong luu duoc store.', 'error');
@@ -415,12 +486,20 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
   };
 
   const saveDirect = () => {
+    let cleanKey = (form.api_key || directStore?.api_key || '').trim();
+    if (cleanKey === 'e8685cca41d44c1d8f0547b2cec7de02') cleanKey = 'e8685cda41d44c1d8f0547b2cec7de02';
+    let cleanSecret = (form.api_secret || directStore?.api_secret || '').trim();
+    const cleanDomain = cleanDomainInput(form.mysapo_domain || directStore?.mysapo_domain || '');
+    if (cleanDomain.includes('stussy-vietnam.mysapo.net') && !cleanSecret) {
+      cleanSecret = '2c26c88a76dd4a93bd1df8885af2837c';
+    }
+
     const next = {
       id: 'direct',
       store_name: form.store_name || directStore?.store_name || 'Sapo tam thoi',
-      mysapo_domain: cleanDomainInput(form.mysapo_domain || directStore?.mysapo_domain || ''),
-      api_key: form.api_key || directStore?.api_key || '',
-      api_secret: form.api_secret || directStore?.api_secret || ''
+      mysapo_domain: cleanDomain,
+      api_key: cleanKey,
+      api_secret: cleanSecret
     };
     if (!next.mysapo_domain || !next.api_key || !next.api_secret) {
       notice('Nhap domain, API key va API secret de luu store tam.', 'error');
@@ -430,8 +509,7 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
     setSelectedStoreId('direct');
     localStorage.setItem('sapo_direct_store_v1', JSON.stringify(next));
     localStorage.setItem('sapo_selected_store_id_v2', 'direct');
-    setForm({ store_name: '', mysapo_domain: '', api_key: '', api_secret: '' });
-    notice('Da luu store tam. Chuyen sang Don hang va bam Quet don Sapo.');
+    notice('Da luu store tam. Hay bam Test ket noi hoac sang tab Don hang de quet.');
   };
 
   const primarySave = () => {
@@ -470,23 +548,35 @@ function StorePanel({ stores, selectedStoreId, setSelectedStoreId, onStoresChang
         <input className="h-10 rounded-lg border border-[#DADCE0] px-3 text-sm outline-none focus:border-[#1A73E8]" placeholder="Ten store" value={form.store_name} onChange={e => setForm({ ...form, store_name: e.target.value })} />
         <input className="h-10 rounded-lg border border-[#DADCE0] px-3 text-sm outline-none focus:border-[#1A73E8]" placeholder="ten-shop.mysapo.net" value={form.mysapo_domain} onChange={e => setForm({ ...form, mysapo_domain: e.target.value })} />
         <input className="h-10 rounded-lg border border-[#DADCE0] px-3 text-sm outline-none focus:border-[#1A73E8]" placeholder="API key" value={form.api_key} onChange={e => setForm({ ...form, api_key: e.target.value })} />
-        <input className="h-10 rounded-lg border border-[#DADCE0] px-3 text-sm outline-none focus:border-[#1A73E8]" placeholder="API secret" value={form.api_secret} onChange={e => setForm({ ...form, api_secret: e.target.value })} />
+        <div className="relative">
+          <input
+            type={showSecret ? 'text' : 'password'}
+            className="w-full h-10 rounded-lg border border-[#DADCE0] pl-3 pr-10 text-sm outline-none focus:border-[#1A73E8]"
+            placeholder="API secret"
+            value={form.api_secret}
+            onChange={e => setForm({ ...form, api_secret: e.target.value })}
+          />
+          <button
+            type="button"
+            onClick={() => setShowSecret(v => !v)}
+            className="absolute right-3 top-2.5 text-[#5F6368] hover:text-[#1D1D1F] text-xs font-semibold"
+          >
+            {showSecret ? 'An' : 'Hien'}
+          </button>
+        </div>
       </div>
-      <div className="flex gap-2">
-        <button onClick={primarySave} disabled={saving} className="flex-1 h-10 rounded-lg bg-[#1A73E8] text-white font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-60">
+      <div className="flex gap-2 flex-wrap">
+        <button onClick={primarySave} disabled={saving} className="flex-1 h-10 min-w-[140px] rounded-lg bg-[#1A73E8] text-white font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-60">
           {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
           {directFirst ? 'Luu tam de quet don' : (selectedStore ? 'Cap nhat' : 'Them store')}
         </button>
-        {!directFirst && (
-          <button onClick={saveDirect} className="h-10 px-3 rounded-lg bg-[#F1F3F4] font-bold text-sm">
-            Luu tam
-          </button>
-        )}
-        {selectedStore && (
-          <button onClick={() => testStoreConnection(selectedStore.id).then(res => notice(`Ket noi OK: ${res.order_count || 0} don`)).catch(err => notice(err.response?.data?.message || 'Test loi', 'error'))} className="h-10 px-3 rounded-lg bg-[#F1F3F4] font-bold text-sm">
-            Test
-          </button>
-        )}
+        <button onClick={runTest} disabled={testing} className="h-10 px-4 rounded-lg bg-[#E8F0FE] text-[#1A73E8] font-bold text-sm inline-flex items-center gap-1.5 hover:bg-[#D2E3FC] disabled:opacity-60">
+          {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+          Test ket noi
+        </button>
+        <button onClick={loadDefaultStussy} type="button" className="h-10 px-3 rounded-lg bg-[#F1F3F4] text-[#202124] font-bold text-sm hover:bg-[#E8EAED]" title="Nap nhanh cau hinh Stussy chuan">
+          Nap Stussy chuan
+        </button>
       </div>
       {effectiveStore && (
         <div className="space-y-2">
@@ -715,12 +805,28 @@ export default function App() {
   const [stores, setStores] = useState([]);
   const [directStore, setDirectStore] = useState(() => {
     try {
-      return JSON.parse(localStorage.getItem('sapo_direct_store_v1') || 'null');
+      const saved = JSON.parse(localStorage.getItem('sapo_direct_store_v1') || 'null');
+      if (saved) {
+        let changed = false;
+        if (saved.api_key === 'e8685cca41d44c1d8f0547b2cec7de02') {
+          saved.api_key = 'e8685cda41d44c1d8f0547b2cec7de02';
+          changed = true;
+        }
+        if (saved.mysapo_domain?.includes('stussy-vietnam.mysapo.net') && !saved.api_secret) {
+          saved.api_secret = '2c26c88a76dd4a93bd1df8885af2837c';
+          changed = true;
+        }
+        if (changed) {
+          localStorage.setItem('sapo_direct_store_v1', JSON.stringify(saved));
+        }
+        return saved;
+      }
+      return DEFAULT_STUSSY_STORE;
     } catch (_) {
-      return null;
+      return DEFAULT_STUSSY_STORE;
     }
   });
-  const [selectedStoreId, setSelectedStoreId] = useState(() => localStorage.getItem('sapo_selected_store_id_v2') || '');
+  const [selectedStoreId, setSelectedStoreId] = useState(() => localStorage.getItem('sapo_selected_store_id_v2') || 'direct');
   const [preset, setPreset] = useState('TODAY');
   const [search, setSearch] = useState('');
   const [filterMode, setFilterMode] = useState('all');

@@ -42,6 +42,11 @@ export async function testStoreConnection(id) {
   return res.data;
 }
 
+export async function testDirectStoreConnection(store) {
+  const res = await axios.post(`${API_BASE}/direct-sync`, { ...store, test: true }, adminConfig());
+  return res.data;
+}
+
 export async function syncStoreOrders(id, payload = 'TODAY') {
   const body = typeof payload === 'string' ? { datePreset: payload } : payload;
   const res = await axios.post(`${API_BASE}/stores/${id}/sync`, body, adminConfig());

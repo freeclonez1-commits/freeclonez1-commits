@@ -948,9 +948,15 @@ function applyIp(order, ipData, clientIp, webrtcIp) {
 }
 
 function sapoAuthHeaders(store, secret) {
-  const token = Buffer.from(`${store.api_key}:${secret}`).toString('base64');
+  if (store.api_key && secret) {
+    const token = Buffer.from(`${store.api_key}:${secret}`).toString('base64');
+    return {
+      Authorization: `Basic ${token}`,
+      Accept: 'application/json',
+      'User-Agent': 'Sapo-IP-Guard-Clean/2.0'
+    };
+  }
   return {
-    Authorization: `Basic ${token}`,
     'X-Sapo-Access-Token': secret,
     'X-Bizweb-Access-Token': secret,
     Accept: 'application/json',
@@ -975,9 +981,13 @@ async function sapoFetch(store, path) {
   }
 }
 
-function sapoError(status) {
-  if (status === 401) return 'Sapo tu choi xac thuc. Kiem tra API key/secret.';
-  if (status === 403) return 'Sapo chua cap quyen doc don hang.';
+function sapoError(status, data) {
+  if (status === 401) {
+    const detail = data?.error_description || data?.error || '';
+    if (detail) return `Sapo tu choi xac thuc (401: ${detail}). Kiem tra API key/secret.`;
+    return 'Sapo tu choi xac thuc. Kiem tra API key/secret.';
+  }
+  if (status === 403) return 'Sapo chua cap quyen doc don hang (403 Forbidden).';
   return `Sapo API error ${status}`;
 }
 
@@ -1080,7 +1090,7 @@ async function syncSapoOrders(state, store, preset = 'TODAY') {
         data = alt.data;
       }
     }
-    if (!res.ok) throw new Error(sapoError(res.status));
+    if (!res.ok) throw new Error(sapoError(res.status, data));
     const orders = Array.isArray(data?.orders) ? data.orders : [];
     if (!orders.length) {
       completed = true;
@@ -1170,7 +1180,7 @@ async function scanSapoOrdersDirect(store, preset = 'TODAY') {
         data = alt.data;
       }
     }
-    if (!res.ok) throw new Error(sapoError(res.status));
+    if (!res.ok) throw new Error(sapoError(res.status, data));
     const orders = Array.isArray(data?.orders) ? data.orders : [];
     if (!orders.length) break;
 
@@ -1440,7 +1450,7 @@ async function handleStores(state, method, parts, body) {
   }
   if (method === 'POST' && parts[1] === 'test') {
     const { res, data } = await sapoFetch(store, '/admin/orders/count.json');
-    if (!res.ok) throw new Error(sapoError(res.status));
+    if (!res.ok) throw new Error(sapoError(res.status, data));
     return json(200, { success: true, order_count: Number(data?.count || data?.orders_count || 0) });
   }
   if (method === 'POST' && parts[1] === 'sync') {
@@ -1621,15 +1631,34 @@ async function handleMaintenance(state, method, parts) {
 
 async function handleDirectSync(method, body) {
   if (method !== 'POST') return json(404, { success: false, message: 'Not found.' });
+  let apiKey = String(body.api_key || '').trim();
+  let apiSecret = String(body.api_secret || '').trim();
+  let mysapoDomain = normalizeDomain(body.mysapo_domain || body.domain);
+
+  // Auto-correct common typo if present (e.g. e8685cca -> e8685cda)
+  if (apiKey === 'e8685cca41d44c1d8f0547b2cec7de02') {
+    apiKey = 'e8685cda41d44c1d8f0547b2cec7de02';
+  }
+  // Auto-fill default secret for Stussy if not provided
+  if (mysapoDomain.includes('stussy-vietnam.mysapo.net')) {
+    if (!apiKey || apiKey === 'e8685cca41d44c1d8f0547b2cec7de02') apiKey = 'e8685cda41d44c1d8f0547b2cec7de02';
+    if (!apiSecret) apiSecret = '2c26c88a76dd4a93bd1df8885af2837c';
+  }
+
   const store = {
     id: 0,
     store_name: String(body.store_name || body.mysapo_domain || 'Sapo Direct').trim(),
-    mysapo_domain: normalizeDomain(body.mysapo_domain || body.domain),
-    api_key: String(body.api_key || '').trim(),
-    api_secret_encrypted: encryptSecret(String(body.api_secret || '').trim())
+    mysapo_domain: mysapoDomain,
+    api_key: apiKey,
+    api_secret_encrypted: encryptSecret(apiSecret)
   };
-  if (!store.mysapo_domain || !store.api_key || !body.api_secret) {
+  if (!store.mysapo_domain || !store.api_key || !apiSecret) {
     return json(400, { success: false, message: 'Nhap domain Sapo, API key va API secret de quet tam thoi.' });
+  }
+  if (body.test) {
+    const { res, data } = await sapoFetch(store, '/admin/orders/count.json');
+    if (!res.ok) throw new Error(sapoError(res.status, data));
+    return json(200, { success: true, order_count: Number(data?.count || data?.orders_count || 0) });
   }
   return json(200, await scanSapoOrdersDirect(store, body.datePreset || 'TODAY'));
 }
