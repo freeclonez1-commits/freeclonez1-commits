@@ -977,7 +977,8 @@ export default function App() {
         await loadOrders(1, { filterMode: 'all', search: '' });
       }
     } catch (err) {
-      notify(err.response?.data?.message || 'Quet don that bai.', 'error');
+      const msg = err.response?.data?.message || (err.message ? `Quet don that bai: ${err.message}` : 'Quet don that bai.');
+      notify(msg, 'error');
     } finally {
       setSyncing(false);
     }

@@ -49,12 +49,12 @@ export async function testDirectStoreConnection(store) {
 
 export async function syncStoreOrders(id, payload = 'TODAY') {
   const body = typeof payload === 'string' ? { datePreset: payload } : payload;
-  const res = await axios.post(`${API_BASE}/stores/${id}/sync`, body, adminConfig());
+  const res = await axios.post(`${API_BASE}/stores/${id}/sync`, body, adminConfig({ timeout: 35000 }));
   return res.data;
 }
 
 export async function syncStoreOrdersDirect(store, datePreset = 'TODAY') {
-  const res = await axios.post(`${API_BASE}/direct-sync`, { ...store, datePreset }, adminConfig());
+  const res = await axios.post(`${API_BASE}/direct-sync`, { ...store, datePreset }, adminConfig({ timeout: 35000 }));
   return res.data;
 }
 

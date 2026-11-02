@@ -1029,7 +1029,7 @@ function findVisitForOrder(visits, storeId, orderInfo, createdAt, orderIp) {
   return sameIpCandidates.find(log => isKnownIp(log.webrtc_ip)) || sameIpCandidates[0] || null;
 }
 
-async function enrichOrders(orders) {
+async function enrichOrders(orders, maxLookups = 15) {
   const groups = new Map();
   for (const order of orders) {
     if (!isKnownIp(order.client_ip)) continue;
@@ -1048,14 +1048,23 @@ async function enrichOrders(orders) {
     if (!groups.has(key)) groups.set(key, { clientIp: order.client_ip, webrtcIp: order.webrtc_ip, orders: [] });
     groups.get(key).orders.push(order);
   }
-  let count = 0;
-  for (const group of groups.values()) {
-    if (count >= MAX_IP_LOOKUPS_PER_SYNC) break;
-    const data = await lookupIp(group.clientIp);
-    group.orders.forEach(order => applyIp(order, data, group.clientIp, group.webrtcIp));
-    count++;
+
+  const targets = Array.from(groups.values()).slice(0, maxLookups);
+  if (!targets.length) return 0;
+
+  // Process lookups in parallel chunks to avoid blocking and stay under serverless timeout
+  const chunkSize = 5;
+  for (let i = 0; i < targets.length; i += chunkSize) {
+    const chunk = targets.slice(i, i + chunkSize);
+    const results = await Promise.all(chunk.map(group => lookupIp(group.clientIp).catch(() => null)));
+    chunk.forEach((group, idx) => {
+      const data = results[idx];
+      if (data) {
+        group.orders.forEach(order => applyIp(order, data, group.clientIp, group.webrtcIp));
+      }
+    });
   }
-  return count;
+  return targets.length;
 }
 
 async function syncSapoOrders(state, store, preset = 'TODAY') {
@@ -1162,8 +1171,9 @@ async function syncSapoOrders(state, store, preset = 'TODAY') {
 
 async function scanSapoOrdersDirect(store, preset = 'TODAY') {
   const createdMin = presetMinDate(preset);
+  const minTime = createdMin ? new Date(createdMin).getTime() : 0;
   const pageLimit = 250;
-  const maxPages = preset === 'TODAY' ? 10 : (preset === '7_DAYS' ? 25 : 50);
+  const maxPages = preset === 'TODAY' ? 5 : (preset === '7_DAYS' ? 10 : 25);
   const rows = [];
   let total = 0;
   let minParamName = 'created_at_min';
@@ -1184,8 +1194,14 @@ async function scanSapoOrdersDirect(store, preset = 'TODAY') {
     const orders = Array.isArray(data?.orders) ? data.orders : [];
     if (!orders.length) break;
 
+    let reachedOlder = false;
     for (const sapoOrder of orders) {
       const createdAt = sapoOrder.created_on || sapoOrder.created_at || new Date().toISOString();
+      const orderTime = new Date(createdAt).getTime();
+      if (minTime && orderTime < minTime) {
+        reachedOlder = true;
+        continue;
+      }
       if (!inPreset(createdAt, preset)) continue;
       const info = parseSapoOrder(sapoOrder);
       if (!info.order_id) continue;
@@ -1207,10 +1223,10 @@ async function scanSapoOrdersDirect(store, preset = 'TODAY') {
       });
     }
 
-    if (orders.length < pageLimit) break;
+    if (reachedOlder || orders.length < pageLimit) break;
   }
 
-  const enriched = await enrichOrders(rows);
+  const enriched = await enrichOrders(rows, 10).catch(() => 0);
   const decorated = rows.map(r => decorateOrder(r, null));
   return {
     success: true,
