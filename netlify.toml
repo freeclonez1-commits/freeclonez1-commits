@@ -3,9 +3,6 @@
   publish = "dashboard/dist"
   functions = "netlify/functions"
 
-[functions]
-  timeout = 26
-
 [[redirects]]
   from = "/api/v1/*"
   to = "/.netlify/functions/api/api/v1/:splat"
