@@ -9,10 +9,13 @@ import {
   Copy,
   Database,
   Eye,
+  Fingerprint,
   Globe2,
   KeyRound,
+  Layers,
   ListFilter,
   Loader2,
+  Phone,
   Plus,
   RefreshCw,
   Search,
@@ -59,9 +62,11 @@ const DATE_PRESETS = {
 };
 
 const FILTER_MODES = [
-  { key: 'all', label: 'Tat ca' },
-  { key: 'duplicate_ip', label: 'Trung IP' },
-  { key: 'duplicate_fingerprint', label: 'Trung dau vet' }
+  { key: 'all', label: 'Tat ca', icon: ListFilter },
+  { key: 'duplicate_ip', label: 'Trung IP', icon: Wifi },
+  { key: 'duplicate_fingerprint', label: 'Trung Fingerprint', icon: Fingerprint },
+  { key: 'duplicate_phone', label: 'Trung SDT', icon: Phone },
+  { key: 'duplicate_any', label: 'Trung IP / FP', icon: Layers }
 ];
 
 function cn(...values) {
@@ -200,26 +205,55 @@ function cleanIdentity(value) {
   return text;
 }
 
+function cleanPhone(value) {
+  const raw = String(value || '').trim().replace(/[\s\-\.\(\)]/g, '');
+  if (!raw || ['--', 'unknown', 'null', 'undefined'].includes(raw.toLowerCase())) return '';
+  if (raw.startsWith('+84')) return '0' + raw.slice(3);
+  if (raw.startsWith('84') && raw.length >= 11) return '0' + raw.slice(2);
+  return raw;
+}
+
+function getOrderInfoSafe(order) {
+  if (!order) return {};
+  if (typeof order.order_info === 'object' && order.order_info !== null) return order.order_info;
+  if (typeof order.order_info === 'string') {
+    try {
+      return JSON.parse(order.order_info);
+    } catch (_) {
+      return {};
+    }
+  }
+  return {};
+}
+
 function orderIps(order) {
   return [order.client_ip, order.webrtc_ip]
     .map(cleanIdentity)
     .filter(Boolean);
 }
 
-function orderTraceKeys(order) {
-  return [order.machine_key, order.device_key, order.fingerprint, order.session_id]
+function orderFingerprintKeys(order) {
+  const trace = order.browser_trace || {};
+  return [order.fingerprint, order.machine_key, order.device_key, trace.fingerprint, trace.machine_key, trace.device_key]
     .map(cleanIdentity)
     .filter(Boolean);
+}
+
+function orderPhone(order) {
+  const info = getOrderInfoSafe(order);
+  return cleanPhone(info.phone);
 }
 
 function orderMatchesSearch(order, searchText) {
   const needle = cleanIdentity(searchText);
   if (!needle) return true;
-  const info = order.order_info || {};
+  const info = getOrderInfoSafe(order);
+  const cleanP = cleanPhone(info.phone);
   const haystack = [
     info.order_id,
     info.customer_name,
     info.phone,
+    cleanP,
     info.email,
     order.client_ip,
     order.webrtc_ip,
@@ -292,20 +326,113 @@ function filterOrdersLocal(rows, mode, searchText) {
   if (mode === 'duplicate_fingerprint') {
     const counts = new Map();
     result.forEach(order => {
-      new Set(orderTraceKeys(order)).forEach(key => counts.set(key, (counts.get(key) || 0) + 1));
+      new Set(orderFingerprintKeys(order)).forEach(key => counts.set(key, (counts.get(key) || 0) + 1));
     });
-    result = result.filter(order => orderTraceKeys(order).some(key => (counts.get(key) || 0) > 1));
+    result = result.filter(order => orderFingerprintKeys(order).some(key => (counts.get(key) || 0) > 1));
 
-    const getPrimaryDuplicateTrace = (order) => {
-      for (const key of orderTraceKeys(order)) {
+    const getPrimaryDuplicateFingerprint = (order) => {
+      for (const key of orderFingerprintKeys(order)) {
         if ((counts.get(key) || 0) > 1) return key;
       }
-      return orderTraceKeys(order)[0] || 'unknown';
+      return orderFingerprintKeys(order)[0] || 'unknown';
     };
 
     const groups = new Map();
     result.forEach(order => {
-      const key = getPrimaryDuplicateTrace(order);
+      const key = getPrimaryDuplicateFingerprint(order);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(order);
+    });
+
+    for (const groupOrders of groups.values()) {
+      groupOrders.sort((a, b) => getOrderTime(b) - getOrderTime(a));
+    }
+
+    const sortedGroups = Array.from(groups.entries()).sort(([, aOrders], [, bOrders]) => {
+      return getOrderTime(bOrders[0]) - getOrderTime(aOrders[0]);
+    });
+
+    let groupIndex = 0;
+    return sortedGroups.flatMap(([groupKey, groupOrders]) => {
+      const gIdx = groupIndex++;
+      return groupOrders.map((order, idx) => ({
+        ...order,
+        _dup_group_key: groupKey,
+        _dup_group_index: gIdx,
+        _dup_group_count: groupOrders.length,
+        _dup_is_first_in_group: idx === 0,
+        _dup_is_last_in_group: idx === groupOrders.length - 1
+      }));
+    });
+  }
+
+  if (mode === 'duplicate_phone') {
+    const counts = new Map();
+    result.forEach(order => {
+      const p = orderPhone(order);
+      if (p) counts.set(p, (counts.get(p) || 0) + 1);
+    });
+    result = result.filter(order => {
+      const p = orderPhone(order);
+      return p && (counts.get(p) || 0) > 1;
+    });
+
+    const groups = new Map();
+    result.forEach(order => {
+      const key = orderPhone(order) || 'unknown';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(order);
+    });
+
+    for (const groupOrders of groups.values()) {
+      groupOrders.sort((a, b) => getOrderTime(b) - getOrderTime(a));
+    }
+
+    const sortedGroups = Array.from(groups.entries()).sort(([, aOrders], [, bOrders]) => {
+      return getOrderTime(bOrders[0]) - getOrderTime(aOrders[0]);
+    });
+
+    let groupIndex = 0;
+    return sortedGroups.flatMap(([groupKey, groupOrders]) => {
+      const gIdx = groupIndex++;
+      return groupOrders.map((order, idx) => ({
+        ...order,
+        _dup_group_key: groupKey,
+        _dup_group_index: gIdx,
+        _dup_group_count: groupOrders.length,
+        _dup_is_first_in_group: idx === 0,
+        _dup_is_last_in_group: idx === groupOrders.length - 1
+      }));
+    });
+  }
+
+  if (mode === 'duplicate_any') {
+    const ipCounts = new Map();
+    const fpCounts = new Map();
+    result.forEach(order => {
+      new Set(orderIps(order)).forEach(ip => ipCounts.set(ip, (ipCounts.get(ip) || 0) + 1));
+      new Set(orderFingerprintKeys(order)).forEach(key => fpCounts.set(key, (fpCounts.get(key) || 0) + 1));
+    });
+
+    result = result.filter(order => {
+      const hasDupIp = orderIps(order).some(ip => (ipCounts.get(ip) || 0) > 1);
+      const hasDupFp = orderFingerprintKeys(order).some(k => (fpCounts.get(k) || 0) > 1);
+      return hasDupIp || hasDupFp;
+    });
+
+    const getPrimaryGroupKey = (order) => {
+      for (const ip of orderIps(order)) {
+        if ((ipCounts.get(ip) || 0) > 1) return `ip:${ip}`;
+      }
+      for (const fp of orderFingerprintKeys(order)) {
+        if ((fpCounts.get(fp) || 0) > 1) return `fp:${fp}`;
+      }
+      return 'unknown';
+    };
+
+    const groups = new Map();
+    result.forEach(order => {
+      const key = getPrimaryGroupKey(order);
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(order);
     });
@@ -1085,6 +1212,19 @@ export default function App() {
     return { high, webrtc, blocked };
   }, [orders, enableVpnAlert]);
 
+  const duplicateStats = useMemo(() => {
+    const ipCounts = new Map();
+    const fpCounts = new Map();
+    const phoneCounts = new Map();
+    orders.forEach(order => {
+      new Set(orderIps(order)).forEach(ip => ipCounts.set(ip, (ipCounts.get(ip) || 0) + 1));
+      new Set(orderFingerprintKeys(order)).forEach(fp => fpCounts.set(fp, (fpCounts.get(fp) || 0) + 1));
+      const p = orderPhone(order);
+      if (p) phoneCounts.set(p, (phoneCounts.get(p) || 0) + 1);
+    });
+    return { ipCounts, fpCounts, phoneCounts };
+  }, [orders]);
+
   const isDirect = selectedStoreId === 'direct';
   const displayedOrders = useMemo(() => filterOrdersLocal(orders, filterMode, search), [orders, filterMode, search]);
 
@@ -1309,19 +1449,22 @@ export default function App() {
                   />
                 </div>
                 <div className="flex gap-2 overflow-x-auto pb-1">
-                  {FILTER_MODES.map(item => (
-                    <button
-                      key={item.key}
-                      onClick={() => {
-                        setFilterMode(item.key);
-                        setPagination(p => ({ ...p, page: 1 }));
-                      }}
-                      className={cn('h-10 px-3 rounded-lg text-sm font-extrabold inline-flex items-center gap-2 whitespace-nowrap', filterMode === item.key ? 'bg-[#E8F0FE] text-[#1A73E8] border border-[#AECBFA]' : 'bg-[#F1F3F4] text-[#3C4043] border border-transparent')}
-                    >
-                      <ListFilter className="w-4 h-4" />
-                      {item.label}
-                    </button>
-                  ))}
+                  {FILTER_MODES.map(item => {
+                    const Icon = item.icon || ListFilter;
+                    return (
+                      <button
+                        key={item.key}
+                        onClick={() => {
+                          setFilterMode(item.key);
+                          setPagination(p => ({ ...p, page: 1 }));
+                        }}
+                        className={cn('h-10 px-3 rounded-lg text-sm font-extrabold inline-flex items-center gap-2 whitespace-nowrap transition-all', filterMode === item.key ? 'bg-[#E8F0FE] text-[#1A73E8] border border-[#AECBFA]' : 'bg-[#F1F3F4] text-[#3C4043] border border-transparent hover:bg-[#E8EAED]')}
+                      >
+                        <Icon className="w-4 h-4" />
+                        {item.label}
+                      </button>
+                    );
+                  })}
                 </div>
                 <button
                   onClick={() => {
@@ -1354,8 +1497,20 @@ export default function App() {
               )}
               {filterMode === 'duplicate_fingerprint' && (
                 <div className="rounded-lg border border-[#AECBFA] bg-[#E8F0FE] px-3 py-2 text-sm font-bold text-[#1A73E8] flex flex-wrap items-center justify-between gap-2">
-                  <span>Dang loc <strong>Trung dau vet</strong>: Cac don co cung thiet bi / dau vet duoc xep dung lien tiep nhau.</span>
-                  <span className="text-xs font-semibold bg-white px-2 py-0.5 rounded text-[#1A73E8] border border-[#AECBFA]">Nhom theo dau vet thiet bi</span>
+                  <span>Dang loc <strong>Trung Fingerprint</strong>: Cac don co cung ma Fingerprint (thiet bi / dau vet) duoc xep dung lien tiep nhau de ban de doi chieu.</span>
+                  <span className="text-xs font-semibold bg-white px-2 py-0.5 rounded text-[#1A73E8] border border-[#AECBFA]">Nhom theo ma Fingerprint</span>
+                </div>
+              )}
+              {filterMode === 'duplicate_phone' && (
+                <div className="rounded-lg border border-[#AECBFA] bg-[#E8F0FE] px-3 py-2 text-sm font-bold text-[#1A73E8] flex flex-wrap items-center justify-between gap-2">
+                  <span>Dang loc <strong>Trung SDT</strong>: Cac don co cung so dien thoai nguoi dat duoc xep dung lien tiep nhau de ban de doi chieu.</span>
+                  <span className="text-xs font-semibold bg-white px-2 py-0.5 rounded text-[#1A73E8] border border-[#AECBFA]">Nhom theo so dien thoai</span>
+                </div>
+              )}
+              {filterMode === 'duplicate_any' && (
+                <div className="rounded-lg border border-[#AECBFA] bg-[#E8F0FE] px-3 py-2 text-sm font-bold text-[#1A73E8] flex flex-wrap items-center justify-between gap-2">
+                  <span>Dang loc <strong>Trung IP hoac Fingerprint</strong>: Tat ca cac don co dau hieu trung lap ve mang hoac thiet bi duoc gom nhom canh nhau.</span>
+                  <span className="text-xs font-semibold bg-white px-2 py-0.5 rounded text-[#1A73E8] border border-[#AECBFA]">Nhom theo IP / Fingerprint</span>
                 </div>
               )}
             </div>
@@ -1382,12 +1537,12 @@ export default function App() {
                     <tr><td colSpan="8" className="p-10 text-center text-[#5F6368] font-bold">Chua co don trong khoang nay. Bam Quet don Sapo.</td></tr>
                   )}
                   {!loading && currentTableRows.map((order, index) => {
-                    const info = order.order_info || {};
+                    const info = getOrderInfoSafe(order);
                     const risk = riskInfo(order, enableVpnAlert);
                     const RiskIcon = risk.icon;
                     const clientIpVersion = ipVersion(order.client_ip);
                     const webrtcIpVersion = ipVersion(order.webrtc_ip);
-                    const isDupMode = filterMode === 'duplicate_ip' || filterMode === 'duplicate_fingerprint';
+                    const isDupMode = ['duplicate_ip', 'duplicate_fingerprint', 'duplicate_phone', 'duplicate_any'].includes(filterMode);
                     const isGroupBoundary = isDupMode && index > 0 && order._dup_is_first_in_group;
                     const isGroupAlt = isDupMode && (order._dup_group_index % 2 === 1);
                     return (
@@ -1404,29 +1559,114 @@ export default function App() {
                         <td className="p-3">
                           <div className="font-extrabold text-[#1A73E8]">{info.order_id || order.id}</div>
                           <div className="font-bold">{info.customer_name || '--'}</div>
-                          <div className="text-xs text-[#5F6368]">{info.phone || '--'}</div>
-                          <div className="mt-1 flex items-center gap-1.5 text-[11px] font-mono text-[#5F6368] flex-wrap">
-                            <span>MK: {shortId(order.machine_key || order.device_key || order.fingerprint)}</span>
-                            {filterMode === 'duplicate_fingerprint' && order._dup_group_count > 1 && (
-                              <span className="shrink-0 rounded-full bg-[#E8F0FE] text-[#1A73E8] border border-[#AECBFA] px-1.5 py-0.2 text-[9px] font-extrabold">
-                                Trung {order._dup_group_count} don
+                          <div className="text-xs text-[#5F6368] flex items-center gap-1.5 flex-wrap">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (info.phone) {
+                                  setSearch(cleanPhone(info.phone));
+                                  setPagination(p => ({ ...p, page: 1 }));
+                                }
+                              }}
+                              title="Bam de loc tat ca don co SDT nay"
+                              className={cn('hover:text-[#1A73E8] hover:underline cursor-pointer', !info.phone && 'pointer-events-none')}
+                            >
+                              {info.phone || '--'}
+                            </button>
+                            {orderPhone(order) && (duplicateStats.phoneCounts.get(orderPhone(order)) || 0) > 1 && (
+                              <span
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSearch(orderPhone(order));
+                                  setPagination(p => ({ ...p, page: 1 }));
+                                }}
+                                className="shrink-0 cursor-pointer rounded-full bg-[#E8F0FE] text-[#1A73E8] border border-[#AECBFA] px-1.5 py-0.2 text-[9px] font-extrabold hover:bg-[#D2E3FC]"
+                                title="Bam de xem tat ca don co cung SDT nay"
+                              >
+                                Trung {duplicateStats.phoneCounts.get(orderPhone(order))} don SDT
                               </span>
                             )}
+                          </div>
+                          <div className="mt-1 flex items-center gap-1.5 text-[11px] font-mono text-[#5F6368] flex-wrap">
+                            {(() => {
+                              const fp = order.fingerprint || order.machine_key || order.device_key;
+                              const cleanFp = cleanIdentity(fp);
+                              const fpCount = cleanFp ? (duplicateStats.fpCounts.get(cleanFp) || 0) : 0;
+                              return (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (cleanFp) {
+                                        setSearch(cleanFp);
+                                        setPagination(p => ({ ...p, page: 1 }));
+                                      }
+                                    }}
+                                    title={cleanFp ? `Fingerprint: ${cleanFp}. Bam de loc tat ca don co Fingerprint nay.` : 'Chua co Fingerprint'}
+                                    className={cn('hover:text-[#1A73E8] hover:underline cursor-pointer inline-flex items-center gap-1', !cleanFp && 'pointer-events-none')}
+                                  >
+                                    <Fingerprint className="w-3 h-3 text-[#5F6368]" />
+                                    <span>FP: {shortId(fp)}</span>
+                                  </button>
+                                  {fpCount > 1 && (
+                                    <span
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setSearch(cleanFp);
+                                        setPagination(p => ({ ...p, page: 1 }));
+                                      }}
+                                      className="shrink-0 cursor-pointer rounded-full bg-[#E8F0FE] text-[#1A73E8] border border-[#AECBFA] px-1.5 py-0.2 text-[9px] font-extrabold hover:bg-[#D2E3FC]"
+                                      title="Bam de xem tat ca don co cung Fingerprint nay"
+                                    >
+                                      Trung {fpCount} don FP
+                                    </span>
+                                  )}
+                                </>
+                              );
+                            })()}
                           </div>
                         </td>
                         <td className="p-3">
                           <div className={cn('inline-flex max-w-[260px] items-center gap-2 rounded-lg px-2.5 py-1 font-mono font-extrabold', isFakeConnection(order, enableVpnAlert) ? 'bg-[#FCE8E6] text-[#D93025]' : 'bg-[#F1F3F4]')}>
                             <Wifi className={cn('w-4 h-4', isFakeConnection(order, enableVpnAlert) ? 'text-[#D93025]' : 'text-[#1A73E8]')} />
-                            <span className="truncate">{ipText(order.client_ip)}</span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (order.client_ip && order.client_ip !== 'unknown' && order.client_ip !== '--') {
+                                  setSearch(order.client_ip);
+                                  setPagination(p => ({ ...p, page: 1 }));
+                                }
+                              }}
+                              title="Bam de loc tat ca don co IP nay"
+                              className="truncate hover:text-[#1A73E8] hover:underline cursor-pointer"
+                            >
+                              {ipText(order.client_ip)}
+                            </button>
                             {clientIpVersion && <span className="shrink-0 rounded bg-white/80 px-1.5 py-0.5 text-[10px] font-extrabold">{clientIpVersion}</span>}
                           </div>
                           <div className="mt-1 flex items-center gap-1.5 flex-wrap">
                             <span className={cn('text-[11px] font-bold', isFakeConnection(order, enableVpnAlert) ? 'text-[#D93025]' : 'text-[#5F6368]')}>{connectionLabel(order, enableVpnAlert)}</span>
-                            {filterMode === 'duplicate_ip' && order._dup_group_count > 1 && (
-                              <span className="shrink-0 rounded-full bg-[#E8F0FE] text-[#1A73E8] border border-[#AECBFA] px-2 py-0.2 text-[10px] font-extrabold">
-                                Trung {order._dup_group_count} don
-                              </span>
-                            )}
+                            {(() => {
+                              const cIp = cleanIdentity(order.client_ip);
+                              const cCount = cIp ? (duplicateStats.ipCounts.get(cIp) || 0) : 0;
+                              if (cCount <= 1) return null;
+                              return (
+                                <span
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSearch(cIp);
+                                    setPagination(p => ({ ...p, page: 1 }));
+                                  }}
+                                  className="shrink-0 cursor-pointer rounded-full bg-[#E8F0FE] text-[#1A73E8] border border-[#AECBFA] px-2 py-0.2 text-[10px] font-extrabold hover:bg-[#D2E3FC]"
+                                  title="Bam de xem tat ca don co cung IP nay"
+                                >
+                                  Trung {cCount} don IP
+                                </span>
+                              );
+                            })()}
                           </div>
                         </td>
                         <td className="p-3">

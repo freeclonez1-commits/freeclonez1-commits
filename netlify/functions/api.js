@@ -729,6 +729,9 @@ function fallbackFingerprint(row) {
   if (trace?.fingerprint) return String(trace.fingerprint).trim();
   const userAgent = String(row?.user_agent || '').trim();
   if (!userAgent || userAgent === 'Sapo API Sync') return null;
+  if (userAgent !== 'Sapo API Direct Scan') {
+    return sha256(userAgent).slice(0, 12);
+  }
   return sha256([
     userAgent,
     row?.device_type || '',
@@ -740,12 +743,20 @@ function fallbackFingerprint(row) {
 function fallbackDeviceKey(row) {
   const trace = normalizeTrace(row?.browser_trace);
   if (trace?.device_key || trace?.machine_key) return String(trace.device_key || trace.machine_key).trim();
+  const userAgent = String(row?.user_agent || '').trim();
+  if (userAgent && userAgent !== 'Sapo API Sync' && userAgent !== 'Sapo API Direct Scan') {
+    return sha256(userAgent).slice(0, 12);
+  }
   return null;
 }
 
 function fallbackMachineKey(row) {
   const trace = normalizeTrace(row?.browser_trace);
   if (trace?.machine_key || trace?.device_key) return String(trace.machine_key || trace.device_key).trim();
+  const userAgent = String(row?.user_agent || '').trim();
+  if (userAgent && userAgent !== 'Sapo API Sync' && userAgent !== 'Sapo API Direct Scan') {
+    return sha256(userAgent).slice(0, 12);
+  }
   return null;
 }
 
@@ -1207,6 +1218,13 @@ async function scanSapoOrdersDirect(store, preset = 'TODAY') {
       if (!info.order_id) continue;
       total++;
       const orderIp = sapoClientIp(sapoOrder);
+      const rawUa = sapoOrder?.client_details?.user_agent || sapoOrder?.user_agent || null;
+      let deviceTypeVal = 'Unknown';
+      if (rawUa) {
+        if (/iPad|Tablet/i.test(rawUa)) deviceTypeVal = 'Tablet';
+        else if (/Mobi|iPhone|Android/i.test(rawUa)) deviceTypeVal = 'Mobile';
+        else deviceTypeVal = 'Desktop';
+      }
       rows.push({
         id: `direct:${store.id}:${info.order_id}`,
         store_id: store.id,
@@ -1215,8 +1233,8 @@ async function scanSapoOrdersDirect(store, preset = 'TODAY') {
         client_ip: isKnownIp(orderIp) ? orderIp : 'unknown',
         webrtc_ip: null,
         webrtc_status: 'db_offline',
-        user_agent: 'Sapo API Direct Scan',
-        device_type: 'Unknown',
+        user_agent: rawUa || 'Sapo API Direct Scan',
+        device_type: deviceTypeVal,
         order_info: JSON.stringify(info),
         created_at: new Date(createdAt).toISOString(),
         updated_at: new Date().toISOString()
@@ -1256,8 +1274,8 @@ function decorateOrder(row, state) {
   const riskReasons = parseJson(row.risk_reasons, []).filter(reason => !(invalidWebrtc && /webrtc/i.test(String(reason))));
   const browserTrace = normalizeTrace(row.browser_trace);
   const fingerprint = row.fingerprint || fallbackFingerprint(row);
-  const deviceKey = row.device_key || fallbackDeviceKey(row);
-  const machineKey = row.machine_key || fallbackMachineKey(row);
+  const deviceKey = row.device_key || fallbackDeviceKey(row) || fingerprint;
+  const machineKey = row.machine_key || fallbackMachineKey(row) || fingerprint;
   const orderTimeMs = new Date(row.created_at).getTime();
   const sessionStartMs = new Date(row.session_start_at || '').getTime();
   const timeToOrderSec = Number.isFinite(orderTimeMs) && Number.isFinite(sessionStartMs)
@@ -1408,6 +1426,114 @@ function filterOrders(rows, query, state) {
       }));
     });
   }
+
+  const cleanPhone = (val) => {
+    const raw = String(val || '').trim().replace(/[\s\-\.\(\)]/g, '');
+    if (!raw || ['--', 'unknown', 'null', 'undefined'].includes(raw.toLowerCase())) return '';
+    if (raw.startsWith('+84')) return '0' + raw.slice(3);
+    if (raw.startsWith('84') && raw.length >= 11) return '0' + raw.slice(2);
+    return raw;
+  };
+
+  if (query.filterMode === 'duplicate_phone') {
+    const counts = new Map();
+    result.forEach(row => {
+      const info = row.order_info || {};
+      const p = cleanPhone(info.phone);
+      if (p) counts.set(p, (counts.get(p) || 0) + 1);
+    });
+    result = result.filter(row => {
+      const info = row.order_info || {};
+      const p = cleanPhone(info.phone);
+      return p && (counts.get(p) || 0) > 1;
+    });
+
+    const groups = new Map();
+    result.forEach(row => {
+      const info = row.order_info || {};
+      const key = cleanPhone(info.phone) || 'unknown';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    });
+
+    for (const groupOrders of groups.values()) {
+      groupOrders.sort((a, b) => getOrderTime(b) - getOrderTime(a));
+    }
+
+    const sortedGroups = Array.from(groups.entries()).sort(([, aOrders], [, bOrders]) => {
+      return getOrderTime(bOrders[0]) - getOrderTime(aOrders[0]);
+    });
+
+    let groupIndex = 0;
+    return sortedGroups.flatMap(([groupKey, groupOrders]) => {
+      const gIdx = groupIndex++;
+      return groupOrders.map((order, idx) => ({
+        ...order,
+        _dup_group_key: groupKey,
+        _dup_group_index: gIdx,
+        _dup_group_count: groupOrders.length,
+        _dup_is_first_in_group: idx === 0,
+        _dup_is_last_in_group: idx === groupOrders.length - 1
+      }));
+    });
+  }
+
+  if (query.filterMode === 'duplicate_any') {
+    const ipCounts = new Map();
+    const fpCounts = new Map();
+    result.forEach(row => {
+      const ips = [normalizeIpValue(row.client_ip), normalizeIpValue(row.webrtc_ip)].filter(Boolean);
+      new Set(ips).forEach(ip => ipCounts.set(ip, (ipCounts.get(ip) || 0) + 1));
+      const keys = [row.machine_key, row.device_key, row.fingerprint].map(v => String(v || '').trim()).filter(Boolean);
+      new Set(keys).forEach(k => fpCounts.set(k, (fpCounts.get(k) || 0) + 1));
+    });
+
+    result = result.filter(row => {
+      const ips = [normalizeIpValue(row.client_ip), normalizeIpValue(row.webrtc_ip)].filter(Boolean);
+      const keys = [row.machine_key, row.device_key, row.fingerprint].map(v => String(v || '').trim()).filter(Boolean);
+      return ips.some(ip => (ipCounts.get(ip) || 0) > 1) || keys.some(k => (fpCounts.get(k) || 0) > 1);
+    });
+
+    const getPrimaryAnyKey = (row) => {
+      const cIp = normalizeIpValue(row.client_ip);
+      if (cIp && (ipCounts.get(cIp) || 0) > 1) return `ip:${cIp}`;
+      const keys = [row.machine_key, row.device_key, row.fingerprint].map(v => String(v || '').trim()).filter(Boolean);
+      for (const k of keys) {
+        if ((fpCounts.get(k) || 0) > 1) return `fp:${k}`;
+      }
+      return 'unknown';
+    };
+
+    const groups = new Map();
+    result.forEach(row => {
+      const key = getPrimaryAnyKey(row);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    });
+
+    for (const groupOrders of groups.values()) {
+      groupOrders.sort((a, b) => getOrderTime(b) - getOrderTime(a));
+    }
+
+    const sortedGroups = Array.from(groups.entries()).sort(([, aOrders], [, bOrders]) => {
+      return getOrderTime(bOrders[0]) - getOrderTime(aOrders[0]);
+    });
+
+    let groupIndex = 0;
+    return sortedGroups.flatMap(([groupKey, groupOrders]) => {
+      const gIdx = groupIndex++;
+      return groupOrders.map((order, idx) => ({
+        ...order,
+        _dup_group_key: groupKey,
+        _dup_group_index: gIdx,
+        _dup_group_count: groupOrders.length,
+        _dup_is_first_in_group: idx === 0,
+        _dup_is_last_in_group: idx === groupOrders.length - 1
+      }));
+    });
+  }
+
+
 
   return [...result].sort((a, b) => getOrderTime(b) - getOrderTime(a));
 }
